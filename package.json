@@ -1,0 +1,66 @@
+{
+  "name": "latex-workbench",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Windows-first local LaTeX project manager",
+  "main": "out/main/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.web.config.ts --host 127.0.0.1",
+    "build": "electron-vite build",
+    "build:web": "vite build --config vite.web.config.ts",
+    "preview": "vite preview --config vite.web.config.ts --host 127.0.0.1",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "package:portable": "pnpm build && electron-builder --win portable"
+  },
+  "dependencies": {
+    "chokidar": "latest",
+    "diff": "latest",
+    "latex-utensils": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "zod": "latest",
+    "zustand": "latest"
+  },
+  "devDependencies": {
+    "@electron-toolkit/preload": "latest",
+    "@electron-toolkit/utils": "latest",
+    "@playwright/test": "latest",
+    "@types/diff": "latest",
+    "@types/node": "24.x",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "electron": "43.1.1",
+    "electron-builder": "latest",
+    "electron-vite": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  },
+  "build": {
+    "appId": "local.latex.workbench",
+    "productName": "LaTeX 项目管理器",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ]
+    }
+  },
+  "packageManager": "pnpm@11.9.0"
+}

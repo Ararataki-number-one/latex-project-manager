@@ -1,0 +1,212 @@
+package com.zqy.latexviewer.data
+
+import android.net.Uri
+import com.zqy.latexviewer.model.GitHubContent
+import com.zqy.latexviewer.model.GitHubContentKind
+import com.zqy.latexviewer.model.GitHubRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
+
+class GitHubApi {
+    suspend fun listRepositories(token: String): List<GitHubRepository> = withContext(Dispatchers.IO) {
+        require(token.isNotBlank()) { "查看私有仓库需要只读令牌" }
+        val repositories = mutableListOf<GitHubRepository>()
+        for (page in 1..MAX_REPOSITORY_PAGES) {
+            val url = "$API_ROOT/user/repos?visibility=all&affiliation=owner,collaborator,organization_member&sort=updated&direction=desc&per_page=100&page=$page"
+            val array = JSONArray(request(url, token, JSON_ACCEPT, MAX_JSON_BYTES))
+            for (index in 0 until array.length()) {
+                repositories += parseRepository(array.getJSONObject(index))
+            }
+            if (array.length() < 100) break
+        }
+        repositories.distinctBy { it.fullName }
+    }
+
+    suspend fun getRepository(reference: String, token: String?): GitHubRepository = withContext(Dispatchers.IO) {
+        val (owner, name) = parseReference(reference)
+        val url = "$API_ROOT/repos/${encode(owner)}/${encode(name)}"
+        parseRepository(JSONObject(request(url, token, JSON_ACCEPT, MAX_JSON_BYTES)))
+    }
+
+    suspend fun listContents(
+        repository: GitHubRepository,
+        path: String,
+        token: String?
+    ): List<GitHubContent> = withContext(Dispatchers.IO) {
+        val encodedPath = encodePath(path)
+        val suffix = if (encodedPath.isEmpty()) "" else "/$encodedPath"
+        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents$suffix?ref=${encode(repository.defaultBranch)}"
+        val payload = request(url, token, JSON_ACCEPT, MAX_JSON_BYTES)
+        val array = runCatching { JSONArray(payload) }.getOrElse {
+            val single = JSONObject(payload)
+            JSONArray().put(single)
+        }
+        buildList {
+            for (index in 0 until array.length()) {
+                add(parseContent(array.getJSONObject(index)))
+            }
+        }.sortedWith(
+            compareBy<GitHubContent> { it.kind != GitHubContentKind.DIRECTORY }
+                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+        )
+    }
+
+    suspend fun readTextFile(
+        repository: GitHubRepository,
+        item: GitHubContent,
+        token: String?
+    ): String = withContext(Dispatchers.IO) {
+        require(item.kind == GitHubContentKind.FILE) { "只能预览文件" }
+        require(item.size <= MAX_INLINE_FILE_BYTES) { "文件超过 1.5 MB，请在 GitHub 中查看" }
+        require(isInlineText(item.name)) { "该文件不是可直接阅读的文本格式" }
+        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
+        val bytes = requestBytes(url, token, RAW_ACCEPT, MAX_INLINE_FILE_BYTES.toInt() + 1)
+        if (bytes.size > MAX_INLINE_FILE_BYTES || bytes.any { it == 0.toByte() }) {
+            throw GitHubApiException("该文件不是可直接阅读的文本，或文件过大")
+        }
+        bytes.toString(Charsets.UTF_8)
+    }
+
+    fun isInlineText(fileName: String): Boolean {
+        val lower = fileName.lowercase()
+        if (lower in PLAIN_TEXT_NAMES) return true
+        val extension = lower.substringAfterLast('.', "")
+        return extension in TEXT_EXTENSIONS
+    }
+
+    private fun parseRepository(value: JSONObject): GitHubRepository {
+        val owner = value.getJSONObject("owner").getString("login")
+        return GitHubRepository(
+            name = value.getString("name"),
+            fullName = value.getString("full_name"),
+            owner = owner,
+            description = value.optString("description").takeIf { it.isNotBlank() && it != "null" },
+            isPrivate = value.optBoolean("private"),
+            defaultBranch = value.optString("default_branch", "main"),
+            updatedAt = value.optString("updated_at"),
+            htmlUrl = value.optString("html_url", "https://github.com/${value.getString("full_name")}"),
+            sizeKb = value.optLong("size")
+        )
+    }
+
+    private fun parseContent(value: JSONObject): GitHubContent {
+        val kind = when {
+            !value.isNull("submodule_git_url") -> GitHubContentKind.SUBMODULE
+            value.optString("type") == "dir" -> GitHubContentKind.DIRECTORY
+            value.optString("type") == "file" -> GitHubContentKind.FILE
+            value.optString("type") == "symlink" -> GitHubContentKind.SYMLINK
+            else -> GitHubContentKind.UNKNOWN
+        }
+        return GitHubContent(
+            name = value.getString("name"),
+            path = value.getString("path"),
+            kind = kind,
+            size = value.optLong("size"),
+            sha = value.optString("sha"),
+            htmlUrl = value.optString("html_url").takeIf { it.isNotBlank() && it != "null" },
+            downloadUrl = value.optString("download_url").takeIf { it.isNotBlank() && it != "null" }
+        )
+    }
+
+    private fun request(url: String, token: String?, accept: String, maxBytes: Int): String {
+        return requestBytes(url, token, accept, maxBytes).toString(Charsets.UTF_8)
+    }
+
+    private fun requestBytes(url: String, token: String?, accept: String, maxBytes: Int): ByteArray {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            setRequestProperty("Accept", accept)
+            setRequestProperty("X-GitHub-Api-Version", API_VERSION)
+            setRequestProperty("User-Agent", "LaTeX-Project-Viewer-Android")
+            token?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                setRequestProperty("Authorization", "Bearer $it")
+            }
+        }
+        return try {
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val bytes = stream?.use { readLimited(it, maxBytes) } ?: ByteArray(0)
+            if (status !in 200..299) {
+                throw GitHubApiException(errorMessage(status, bytes.toString(Charsets.UTF_8)))
+            }
+            bytes
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
+        val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
+        val buffer = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            total += read
+            if (total > maxBytes) throw GitHubApiException("GitHub 返回的数据过大，无法在手机中直接显示")
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
+    }
+
+    private fun errorMessage(status: Int, body: String): String {
+        val detail = runCatching { JSONObject(body).optString("message") }.getOrNull()
+        return when (status) {
+            401 -> "GitHub 令牌无效或已经过期"
+            403 -> if (detail?.contains("rate limit", ignoreCase = true) == true) {
+                "GitHub 请求次数已达上限，请稍后再试"
+            } else {
+                "当前令牌没有读取这个仓库的权限"
+            }
+            404 -> "没有找到仓库或文件，私有仓库请检查令牌权限"
+            409 -> "这个仓库目前是空的"
+            else -> detail?.takeIf { it.isNotBlank() } ?: "GitHub 请求失败（$status）"
+        }
+    }
+
+    private fun parseReference(reference: String): Pair<String, String> {
+        val parts = reference.trim().removePrefix("https://github.com/").trim('/').split('/')
+        require(parts.size == 2 && parts.all { REPOSITORY_PART.matches(it) }) {
+            "仓库地址应写成 owner/repository"
+        }
+        return parts[0] to parts[1].removeSuffix(".git")
+    }
+
+    private fun encode(value: String): String = Uri.encode(value)
+
+    private fun encodePath(path: String): String = path
+        .split('/')
+        .filter { it.isNotEmpty() }
+        .joinToString("/") { encode(it) }
+
+    private companion object {
+        const val API_ROOT = "https://api.github.com"
+        const val API_VERSION = "2026-03-10"
+        const val JSON_ACCEPT = "application/vnd.github+json"
+        const val RAW_ACCEPT = "application/vnd.github.raw+json"
+        const val CONNECT_TIMEOUT_MS = 15_000
+        const val READ_TIMEOUT_MS = 30_000
+        const val MAX_JSON_BYTES = 5 * 1024 * 1024
+        const val MAX_INLINE_FILE_BYTES = 1_500_000
+        const val MAX_REPOSITORY_PAGES = 10
+        val REPOSITORY_PART = Regex("[A-Za-z0-9_.-]+")
+        val PLAIN_TEXT_NAMES = setOf("readme", "license", "makefile", "latexmkrc", ".gitignore", ".gitattributes")
+        val TEXT_EXTENSIONS = setOf(
+            "tex", "bib", "cls", "sty", "bst", "bbx", "cbx", "lbx", "dtx", "ins",
+            "md", "mdx", "txt", "rst", "adoc", "json", "jsonc", "yaml", "yml", "toml", "xml",
+            "csv", "tsv", "ini", "cfg", "conf", "properties", "gradle", "kts", "kt", "java",
+            "c", "h", "cpp", "hpp", "py", "r", "m", "js", "jsx", "ts", "tsx", "css", "scss",
+            "html", "htm", "sh", "ps1", "bat", "cmd", "sql", "log"
+        )
+    }
+}
+
+class GitHubApiException(message: String) : Exception(message)
