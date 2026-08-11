@@ -9,7 +9,7 @@
 - 不登录时可以直接输入 `owner/repository` 或完整 GitHub 地址添加公开仓库。
 - 浏览仓库目录和默认分支。
 - 使用内置代码查看器阅读 `.tex`、`.bib`、`.cls`、`.sty`、Markdown、纯文本和常见源码文件。
-- 使用 Android 原生 PDF 渲染器在应用内分页阅读 PDF。
+- 使用 Android 原生 PDF 渲染器在应用内分页阅读 PDF；Git LFS 文件通过 GitHub media 地址取得正文，不会把指针文件误当成 PDF。
 - 每个普通文件都能单独下载，每个仓库都能整体下载为 ZIP。
 - 普通下载默认保存到 `内部存储/Download/LaTeX项目`；下载完成后显示文件位置，并提供“现在打开”。
 - 自动检查公开 GitHub Release；可选择自动下载 APK，大小与 SHA-256 校验通过后再交给 Android 安装器。
