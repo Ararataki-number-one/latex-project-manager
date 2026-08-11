@@ -13,12 +13,15 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 35
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - name: Use canonical runner temp directory
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
