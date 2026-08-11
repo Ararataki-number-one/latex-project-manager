@@ -44,6 +44,7 @@ class DownloadStore(private val context: Context) {
         temporary.delete()
         try {
             FileOutputStream(temporary).use { writer(it) }
+            validatePdf(temporary)
             if (destination.exists() && !destination.delete()) {
                 throw IllegalStateException("无法替换 PDF 预览缓存")
             }
@@ -243,6 +244,17 @@ class DownloadStore(private val context: Context) {
         }
         val actual = digest.digest().joinToString("") { "%02x".format(it) }
         if (actual != normalized) throw IllegalStateException("更新包 SHA-256 校验失败，请重新下载")
+    }
+
+    private fun validatePdf(file: File) {
+        val probe = ByteArray(1024)
+        val read = file.inputStream().use { it.read(probe) }.coerceAtLeast(0)
+        val header = String(probe, 0, read, Charsets.US_ASCII)
+        if ("%PDF-" in header) return
+        if (header.startsWith("version https://git-lfs.github.com/spec/v1")) {
+            throw IllegalStateException("GitHub 只返回了 Git LFS 指针，未取得 PDF 正文，请刷新后重试")
+        }
+        throw IllegalStateException("下载内容不是有效的 PDF 文件")
     }
 
     private companion object {

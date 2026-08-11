@@ -117,7 +117,7 @@ internal fun PdfPreviewScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        if (handle == null) "无法读取 PDF" else "${handle.renderer.pageCount} 页 · 内置查看器",
+                        if (handle == null) "PDF 读取失败" else "${handle.renderer.pageCount} 页 · 内置查看器",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -141,7 +141,7 @@ internal fun PdfPreviewScreen(
                     Text("PDF 打开失败", fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(5.dp))
                     Text(
-                        handleResult.exceptionOrNull()?.message ?: "文件可能已损坏或使用了不受支持的格式。",
+                        "Android 内置解析器无法读取此文件。文件可能尚未完整下载、已损坏或经过加密，请刷新后重试。",
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
                 }

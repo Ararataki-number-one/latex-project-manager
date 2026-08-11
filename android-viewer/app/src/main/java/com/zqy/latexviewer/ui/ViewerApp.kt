@@ -628,70 +628,90 @@ private fun RepositoryCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(
-                modifier = Modifier.size(46.dp),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(23.dp))
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Surface(
+                    modifier = Modifier.size(46.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(23.dp))
+                    }
                 }
-            }
-            Spacer(Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(13.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         repository.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    PrivacyPill(repository.isPrivate)
-                }
-                Text(
-                    repository.owner,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                repository.description?.let {
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        it,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            repository.owner,
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        PrivacyPill(repository.isPrivate)
+                    }
                 }
-                Spacer(Modifier.height(8.dp))
+            }
+            repository.description?.let {
+                Spacer(Modifier.height(11.dp))
                 Text(
-                    "${formatBytes(repository.sizeKb * 1024)} · 更新于 ${shortDate(repository.updatedAt)}",
+                    it,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(Modifier.width(8.dp))
-            IconButton(onClick = onDownload) {
-                Icon(
-                    Icons.Outlined.Download,
-                    contentDescription = "下载 ${repository.name} 整个项目 ZIP",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Spacer(Modifier.height(11.dp))
+            Text(
+                "${formatBytes(repository.sizeKb * 1024)} · 更新于 ${shortDate(repository.updatedAt)}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                TextButton(onClick = onClick, modifier = Modifier.weight(1f)) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(19.dp))
+                        Spacer(Modifier.height(3.dp))
+                        Text("打开", maxLines = 1, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                TextButton(onClick = onDownload, modifier = Modifier.weight(1f)) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(19.dp))
+                        Spacer(Modifier.height(3.dp))
+                        Text("下载 ZIP", maxLines = 1, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                TextButton(onClick = onRemove, modifier = Modifier.weight(1f)) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(19.dp))
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "移除",
+                            maxLines = 1,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
-            IconButton(onClick = onRemove) {
-                Icon(
-                    Icons.Outlined.DeleteOutline,
-                    contentDescription = "从手机移除 ${repository.name}",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -829,7 +849,7 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() ->
                 Text(
                     when {
                         isFolder -> "文件夹"
-                        isPdf -> "${formatBytes(item.size)} · 内置 PDF 查看器"
+                        isPdf -> "PDF · 内置 PDF 查看器"
                         isText && item.size <= 1_500_000 -> "${formatBytes(item.size)} · 可直接阅读"
                         else -> "${formatBytes(item.size)} · 在 GitHub 中查看"
                     },

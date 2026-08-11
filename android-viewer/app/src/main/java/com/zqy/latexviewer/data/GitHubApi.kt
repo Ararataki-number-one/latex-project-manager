@@ -83,8 +83,15 @@ class GitHubApi {
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         require(item.kind == GitHubContentKind.FILE) { "只能下载文件" }
-        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
-        streamRequest(url, token, RAW_ACCEPT, output, onProgress)
+        val apiUrl = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
+        val directUrl = trustedGitHubDownloadUrl(item.downloadUrl)
+        streamRequest(
+            directUrl ?: apiUrl,
+            token,
+            if (directUrl == null) RAW_ACCEPT else BINARY_ACCEPT,
+            output,
+            onProgress
+        )
     }
 
     suspend fun downloadRepositoryArchive(
@@ -142,6 +149,12 @@ class GitHubApi {
         if (lower in PLAIN_TEXT_NAMES) return true
         val extension = lower.substringAfterLast('.', "")
         return extension in TEXT_EXTENSIONS
+    }
+
+    private fun trustedGitHubDownloadUrl(value: String?): String? {
+        val parsed = runCatching { URL(value ?: return null) }.getOrNull() ?: return null
+        if (parsed.protocol != "https") return null
+        return value.takeIf { parsed.host.lowercase() in GITHUB_DOWNLOAD_HOSTS }
     }
 
     private fun parseRepository(value: JSONObject): GitHubRepository {
@@ -327,6 +340,10 @@ class GitHubApi {
             "csv", "tsv", "ini", "cfg", "conf", "properties", "gradle", "kts", "kt", "java",
             "c", "h", "cpp", "hpp", "py", "r", "m", "js", "jsx", "ts", "tsx", "css", "scss",
             "html", "htm", "sh", "ps1", "bat", "cmd", "sql", "log"
+        )
+        val GITHUB_DOWNLOAD_HOSTS = setOf(
+            "media.githubusercontent.com",
+            "raw.githubusercontent.com"
         )
     }
 }
