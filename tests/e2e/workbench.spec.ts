@@ -69,6 +69,7 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
   }
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
+  await expect(initialRow.getByRole("button", { name: `更多操作 ${probability}` })).toBeFocused();
 
   await initialRow.getByRole("button", { name: probability, exact: true }).click();
   await expect(page.getByRole("status")).toContainText(/打开.*文件夹/);
@@ -215,8 +216,26 @@ test("390px 下项目库和管理页都没有横向溢出", async ({ page }) => 
   if (await openSidebar.isVisible().catch(() => false)) {
     await openSidebar.click();
     await expectNoHorizontalOverflow(page);
-    await page.getByRole("button", { name: "收起侧栏" }).click();
+    await page.getByRole("navigation", { name: "应用导航" }).getByRole("button", { name: "同步中心" }).click();
+    await expect(page.locator(".app-shell")).toHaveClass(/nav-closed/);
+    await expect(page.getByRole("heading", { name: "同步中心" })).toBeVisible();
+    await page.getByRole("button", { name: "打开侧栏" }).click();
+    await page.getByRole("navigation", { name: "资料库导航" }).getByRole("button", { name: /^项目库/ }).click();
+    await expect(page.getByRole("table", { name: "项目列表" })).toBeVisible();
   }
+
+  const menuTrigger = projectRow(page, probability).getByRole("button", { name: `更多操作 ${probability}` });
+  await menuTrigger.click();
+  const mobileMenu = page.getByRole("dialog", { name: `项目操作 ${probability}` });
+  await expect(mobileMenu).toBeVisible();
+  await expect(page.getByRole("button", { name: `关闭项目操作 ${probability}` }).first()).toBeVisible();
+  const menuBox = await mobileMenu.boundingBox();
+  expect(menuBox).not.toBeNull();
+  expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(390);
+  await page.keyboard.press("Escape");
+  await expect(mobileMenu).toBeHidden();
+  await expect(menuTrigger).toBeFocused();
 
   await projectRow(page, probability).getByRole("button", { name: `管理项目 ${probability}` }).click();
   await expect(page.locator(".project-page")).toBeVisible();

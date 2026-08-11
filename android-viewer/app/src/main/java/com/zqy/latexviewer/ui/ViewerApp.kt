@@ -895,32 +895,33 @@ private fun RepositoryCard(
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
-                    modifier = Modifier.size(46.dp),
-                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.size(42.dp),
+                    shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(23.dp))
+                        Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(21.dp))
                     }
                 }
-                Spacer(Modifier.width(13.dp))
+                Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         repository.name,
-                        style = MaterialTheme.typography.titleLarge,
+                        fontSize = 18.sp,
+                        lineHeight = 23.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(3.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             repository.owner,
@@ -934,31 +935,32 @@ private fun RepositoryCard(
                         PrivacyPill(repository.isPrivate)
                     }
                 }
+                Spacer(Modifier.width(6.dp))
+                Icon(
+                    Icons.Outlined.ChevronRight,
+                    contentDescription = "浏览 ${repository.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
             }
             repository.description?.let {
-                Spacer(Modifier.height(11.dp))
+                Spacer(Modifier.height(9.dp))
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(Modifier.height(11.dp))
-            Text(
-                "${formatBytes(repository.sizeKb * 1024)} · 更新于 ${shortDate(repository.updatedAt)}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium
-            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 11.dp),
+                    .padding(top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "点击卡片浏览项目",
+                    "${formatBytes(repository.sizeKb * 1024)} · ${shortDate(repository.updatedAt)} 更新",
                     modifier = Modifier.weight(1f),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium

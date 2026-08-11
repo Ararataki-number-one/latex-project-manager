@@ -136,6 +136,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [candidates, setCandidates] = useState<ScanCandidate[]>([]);
   const [scanning, setScanning] = useState(false);
   const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
   const [tagDraft, setTagDraft] = useState("");
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [copyProject, setCopyProject] = useState<ProjectSummary | null>(null);
@@ -164,16 +165,37 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
     if (!menuProjectId) return;
     const closeOnPointerDown = (event: MouseEvent) => {
       if (!(event.target instanceof Element)) return;
-      if (!event.target.closest(".project-menu, [data-project-menu-trigger]")) setMenuProjectId(null);
+      if (!event.target.closest(".project-menu, .project-menu-backdrop, [data-project-menu-trigger]")) closeProjectMenu(false);
     };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuProjectId(null);
+    const handleMenuKeyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeProjectMenu(true);
+        return;
+      }
+      if (event.key === "Tab") {
+        const menu = document.getElementById(`project-menu-${menuProjectId}`);
+        const focusable = Array.from(menu?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])') ?? []);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !menu?.contains(document.activeElement))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
     };
+    const closeOnResize = () => closeProjectMenu(false);
     document.addEventListener("mousedown", closeOnPointerDown);
-    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("keydown", handleMenuKeyboard);
+    window.addEventListener("resize", closeOnResize);
     return () => {
       document.removeEventListener("mousedown", closeOnPointerDown);
-      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("keydown", handleMenuKeyboard);
+      window.removeEventListener("resize", closeOnResize);
     };
   }, [menuProjectId]);
 
@@ -438,10 +460,35 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
     onNotify(failedIds.length ? `已${action} ${successCount} 个项目，${failedIds.length} 个项目更新失败` : `已${action} ${successCount} 个项目${patch.trashed ? "；磁盘文件未删除" : ""}`);
   }
 
-  function openProjectMenu(project: ProjectSummary) {
+  function openProjectMenu(project: ProjectSummary, anchor: HTMLElement) {
     const nextId = menuProjectId === project.id ? null : project.id;
     setMenuProjectId(nextId);
     setTagDraft(nextId ? project.tags.join(", ") : "");
+    if (nextId) {
+      if (window.innerWidth > 760) {
+        const rect = anchor.getBoundingClientRect();
+        const maxHeight = Math.min(620, window.innerHeight - 24);
+        setMenuPosition({
+          top: Math.max(12, Math.min(rect.bottom + 8, window.innerHeight - maxHeight - 12)),
+          right: Math.max(12, window.innerWidth - rect.right),
+          maxHeight
+        });
+      } else {
+        setMenuPosition(null);
+      }
+      requestAnimationFrame(() => document.querySelector<HTMLElement>(`#project-menu-${project.id} .project-menu-close`)?.focus());
+    } else {
+      setMenuPosition(null);
+    }
+  }
+
+  function closeProjectMenu(restoreFocus: boolean) {
+    const projectId = menuProjectId;
+    setMenuProjectId(null);
+    setMenuPosition(null);
+    if (restoreFocus && projectId) {
+      requestAnimationFrame(() => document.getElementById(`project-menu-trigger-${projectId}`)?.focus());
+    }
   }
 
   function saveTags(project: ProjectSummary) {
@@ -645,33 +692,52 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
                   <>
                     <button className="button secondary project-manage-button" aria-label={`管理项目 ${project.name}`} onClick={() => onManage(project)} disabled={!project.pathAvailable}>管理</button>
                     <IconButton
+                      id={`project-menu-trigger-${project.id}`}
                       label={`更多操作 ${project.name}`}
                       aria-expanded={menuProjectId === project.id}
                       aria-haspopup="dialog"
                       aria-controls={`project-menu-${project.id}`}
                       data-project-menu-trigger
-                      onClick={() => openProjectMenu(project)}
+                      onClick={(event) => openProjectMenu(project, event.currentTarget)}
                     ><MoreHorizontal size={18} /></IconButton>
                   </>
                 )}
               </div>
               {menuProjectId === project.id && (
-                <div id={`project-menu-${project.id}`} className="project-menu" role="dialog" aria-label={`项目操作 ${project.name}`} onClick={(event) => event.stopPropagation()}>
-                  <label><span><Tags size={14} />标签</span><input value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveTags(project)} placeholder="用逗号分隔" /></label>
-                  <button aria-label={`保存标签 ${project.name}`} onClick={() => saveTags(project)}><Check size={15} />保存标签</button>
-                  <button aria-label={`打开项目文件夹 ${project.name}`} onClick={() => { setMenuProjectId(null); void openProjectFolder(project); }} disabled={!project.pathAvailable}><FolderOpen size={15} />打开项目文件夹</button>
-                  <button aria-label={`在 VS Code 中打开 ${project.name}`} onClick={() => { setMenuProjectId(null); void openProjectInVsCode(project); }} disabled={!project.pathAvailable}><Code2 size={15} />在 VS Code 中打开</button>
-                  <button aria-label={`打开最新 PDF ${project.name}`} onClick={() => { setMenuProjectId(null); void openLatestPdf(project); }} disabled={!project.pathAvailable || (!isDemo && pdfAvailability[project.id] !== true)}><FileDown size={15} />打开最新 PDF</button>
-                  <button aria-label={`复制项目 ${project.name}`} onClick={() => beginCopy(project)} disabled={!project.pathAvailable}><Copy size={15} />复制项目</button>
-                  <button aria-label={`导出 ZIP ${project.name}`} onClick={() => { setMenuProjectId(null); void exportZip(project); }} disabled={!project.pathAvailable}><Download size={15} />导出源码 ZIP</button>
-                  <button aria-label={`导出 PDF ${project.name}`} onClick={() => { setMenuProjectId(null); void exportPdf(project); }} disabled={!isDemo && pdfAvailability[project.id] !== true}><FileDown size={15} />导出最新 PDF</button>
-                  <button aria-label={`清理临时文件 ${project.name}`} onClick={() => void beginTemporaryCleanup(project)} disabled={!project.pathAvailable}><Eraser size={15} />清理临时文件</button>
-                  <button aria-label={`${project.favorite ? "取消收藏" : "收藏项目"} ${project.name}`} onClick={() => { setMenuProjectId(null); void toggleFavorite(project); }}><Star size={15} fill={project.favorite ? "currentColor" : "none"} />{project.favorite ? "取消收藏" : "收藏项目"}</button>
-                  <button aria-label={`重新定位路径 ${project.name}`} onClick={() => void relinkProject(project)}><FolderInput size={15} />重新定位路径</button>
-                  <button aria-label={`保存为模板 ${project.name}`} onClick={() => void saveAsTemplate(project)}><CopyPlus size={15} />保存为模板</button>
-                  <button aria-label={`${project.archived ? "取消归档" : "归档项目"} ${project.name}`} onClick={() => { setMenuProjectId(null); void setArchived(project, !project.archived); }}>{project.archived ? <ArchiveRestore size={15} /> : <Archive size={15} />}{project.archived ? "取消归档" : "归档项目"}</button>
-                  <button aria-label={`从项目库移除 ${project.name}`} className="danger-text" onClick={() => { setMenuProjectId(null); void moveToTrash(project); }}><Trash2 size={15} />从项目库移除</button>
-                </div>
+                <>
+                  <button className="project-menu-backdrop" aria-hidden="true" tabIndex={-1} onClick={() => closeProjectMenu(true)} />
+                  <div id={`project-menu-${project.id}`} className="project-menu" role="dialog" aria-label={`项目操作 ${project.name}`} style={menuPosition ?? undefined} onClick={(event) => event.stopPropagation()}>
+                    <header className="project-menu-header">
+                      <div><small>项目操作</small><strong id={`project-menu-title-${project.id}`} title={project.name}>{project.name}</strong></div>
+                      <IconButton className="project-menu-close" label={`关闭项目操作 ${project.name}`} onClick={() => closeProjectMenu(true)}><X size={17} /></IconButton>
+                    </header>
+                    <div className="project-menu-tag-editor">
+                      <label><span><Tags size={14} />标签</span><input value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveTags(project)} placeholder="用逗号分隔" /></label>
+                      <button aria-label={`保存标签 ${project.name}`} onClick={() => saveTags(project)}><Check size={15} />保存</button>
+                    </div>
+                    <div className="project-menu-section">
+                      <p>打开</p>
+                      <button aria-label={`打开项目文件夹 ${project.name}`} onClick={() => { setMenuProjectId(null); void openProjectFolder(project); }} disabled={!project.pathAvailable}><FolderOpen size={15} />打开项目文件夹</button>
+                      <button aria-label={`在 VS Code 中打开 ${project.name}`} onClick={() => { setMenuProjectId(null); void openProjectInVsCode(project); }} disabled={!project.pathAvailable}><Code2 size={15} />在 VS Code 中打开</button>
+                      <button aria-label={`打开最新 PDF ${project.name}`} onClick={() => { setMenuProjectId(null); void openLatestPdf(project); }} disabled={!project.pathAvailable || (!isDemo && pdfAvailability[project.id] !== true)}><FileDown size={15} />打开最新 PDF</button>
+                    </div>
+                    <div className="project-menu-section">
+                      <p>导出与维护</p>
+                      <button aria-label={`复制项目 ${project.name}`} onClick={() => beginCopy(project)} disabled={!project.pathAvailable}><Copy size={15} />复制项目</button>
+                      <button aria-label={`导出 ZIP ${project.name}`} onClick={() => { setMenuProjectId(null); void exportZip(project); }} disabled={!project.pathAvailable}><Download size={15} />导出源码 ZIP</button>
+                      <button aria-label={`导出 PDF ${project.name}`} onClick={() => { setMenuProjectId(null); void exportPdf(project); }} disabled={!isDemo && pdfAvailability[project.id] !== true}><FileDown size={15} />导出最新 PDF</button>
+                      <button aria-label={`清理临时文件 ${project.name}`} onClick={() => void beginTemporaryCleanup(project)} disabled={!project.pathAvailable}><Eraser size={15} />清理临时文件</button>
+                    </div>
+                    <div className="project-menu-section">
+                      <p>项目库</p>
+                      <button aria-label={`${project.favorite ? "取消收藏" : "收藏项目"} ${project.name}`} onClick={() => { setMenuProjectId(null); void toggleFavorite(project); }}><Star size={15} fill={project.favorite ? "currentColor" : "none"} />{project.favorite ? "取消收藏" : "收藏项目"}</button>
+                      <button aria-label={`重新定位路径 ${project.name}`} onClick={() => void relinkProject(project)}><FolderInput size={15} />重新定位路径</button>
+                      <button aria-label={`保存为模板 ${project.name}`} onClick={() => void saveAsTemplate(project)}><CopyPlus size={15} />保存为模板</button>
+                      <button aria-label={`${project.archived ? "取消归档" : "归档项目"} ${project.name}`} onClick={() => { setMenuProjectId(null); void setArchived(project, !project.archived); }}>{project.archived ? <ArchiveRestore size={15} /> : <Archive size={15} />}{project.archived ? "取消归档" : "归档项目"}</button>
+                      <button aria-label={`从项目库移除 ${project.name}`} className="danger-text" onClick={() => { setMenuProjectId(null); void moveToTrash(project); }}><Trash2 size={15} />从项目库移除</button>
+                    </div>
+                  </div>
+                </>
               )}
             </article>
           ))}
@@ -1072,6 +1138,10 @@ export default function App() {
   const [showOnboardingHint, setShowOnboardingHint] = useState(false);
   const [openImportNonce, setOpenImportNonce] = useState(0);
 
+  function closeCompactNavigation() {
+    if (window.matchMedia("(max-width: 780px)").matches) setNavOpen(false);
+  }
+
   async function refreshProjects() {
     const items = await runtime.api.library.list();
     setProjects(items);
@@ -1089,6 +1159,13 @@ export default function App() {
       })
       .catch((error) => setToast(error instanceof Error ? error.message : "无法读取客户端设置"))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    const compact = window.matchMedia("(max-width: 780px)");
+    const handleBreakpoint = (event: MediaQueryListEvent) => setNavOpen(!event.matches);
+    compact.addEventListener("change", handleBreakpoint);
+    return () => compact.removeEventListener("change", handleBreakpoint);
   }, []);
 
   async function completeOnboarding(openImport: boolean) {
@@ -1130,6 +1207,7 @@ export default function App() {
     setSelected(null);
     setSettingsOpen(false);
     setSyncCenterOpen(false);
+    closeCompactNavigation();
     void refreshProjects().catch((error) => {
       setToast(error instanceof Error ? error.message : "无法刷新项目库");
     });
@@ -1170,7 +1248,7 @@ export default function App() {
                 aria-label={`筛选标签：${tag}`}
                 aria-pressed={!selected && !settingsOpen && activeTag === tag}
                 key={tag}
-                onClick={() => { setActiveTag(tag); setFilter("all"); setSelected(null); setSettingsOpen(false); setSyncCenterOpen(false); }}
+                onClick={() => { setActiveTag(tag); setFilter("all"); setSelected(null); setSettingsOpen(false); setSyncCenterOpen(false); closeCompactNavigation(); }}
               >
                 <span className="tag-color" style={{ backgroundColor: TAG_COLORS[index % TAG_COLORS.length] }} /><span>{tag}</span><small>{projects.filter((project) => !project.archived && !project.trashed && project.tags.includes(tag)).length}</small>
               </button>
@@ -1179,8 +1257,8 @@ export default function App() {
         </section>
         <div className="sidebar-spacer" />
         <nav className="sidebar-settings-nav" aria-label="应用导航">
-          <button className={syncCenterOpen ? "active" : ""} aria-current={syncCenterOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); }}><Cloud size={18} /><span>同步中心</span></button>
-          <button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSyncCenterOpen(false); setSettingsOpen(true); }}><Settings2 size={18} /><span>设置</span></button>
+          <button className={syncCenterOpen ? "active" : ""} aria-current={syncCenterOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); closeCompactNavigation(); }}><Cloud size={18} /><span>同步中心</span></button>
+          <button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSyncCenterOpen(false); setSettingsOpen(true); closeCompactNavigation(); }}><Settings2 size={18} /><span>设置</span></button>
         </nav>
         <div className="toolchain-card">
           <span className="toolchain-indicator ready" />
