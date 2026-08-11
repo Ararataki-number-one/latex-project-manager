@@ -33,6 +33,7 @@ interface ProjectViewProps {
   api: WorkbenchApi;
   project: ProjectSummary;
   isDemo: boolean;
+  initialTab?: "overview" | "github";
   onBack: () => void;
   onNotify: (message: string) => void;
 }
@@ -41,9 +42,9 @@ function IconButton({ label, children, className = "", ...props }: React.ButtonH
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}>{children}</button>;
 }
 
-export function ProjectView({ api, project, isDemo, onBack, onNotify }: ProjectViewProps) {
+export function ProjectView({ api, project, isDemo, initialTab = "overview", onBack, onNotify }: ProjectViewProps) {
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
-  const [activeTab, setActiveTab] = useState<ProjectTab>("overview");
+  const [activeTab, setActiveTab] = useState<ProjectTab>(initialTab);
   const [targetId, setTargetId] = useState("");
   const [profileId, setProfileId] = useState("");
   const [migrationOnly, setMigrationOnly] = useState(false);
@@ -179,16 +180,16 @@ export function ProjectView({ api, project, isDemo, onBack, onNotify }: ProjectV
     return <div className="project-loading"><LoaderCircle size={22} className="spin" />正在读取项目结构…</div>;
   }
 
-  const tabs: Array<{ id: ProjectTab; label: string; term: string; icon: typeof Code2 }> = migrationOnly
+  const tabs: Array<{ id: ProjectTab; label: string; icon: typeof Code2 }> = migrationOnly
     ? [
-        { id: "overview", label: "项目介绍", term: "About", icon: BookOpen },
-        { id: "references", label: "原始文稿", term: "References", icon: Files },
-        { id: "github", label: "GitHub", term: "同步 · Sync", icon: GitFork }
+        { id: "overview", label: "项目介绍", icon: BookOpen },
+        { id: "references", label: "原始文稿", icon: Files },
+        { id: "github", label: "同步", icon: GitFork }
       ]
     : [
-        { id: "overview", label: "项目介绍", term: "About", icon: BookOpen },
-        { id: "references", label: "原始文稿", term: "References", icon: Files },
-        { id: "github", label: "GitHub", term: "同步 · Sync", icon: GitFork }
+        { id: "overview", label: "项目介绍", icon: BookOpen },
+        { id: "references", label: "原始文稿", icon: Files },
+        { id: "github", label: "同步", icon: GitFork }
       ];
 
   return (
@@ -197,18 +198,18 @@ export function ProjectView({ api, project, isDemo, onBack, onNotify }: ProjectV
         <IconButton label="返回项目库" className="back-button" onClick={onBack}><ArrowLeft size={19} /></IconButton>
         <div className="project-identity">
           <span className="project-avatar" aria-hidden="true"><FolderKanban size={21} /></span>
-          <div className="project-heading"><p className="eyebrow">{target.classConfig.name} · {target.engine}</p><h1>{project.name}</h1><p className="project-root" title={project.rootPath}>{project.rootPath}</p></div>
+          <div className="project-heading"><h1>{project.name}</h1><p className="project-root" title={project.rootPath}>{project.rootPath}</p><div className="project-heading-meta"><span>{manifest.targets.length} 个文档入口</span><span>{target.classConfig.name}</span><span>{target.engine === "auto" ? "自动检测引擎" : target.engine}</span></div></div>
         </div>
-        <div className="target-context">
-          <label><span>文档目标 · Target</span><select value={target.id} onChange={(event) => selectTarget(event.target.value)}>{manifest.targets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.entry}</option>)}</select></label>
-          <label><span>编译方案 · Profile</span><select value={profile.id} onChange={(event) => setProfileId(event.target.value)}>{target.profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <div className="project-header-actions">
+          <button className="button primary" onClick={() => void openProjectFolder()} disabled={!project.pathAvailable}><FolderOpen size={16} />打开文件夹</button>
+          <button className="button secondary" onClick={() => void openProjectInVsCode()} disabled={vsCodeStatus?.available === false}><Code2 size={16} />在 VS Code 中打开</button>
         </div>
       </header>
 
       <nav className="project-tabs" aria-label="项目页面" role="tablist">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          return <button role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span><small>{tab.term}</small></button>;
+          return <button role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
         })}
       </nav>
 
@@ -226,8 +227,7 @@ export function ProjectView({ api, project, isDemo, onBack, onNotify }: ProjectV
           toolchain={toolchain}
           vsCodeStatus={vsCodeStatus}
           onSelectTarget={selectTarget}
-          onOpenFolder={() => void openProjectFolder()}
-          onOpenProject={() => void openProjectInVsCode()}
+          onSelectProfile={setProfileId}
           onOpenEntry={() => void openFileInVsCode(target.entry)}
           onNotify={onNotify}
         />
@@ -249,8 +249,7 @@ interface ProjectIntroductionTabProps {
   toolchain: ToolchainInfo | null;
   vsCodeStatus: VsCodeStatusView | null;
   onSelectTarget: (id: string) => void;
-  onOpenFolder: () => void;
-  onOpenProject: () => void;
+  onSelectProfile: (id: string) => void;
   onOpenEntry: () => void;
   onNotify: (message: string) => void;
 }
@@ -266,8 +265,7 @@ function ProjectIntroductionTab({
   toolchain,
   vsCodeStatus,
   onSelectTarget,
-  onOpenFolder,
-  onOpenProject,
+  onSelectProfile,
   onOpenEntry,
   onNotify
 }: ProjectIntroductionTabProps) {
@@ -282,15 +280,12 @@ function ProjectIntroductionTab({
 
   return (
     <main className="overview-page introduction-page">
-      <header className="overview-heading introduction-heading">
-        <div className="overview-heading-copy">
-          <span className="overview-heading-icon" aria-hidden="true"><BookOpen size={21} /></span>
-          <div><p className="eyebrow">项目管理</p><h2>项目介绍</h2><p>{target.name} · {target.entry}</p></div>
-        </div>
-        <div className="overview-primary-actions">
-          <button className="button primary" onClick={onOpenFolder} disabled={!project.pathAvailable}><FolderOpen size={16} />打开项目文件夹</button>
-          <button className="button secondary" onClick={onOpenProject} disabled={vsCodeStatus?.available === false}><Code2 size={16} />在 {editorLabel} 中打开</button>
-          <button className="button secondary" onClick={onOpenEntry} disabled={vsCodeStatus?.available === false}><ExternalLink size={16} />打开主文件</button>
+      <header className="introduction-context-card">
+        <div className="introduction-context-copy"><span className="overview-heading-icon" aria-hidden="true"><BookOpen size={21} /></span><div><h2>项目介绍</h2><p>管理文档入口、主 PDF 和移动端成品。</p></div></div>
+        <div className="introduction-context-controls">
+          <label><span>当前文档入口</span><select value={target.id} onChange={(event) => onSelectTarget(event.target.value)}>{manifest.targets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.entry}</option>)}</select></label>
+          <label><span>当前方案</span><select value={profile.id} onChange={(event) => onSelectProfile(event.target.value)}>{target.profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <button className="button secondary" onClick={onOpenEntry} disabled={vsCodeStatus?.available === false}><ExternalLink size={16} />打开入口文件</button>
         </div>
       </header>
 

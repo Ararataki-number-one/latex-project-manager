@@ -68,6 +68,19 @@ class DownloadStore(private val context: Context) {
         }
     }
 
+    suspend fun findPdfPreview(cacheKey: String): File? = withContext(Dispatchers.IO) {
+        val fileName = cacheKey.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
+            .let { if (it.endsWith(".pdf", ignoreCase = true)) it else "$it.pdf" }
+        val candidate = File(pdfCacheDirectory(), fileName)
+        if (!candidate.isFile) return@withContext null
+        runCatching { validatePdf(candidate) }.getOrElse {
+            candidate.delete()
+            return@withContext null
+        }
+        candidate.setLastModified(System.currentTimeMillis())
+        candidate
+    }
+
     suspend fun pdfCacheBytes(): Long = withContext(Dispatchers.IO) {
         pdfCacheDirectory().listFiles()
             ?.filter { it.isFile && !it.name.endsWith(".part") }

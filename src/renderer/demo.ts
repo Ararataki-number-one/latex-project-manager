@@ -407,15 +407,15 @@ export function createWorkbench(): DemoWorkbench {
     { name: "随机图中文讲义.pdf", relativePath: "references/随机图中文讲义.pdf", size: 62_104_322, modifiedAt: "2026-07-28T13:15:00.000Z", kind: "pdf", lfsRecommended: true }
   ];
   let updateStatus: AppUpdateStatus = {
-    currentVersion: "0.5.0",
-    latestVersion: "0.5.0",
+    currentVersion: "0.6.0",
+    latestVersion: "0.6.0",
     autoCheck: true,
     autoDownload: true,
     state: "upToDate",
     githubCliAvailable: true,
     releaseUrl: "https://github.com/Ararataki-number-one/latex-project-manager/releases",
     checkedAt: new Date().toISOString(),
-    message: "当前已是最新版本 0.5.0。"
+    message: "当前已是最新版本 0.6.0。"
   };
 
   const api: WorkbenchApi = {

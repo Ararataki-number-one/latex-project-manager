@@ -31,6 +31,7 @@ await assertNoOverflow(desktop, "desktopLibrary");
 await desktop.screenshot({ path: "test-results/ui-library-desktop.png", fullPage: true });
 
 const probability = "概率方法笔记";
+await projectRow(desktop, probability).getByRole("button", { name: `更多操作 ${probability}` }).click();
 await projectRow(desktop, probability).getByRole("button", { name: `清理临时文件 ${probability}` }).click();
 await desktop.getByRole("dialog", { name: "清理临时文件" }).waitFor();
 await desktop.screenshot({ path: "test-results/ui-cleanup-dialog-desktop.png", fullPage: true });
@@ -40,7 +41,7 @@ await projectRow(desktop, probability).getByRole("button", { name: `管理项目
 await desktop.getByRole("heading", { name: "项目介绍" }).waitFor();
 await assertNoOverflow(desktop, "desktopIntroduction");
 await desktop.screenshot({ path: "test-results/ui-introduction-desktop.png", fullPage: true });
-await desktop.getByRole("tab", { name: /GitHub 同步/ }).click();
+await desktop.getByRole("tab", { name: "同步", exact: true }).click();
 await desktop.getByRole("heading", { name: "GitHub 同步" }).waitFor();
 await assertNoOverflow(desktop, "desktopGitHubSync");
 await desktop.screenshot({ path: "test-results/ui-github-sync-desktop.png", fullPage: true });

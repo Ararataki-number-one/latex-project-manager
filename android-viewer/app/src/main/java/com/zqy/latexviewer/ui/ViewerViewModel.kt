@@ -27,8 +27,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 enum class ViewerScreen {
+    HOME,
     CONNECT,
     REPOSITORIES,
+    DOWNLOADS,
     FILES,
     TEXT,
     PDF,
@@ -42,7 +44,7 @@ data class TransferUiState(
 )
 
 data class ViewerUiState(
-    val screen: ViewerScreen = ViewerScreen.REPOSITORIES,
+    val screen: ViewerScreen = ViewerScreen.HOME,
     val tokenStored: Boolean = false,
     val repositories: List<GitHubRepository> = emptyList(),
     val mobileIndexes: Map<String, MobileProjectIndex> = emptyMap(),
@@ -55,6 +57,7 @@ data class ViewerUiState(
     val document: TextDocument? = null,
     val pdfDocument: PdfDocument? = null,
     val completedDownload: DownloadedFile? = null,
+    val downloadedFiles: List<DownloadedFile> = emptyList(),
     val externalFile: DownloadedFile? = null,
     val loading: Boolean = false,
     val transfer: TransferUiState? = null,
@@ -82,7 +85,8 @@ class ViewerViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(initialState())
     val state: StateFlow<ViewerUiState> = _state.asStateFlow()
-    private var settingsReturnScreen = ViewerScreen.REPOSITORIES
+    private var settingsReturnScreen = ViewerScreen.HOME
+    private var viewerReturnScreen = ViewerScreen.HOME
 
     init {
         loadRepositories()
@@ -110,13 +114,25 @@ class ViewerViewModel(
         _state.update { it.copy(screen = ViewerScreen.CONNECT, error = null) }
     }
 
+    fun openHome() {
+        _state.update { it.copy(screen = ViewerScreen.HOME, currentRepository = null, currentPath = "", error = null) }
+    }
+
+    fun openProjects() {
+        _state.update { it.copy(screen = ViewerScreen.REPOSITORIES, currentRepository = null, currentPath = "", error = null) }
+    }
+
+    fun openDownloads() {
+        _state.update { it.copy(screen = ViewerScreen.DOWNLOADS, currentRepository = null, currentPath = "", error = null) }
+    }
+
     fun loadRepositories() {
         val token = tokenStore.read()
         val savedReferences = preferences.savedRepositoryReferences()
         if (savedReferences.isEmpty() && token.isNullOrBlank()) {
             _state.update {
                 it.copy(
-                    screen = ViewerScreen.REPOSITORIES,
+                    screen = rootScreenAfterRepositoryRefresh(it.screen),
                     repositories = emptyList(),
                     mobileIndexes = emptyMap(),
                     tokenStored = false,
@@ -143,7 +159,7 @@ class ViewerViewModel(
             }
             _state.update {
                 it.copy(
-                    screen = ViewerScreen.REPOSITORIES,
+                    screen = rootScreenAfterRepositoryRefresh(it.screen),
                     repositories = repositories.sortedByDescending(GitHubRepository::updatedAt),
                     tokenStored = tokenStore.hasToken(),
                     currentRepository = null,
@@ -174,9 +190,42 @@ class ViewerViewModel(
     }
 
     fun openMobilePdf(repository: GitHubRepository, output: MobilePdfOutput) {
-        launchTransfer("正在检查最新版 ${output.name}") {
-            val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
-            openPdfLatest(repository, latest, output.name)
+        if (_state.value.screen != ViewerScreen.PDF) viewerReturnScreen = _state.value.screen
+        val previous = preferences.readingProgress(repository.fullName, output.pdfPath)
+        viewModelScope.launch {
+            val cached = previous?.let {
+                downloadStore.findPdfPreview("${repository.owner}-${repository.name}-${it.sha}.pdf")
+            }
+            if (cached != null && previous != null) {
+                _state.update {
+                    it.copy(
+                        screen = ViewerScreen.PDF,
+                        document = null,
+                        pdfDocument = PdfDocument(
+                            name = output.name,
+                            path = output.pdfPath,
+                            htmlUrl = null,
+                            localPath = cached.absolutePath,
+                            repositoryFullName = repository.fullName,
+                            sha = previous.sha,
+                            initialPage = previous.pageIndex.coerceAtLeast(0)
+                        )
+                    )
+                }
+                showNotice("已打开离线缓存，正在后台检查最新版")
+                runCatching {
+                    val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
+                    if (latest.sha != previous.sha) {
+                        openPdfLatest(repository, latest, output.name)
+                        showNotice("发现新版本，已更新 ${output.name}")
+                    }
+                }.onFailure { showNotice("当前离线阅读；联网后可检查最新版") }
+            } else {
+                launchTransfer("正在下载 ${output.name}") {
+                    val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
+                    openPdfLatest(repository, latest, output.name)
+                }
+            }
         }
     }
 
@@ -198,6 +247,7 @@ class ViewerViewModel(
 
     fun openContent(item: GitHubContent) {
         val repository = _state.value.currentRepository ?: return
+        if (item.kind == GitHubContentKind.FILE) viewerReturnScreen = ViewerScreen.FILES
         when (item.kind) {
             GitHubContentKind.DIRECTORY -> launchRequest { openRepositoryContents(repository, item.path) }
             GitHubContentKind.FILE -> when {
@@ -226,7 +276,7 @@ class ViewerViewModel(
             val downloaded = downloadStore.savePublicDownload(latest.name, mimeTypeFor(latest.name)) { output ->
                 api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer)
             }
-            _state.update { it.copy(completedDownload = downloaded) }
+            recordDownload(downloaded)
         }
     }
 
@@ -236,7 +286,7 @@ class ViewerViewModel(
             val downloaded = downloadStore.savePublicDownload(fileName, "application/zip") { output ->
                 api.downloadRepositoryArchive(repository, tokenStore.read(), output, ::updateTransfer)
             }
-            _state.update { it.copy(completedDownload = downloaded) }
+            recordDownload(downloaded)
         }
     }
 
@@ -247,6 +297,11 @@ class ViewerViewModel(
     fun openCompletedDownload() {
         val downloaded = _state.value.completedDownload ?: return
         _state.update { it.copy(completedDownload = null) }
+        openDownloaded(downloaded)
+    }
+
+    fun openDownloaded(downloaded: DownloadedFile) {
+        viewerReturnScreen = _state.value.screen
         when {
             isPdfFile(downloaded.name) -> _state.update {
                 it.copy(
@@ -271,6 +326,15 @@ class ViewerViewModel(
                 }
             }
             else -> _state.update { it.copy(externalFile = downloaded) }
+        }
+    }
+
+    private fun recordDownload(downloaded: DownloadedFile) {
+        _state.update {
+            it.copy(
+                completedDownload = downloaded,
+                downloadedFiles = (listOf(downloaded) + it.downloadedFiles.filterNot { item -> item.contentUri == downloaded.contentUri }).take(30)
+            )
         }
     }
 
@@ -405,14 +469,14 @@ class ViewerViewModel(
         when (current.screen) {
             ViewerScreen.TEXT -> _state.update {
                 it.copy(
-                    screen = if (current.currentRepository != null) ViewerScreen.FILES else ViewerScreen.REPOSITORIES,
+                    screen = if (viewerReturnScreen == ViewerScreen.FILES && current.currentRepository == null) ViewerScreen.HOME else viewerReturnScreen,
                     document = null,
                     error = null
                 )
             }
             ViewerScreen.PDF -> _state.update {
                 it.copy(
-                    screen = if (current.currentRepository != null) ViewerScreen.FILES else ViewerScreen.REPOSITORIES,
+                    screen = if (viewerReturnScreen == ViewerScreen.FILES && current.currentRepository == null) ViewerScreen.HOME else viewerReturnScreen,
                     pdfDocument = null,
                     error = null
                 )
@@ -434,14 +498,15 @@ class ViewerViewModel(
             }
             ViewerScreen.SETTINGS -> _state.update { it.copy(screen = settingsReturnScreen, error = null) }
             ViewerScreen.CONNECT -> _state.update { it.copy(screen = ViewerScreen.REPOSITORIES, error = null) }
-            ViewerScreen.REPOSITORIES -> Unit
+            ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS -> Unit
         }
     }
 
     fun refresh() {
         val current = _state.value
         when (current.screen) {
-            ViewerScreen.REPOSITORIES -> loadRepositories()
+            ViewerScreen.HOME, ViewerScreen.REPOSITORIES -> loadRepositories()
+            ViewerScreen.DOWNLOADS -> Unit
             ViewerScreen.FILES -> current.currentRepository?.let { repository ->
                 launchRequest { openRepositoryContents(repository, current.currentPath) }
             }
@@ -474,6 +539,11 @@ class ViewerViewModel(
         _state.update { it.copy(tokenStored = false) }
         loadRepositories()
         showNotice("令牌已移除；公开项目仍保留在手机项目库中")
+    }
+
+    private fun rootScreenAfterRepositoryRefresh(screen: ViewerScreen): ViewerScreen = when (screen) {
+        ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS, ViewerScreen.SETTINGS -> screen
+        else -> ViewerScreen.HOME
     }
 
     fun updateRepositoryQuery(value: String) {

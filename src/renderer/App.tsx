@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
+  Cloud,
   Code2,
   CloudOff,
   Copy,
@@ -26,6 +27,8 @@ import {
   MoreHorizontal,
   LogIn,
   PanelLeftClose,
+  PauseCircle,
+  PlayCircle,
   Plus,
   RefreshCw,
   Search,
@@ -55,12 +58,6 @@ function IconButton({ label, children, className = "", ...props }: React.ButtonH
       {children}
     </button>
   );
-}
-
-function StatusDot({ pathAvailable, pdfAvailable }: { pathAvailable: boolean; pdfAvailable: boolean }) {
-  const value = !pathAvailable ? "failed" : pdfAvailable ? "success" : "idle";
-  const label = !pathAvailable ? "项目路径不可用" : pdfAvailable ? "已找到主 PDF" : "尚未找到主 PDF";
-  return <span className={`status-dot status-${value}`} title={label} aria-label={label} />;
 }
 
 function ProjectSyncBadge({ status }: { status?: GitHubSyncStatus }) {
@@ -162,6 +159,23 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   useEffect(() => {
     if (openImportNonce > 0) setImportOpen(true);
   }, [openImportNonce]);
+
+  useEffect(() => {
+    if (!menuProjectId) return;
+    const closeOnPointerDown = (event: MouseEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (!event.target.closest(".project-menu, [data-project-menu-trigger]")) setMenuProjectId(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuProjectId(null);
+    };
+    document.addEventListener("mousedown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuProjectId]);
 
   const visible = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -267,7 +281,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   }
 
   async function moveToTrash(project: ProjectSummary) {
-    if (await updateProject(project, { trashed: true })) onNotify(`已将「${project.name}」移入项目库回收站；磁盘文件未删除`);
+    if (await updateProject(project, { trashed: true })) onNotify(`已从项目库移除「${project.name}」；磁盘文件没有删除`);
   }
 
   async function restoreProject(project: ProjectSummary) {
@@ -420,7 +434,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
     onProjectsChange((current) => current.map((project) => updated.get(project.id) ?? project));
     setSelectedProjectIds(failedIds);
     const successCount = targets.length - failedIds.length;
-    const action = patch.trashed === false ? "恢复" : patch.trashed ? "移入项目库回收站" : "归档";
+    const action = patch.trashed === false ? "恢复" : patch.trashed ? "从项目库移除" : "归档";
     onNotify(failedIds.length ? `已${action} ${successCount} 个项目，${failedIds.length} 个项目更新失败` : `已${action} ${successCount} 个项目${patch.trashed ? "；磁盘文件未删除" : ""}`);
   }
 
@@ -547,8 +561,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
         <div className="page-heading">
           <span className="page-heading-icon" aria-hidden="true"><FolderKanban size={23} /></span>
           <div>
-            <p className="eyebrow">LaTeX 项目管理</p>
-            <h1>{filter === "favorites" ? "收藏项目" : filter === "recent" ? "最近使用" : filter === "archived" ? "已归档" : filter === "trashed" ? "回收站" : activeTag ? `标签：${activeTag}` : "你的项目"}</h1>
+            <h1>{filter === "favorites" ? "收藏项目" : filter === "recent" ? "最近使用" : filter === "archived" ? "已归档" : filter === "trashed" ? "已移除项目" : activeTag ? `标签：${activeTag}` : "你的项目"}</h1>
             <p className="muted">{visible.length} 个项目 · 文件只保存在这台电脑上</p>
           </div>
         </div>
@@ -569,7 +582,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
             <strong>已选 {selectedProjectIds.length} 项</strong>
             {filter === "trashed"
               ? <button className="button secondary" onClick={() => void updateSelected({ trashed: false })}><ArchiveRestore size={15} />恢复</button>
-              : <><button className="button secondary" onClick={() => void updateSelected({ archived: true })}><Archive size={15} />归档</button><button className="button secondary danger-text" onClick={() => void updateSelected({ trashed: true })}><Trash2 size={15} />移入回收站</button></>}
+              : <><button className="button secondary" onClick={() => void updateSelected({ archived: true })}><Archive size={15} />归档</button><button className="button secondary danger-text" onClick={() => void updateSelected({ trashed: true })}><Trash2 size={15} />从项目库移除</button></>}
           </div>
         )}
       </div>
@@ -586,7 +599,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
               />
             </span>
             <span role="columnheader">标题</span>
-            <span role="columnheader">文档</span>
+            <span role="columnheader">同步</span>
             <span role="columnheader">最近使用</span>
             <span role="columnheader" className="project-actions-heading">操作</span>
           </div>
@@ -610,23 +623,18 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
                 <span className="project-folder-icon" aria-hidden="true"><FolderKanban size={19} /></span>
                 <div className="project-copy">
                   <div className="project-title-line">
-                    <StatusDot pathAvailable={project.pathAvailable} pdfAvailable={isDemo ? ["success", "warning"].includes(project.lastBuildStatus ?? "") : pdfAvailability[project.id] === true} />
                     <button className="project-title-button" disabled={filter === "trashed"} onClick={(event) => { event.stopPropagation(); if (filter !== "trashed") void openProjectFolder(project); }}>{project.name}</button>
-                    <ProjectSyncBadge status={syncStatuses[project.id]} />
                     {project.favorite && <Star className="project-favorite-mark" size={14} fill="currentColor" aria-label="已收藏" />}
                     {!project.pathAvailable && <span className="badge danger">路径不可用</span>}
                   </div>
                   <p className="project-path" title={project.rootPath}>{project.rootPath}</p>
+                  <p className="project-inline-meta"><span>{project.targetCount} 个入口</span><span>{project.classNames.join(" · ") || "未识别文档类"}</span><span>{projectStorage[project.id] ? `${formatBytes(projectStorage[project.id].totalBytes)} · ${projectStorage[project.id].fileCount} 个文件` : "正在统计大小…"}</span>{(isDemo ? ["success", "warning"].includes(project.lastBuildStatus ?? "") : pdfAvailability[project.id] === true) && <span className="pdf-ready-label">主 PDF 可用</span>}</p>
                   <div className="tag-row">
                     {project.tags.map((tag) => <span className="tag" key={tag}>{tag}</span>)}
                   </div>
                 </div>
               </div>
-              <div role="cell" className="project-meta">
-                <strong>{project.targetCount} 个文档目标</strong>
-                <span>{project.classNames.join(" · ") || "未识别文档类"}</span>
-                <span>{projectStorage[project.id] ? `${formatBytes(projectStorage[project.id].totalBytes)} · ${projectStorage[project.id].fileCount} 个文件` : "正在统计大小…"}</span>
-              </div>
+              <div role="cell" className="project-sync-cell"><ProjectSyncBadge status={syncStatuses[project.id]} /></div>
               <div role="cell" className="project-time"><Clock3 size={14} /><span>{relativeTime(project.lastOpenedAt)}</span></div>
               <div role="cell" className="project-actions" onClick={(event) => event.stopPropagation()}>
                 {filter === "trashed" ? (
@@ -635,54 +643,54 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
                   </>
                 ) : (
                   <>
-                    <IconButton label={`管理项目 ${project.name}`} className="manage-action" onClick={() => onManage(project)} disabled={!project.pathAvailable}><Settings2 size={18} /></IconButton>
-                    <span className="action-divider" />
-                    <IconButton label={`复制项目 ${project.name}`} onClick={() => beginCopy(project)} disabled={!project.pathAvailable}><Copy size={18} /></IconButton>
-                    <IconButton label={`导出 ZIP ${project.name}`} className="compact-hide" onClick={() => void exportZip(project)} disabled={!project.pathAvailable}><Download size={18} /></IconButton>
-                    <IconButton label={`导出 PDF ${project.name}`} className="compact-hide" onClick={() => void exportPdf(project)} disabled={!project.pathAvailable || (!isDemo && pdfAvailability[project.id] !== true)}><FileDown size={18} /></IconButton>
-                    <IconButton label={`清理临时文件 ${project.name}`} className="compact-hide" onClick={() => void beginTemporaryCleanup(project)} disabled={!project.pathAvailable}><Eraser size={18} /></IconButton>
-                    <IconButton label={`${project.archived ? "取消归档" : "归档项目"} ${project.name}`} className="compact-hide" onClick={() => void setArchived(project, !project.archived)}>{project.archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}</IconButton>
-                    <IconButton label={`移入回收站 ${project.name}`} className="trash-action compact-hide" onClick={() => void moveToTrash(project)}><Trash2 size={18} /></IconButton>
-                    <IconButton label={`更多操作 ${project.name}`} onClick={() => openProjectMenu(project)}><MoreHorizontal size={18} /></IconButton>
+                    <button className="button secondary project-manage-button" aria-label={`管理项目 ${project.name}`} onClick={() => onManage(project)} disabled={!project.pathAvailable}>管理</button>
+                    <IconButton
+                      label={`更多操作 ${project.name}`}
+                      aria-expanded={menuProjectId === project.id}
+                      aria-haspopup="dialog"
+                      aria-controls={`project-menu-${project.id}`}
+                      data-project-menu-trigger
+                      onClick={() => openProjectMenu(project)}
+                    ><MoreHorizontal size={18} /></IconButton>
                   </>
                 )}
               </div>
               {menuProjectId === project.id && (
-                <div className="project-menu" onClick={(event) => event.stopPropagation()}>
+                <div id={`project-menu-${project.id}`} className="project-menu" role="dialog" aria-label={`项目操作 ${project.name}`} onClick={(event) => event.stopPropagation()}>
                   <label><span><Tags size={14} />标签</span><input value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveTags(project)} placeholder="用逗号分隔" /></label>
-                  <button onClick={() => saveTags(project)}><Check size={15} />保存标签</button>
-                  <button onClick={() => void openProjectFolder(project)} disabled={!project.pathAvailable}><FolderOpen size={15} />打开项目文件夹</button>
-                  <button onClick={() => void openProjectInVsCode(project)} disabled={!project.pathAvailable}><Code2 size={15} />在 VS Code 中打开</button>
-                  <button onClick={() => void openLatestPdf(project)} disabled={!project.pathAvailable || (!isDemo && pdfAvailability[project.id] !== true)}><FileDown size={15} />打开最新 PDF</button>
-                  <button onClick={() => void beginTemporaryCleanup(project)} disabled={!project.pathAvailable}><Eraser size={15} />清理临时文件</button>
-                  <button onClick={() => void toggleFavorite(project)}><Star size={15} fill={project.favorite ? "currentColor" : "none"} />{project.favorite ? "取消收藏" : "收藏项目"}</button>
-                  <button onClick={() => void relinkProject(project)}><FolderInput size={15} />重新定位路径</button>
-                  <button onClick={() => void saveAsTemplate(project)}><CopyPlus size={15} />保存为模板</button>
-                  <button className="mobile-menu-action" onClick={() => beginCopy(project)}><Copy size={15} />复制项目</button>
-                  <button className="mobile-menu-action" onClick={() => void exportZip(project)}><Download size={15} />导出源码 ZIP</button>
-                  <button className="mobile-menu-action" onClick={() => void exportPdf(project)} disabled={!isDemo && pdfAvailability[project.id] !== true}><FileDown size={15} />导出最新 PDF</button>
-                  <button className="mobile-menu-action" onClick={() => void setArchived(project, !project.archived)}>{project.archived ? <ArchiveRestore size={15} /> : <Archive size={15} />}{project.archived ? "取消归档" : "归档项目"}</button>
-                  <button className="mobile-menu-action danger-text" onClick={() => void moveToTrash(project)}><Trash2 size={15} />移入回收站</button>
+                  <button aria-label={`保存标签 ${project.name}`} onClick={() => saveTags(project)}><Check size={15} />保存标签</button>
+                  <button aria-label={`打开项目文件夹 ${project.name}`} onClick={() => { setMenuProjectId(null); void openProjectFolder(project); }} disabled={!project.pathAvailable}><FolderOpen size={15} />打开项目文件夹</button>
+                  <button aria-label={`在 VS Code 中打开 ${project.name}`} onClick={() => { setMenuProjectId(null); void openProjectInVsCode(project); }} disabled={!project.pathAvailable}><Code2 size={15} />在 VS Code 中打开</button>
+                  <button aria-label={`打开最新 PDF ${project.name}`} onClick={() => { setMenuProjectId(null); void openLatestPdf(project); }} disabled={!project.pathAvailable || (!isDemo && pdfAvailability[project.id] !== true)}><FileDown size={15} />打开最新 PDF</button>
+                  <button aria-label={`复制项目 ${project.name}`} onClick={() => beginCopy(project)} disabled={!project.pathAvailable}><Copy size={15} />复制项目</button>
+                  <button aria-label={`导出 ZIP ${project.name}`} onClick={() => { setMenuProjectId(null); void exportZip(project); }} disabled={!project.pathAvailable}><Download size={15} />导出源码 ZIP</button>
+                  <button aria-label={`导出 PDF ${project.name}`} onClick={() => { setMenuProjectId(null); void exportPdf(project); }} disabled={!isDemo && pdfAvailability[project.id] !== true}><FileDown size={15} />导出最新 PDF</button>
+                  <button aria-label={`清理临时文件 ${project.name}`} onClick={() => void beginTemporaryCleanup(project)} disabled={!project.pathAvailable}><Eraser size={15} />清理临时文件</button>
+                  <button aria-label={`${project.favorite ? "取消收藏" : "收藏项目"} ${project.name}`} onClick={() => { setMenuProjectId(null); void toggleFavorite(project); }}><Star size={15} fill={project.favorite ? "currentColor" : "none"} />{project.favorite ? "取消收藏" : "收藏项目"}</button>
+                  <button aria-label={`重新定位路径 ${project.name}`} onClick={() => void relinkProject(project)}><FolderInput size={15} />重新定位路径</button>
+                  <button aria-label={`保存为模板 ${project.name}`} onClick={() => void saveAsTemplate(project)}><CopyPlus size={15} />保存为模板</button>
+                  <button aria-label={`${project.archived ? "取消归档" : "归档项目"} ${project.name}`} onClick={() => { setMenuProjectId(null); void setArchived(project, !project.archived); }}>{project.archived ? <ArchiveRestore size={15} /> : <Archive size={15} />}{project.archived ? "取消归档" : "归档项目"}</button>
+                  <button aria-label={`从项目库移除 ${project.name}`} className="danger-text" onClick={() => { setMenuProjectId(null); void moveToTrash(project); }}><Trash2 size={15} />从项目库移除</button>
                 </div>
               )}
             </article>
           ))}
         </div>
       ) : (
-        <div className="empty-state"><Search size={28} /><h2>{filter === "trashed" ? "回收站为空" : "没有匹配的项目"}</h2><p>{filter === "trashed" ? "移入回收站的项目会显示在这里，真实文件仍留在原位置。" : "调整搜索词、标签或资料库范围。"}</p></div>
+        <div className="empty-state"><Search size={28} /><h2>{filter === "trashed" ? "没有已移除项目" : "没有匹配的项目"}</h2><p>{filter === "trashed" ? "从项目库移除只会删除本机索引，真实文件仍留在原位置。" : "调整搜索词、标签或资料库范围。"}</p></div>
       )}
 
       {copyProject && (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => !copying && setCopyProject(null)}>
           <section className="modal copy-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-title" onMouseDown={(event) => event.stopPropagation()}>
             <header className="modal-header">
-              <div><p className="eyebrow">本地项目副本 · Duplicate</p><h2 id="copy-title">复制项目</h2></div>
+              <div><h2 id="copy-title">复制项目</h2><p>创建独立的本地副本</p></div>
               <IconButton label="关闭" onClick={() => setCopyProject(null)} disabled={copying}><X size={18} /></IconButton>
             </header>
             <div className="copy-dialog-content">
               <div className="copy-source"><Copy size={20} /><div><strong>{copyProject.name}</strong><span title={copyProject.rootPath}>{copyProject.rootPath}</span></div></div>
               <label><span>副本名称</span><input value={copyName} onChange={(event) => setCopyName(event.target.value)} maxLength={120} autoFocus onKeyDown={(event) => event.key === "Enter" && void confirmCopy()} /></label>
-              <p>下一步选择父目录。客户端会创建新的项目文件夹与项目标识，不复制构建缓存。</p>
+              <p>下一步选择父目录。客户端会创建新的项目文件夹和项目标识，不复制构建缓存，也不会继承原项目的 GitHub 远端关系。</p>
             </div>
             <footer className="modal-actions"><button className="button secondary" onClick={() => setCopyProject(null)} disabled={copying}>取消</button><button className="button primary" onClick={() => void confirmCopy()} disabled={!copyName.trim() || copying}>{copying ? "正在复制…" : "选择位置并复制"}</button></footer>
           </section>
@@ -775,6 +783,7 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
   const [status, setStatus] = useState<AppUpdateStatus | null>(null);
   const [account, setAccount] = useState<GitHubAccountStatus | null>(null);
   const [busy, setBusy] = useState<"settings" | "check" | "download" | "install" | "github" | null>(null);
+  const [section, setSection] = useState<"account" | "updates" | "about">("account");
 
   useEffect(() => {
     let cancelled = false;
@@ -916,7 +925,13 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
 
   return (
     <section className="app-settings-page">
-      <header className="settings-page-heading"><span><Settings2 size={22} /></span><div><p className="eyebrow">客户端偏好</p><h1>设置</h1><p>更新设置只保存在这台电脑，不会写入任何 LaTeX 项目。</p></div></header>
+      <header className="settings-page-heading"><span><Settings2 size={22} /></span><div><h1>设置</h1><p>这些设置只保存在这台电脑，不会写入任何 LaTeX 项目。</p></div></header>
+      <nav className="settings-section-tabs" aria-label="设置分类" role="tablist">
+        <button role="tab" aria-selected={section === "account"} className={section === "account" ? "active" : ""} onClick={() => setSection("account")}>账号与同步</button>
+        <button role="tab" aria-selected={section === "updates"} className={section === "updates" ? "active" : ""} onClick={() => setSection("updates")}>客户端更新</button>
+        <button role="tab" aria-selected={section === "about"} className={section === "about" ? "active" : ""} onClick={() => setSection("about")}>关于</button>
+      </nav>
+      {section === "account" && <>
       <section className="settings-card github-login-settings-card">
         <header><div><h2>GitHub 连接</h2><p>登录一次后，即可在导入项目时自动创建仓库和开启同步。</p></div><GitFork size={20} /></header>
         <div className={`github-settings-account ${account?.authenticated ? "account-ready" : "account-required"}`}>
@@ -925,7 +940,6 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
           <button className="button secondary" onClick={() => void refreshGitHubAccount()} disabled={busy !== null}><RefreshCw size={16} />刷新</button>
           {!account?.authenticated && <button className="button primary" onClick={() => void beginGitHubLogin()} disabled={busy !== null}>{busy === "github" ? <RefreshCw size={16} className="spin" /> : <LogIn size={16} />}{account?.cliAvailable === false ? "安装 GitHub CLI" : "登录 GitHub"}</button>}
         </div>
-        <div className="product-repository-address"><GitFork size={17} /><div><strong>本软件项目地址</strong><code>github.com/Ararataki-number-one/latex-project-manager</code></div><button className="button ghost" onClick={() => void openProductPage()}><ExternalLink size={15} />打开</button></div>
       </section>
       <section className="settings-card runtime-settings-card">
         <header><div><h2>后台运行与同步</h2><p>关闭主窗口后仍可通过 Windows 托盘安全同步项目。</p></div><HardDrive size={20} /></header>
@@ -935,7 +949,8 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
         </div>
         <div className="update-actions"><button className="button secondary" onClick={onOpenOnboarding}><BookOpenText size={16} />重新打开新手向导</button></div>
       </section>
-      <section className="settings-card update-settings-card">
+      </>}
+      {section === "updates" && <section className="settings-card update-settings-card">
         <header><div><h2>客户端更新</h2><p>通过官方 GitHub Release 获取经过校验的 Windows 安装包。</p></div><Download size={20} /></header>
         <div className={`app-update-summary update-${status.state}`}>
           <span className="update-summary-icon">{checking || downloading ? <RefreshCw size={20} className="spin" /> : status.state === "downloaded" || status.state === "upToDate" ? <CheckCircle2 size={20} /> : <Download size={20} />}</span>
@@ -954,9 +969,91 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
         </div>
         <div className="private-update-note"><ShieldCheck size={17} /><div><strong>安全更新</strong><p>{status.githubCliAvailable ? "使用本机 GitHub CLI 获取 GitHub Release；客户端不会读取或保存你的访问令牌。" : "这台电脑未检测到 GitHub CLI，因此只能在浏览器中手动下载。"}</p></div></div>
         {isDemo && <p className="demo-note">浏览器演示模式不会访问 GitHub 或下载程序。</p>}
-      </section>
+      </section>}
+      {section === "about" && <section className="settings-card about-settings-card">
+        <header><div><h2>关于 LaTeX 项目管理器</h2><p>本地优先的 LaTeX 项目库、原始文稿与安全同步工具。</p></div><BookOpenText size={20} /></header>
+        <div className="product-repository-address"><GitFork size={17} /><div><strong>开源项目地址</strong><code>github.com/Ararataki-number-one/latex-project-manager</code></div><button className="button secondary" onClick={() => void openProductPage()}><ExternalLink size={15} />打开 GitHub</button></div>
+        <div className="about-version-row"><span>当前版本</span><strong>{status.currentVersion}</strong></div>
+      </section>}
     </section>
   );
+}
+
+function SyncCenterView({ api, projects, paused, onPausedChange, onOpenProject, onNotify }: {
+  api: WorkbenchApi;
+  projects: ProjectSummary[];
+  paused: boolean;
+  onPausedChange: (paused: boolean) => void;
+  onOpenProject: (project: ProjectSummary) => void;
+  onNotify: (message: string) => void;
+}) {
+  const [statuses, setStatuses] = useState<Record<string, GitHubSyncStatus>>({});
+  const [busy, setBusy] = useState<"sync" | "pause" | null>(null);
+  const availableProjects = useMemo(() => projects.filter((project) => project.pathAvailable && !project.trashed), [projects]);
+
+  async function refresh() {
+    const entries = await Promise.all(availableProjects.map(async (project) => {
+      try { return [project.id, await api.github.status(project.id)] as const; }
+      catch { return null; }
+    }));
+    setStatuses((current) => ({ ...current, ...Object.fromEntries(entries.filter((entry): entry is readonly [string, GitHubSyncStatus] => entry !== null)) }));
+  }
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 8_000);
+    const unsubscribe = api.github.onEvent(() => { void refresh(); });
+    return () => { clearInterval(timer); unsubscribe(); };
+  }, [api, availableProjects]);
+
+  async function syncAll() {
+    setBusy("sync");
+    try {
+      await api.github.syncAll();
+      await refresh();
+      onNotify("所有已连接项目已进入安全同步队列");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法同步全部项目");
+    } finally { setBusy(null); }
+  }
+
+  async function togglePaused() {
+    setBusy("pause");
+    try {
+      if (paused) await api.github.resumeAll(); else await api.github.pauseAll();
+      onPausedChange(!paused);
+      await refresh();
+      onNotify(paused ? "已恢复全部自动同步" : "已暂停全部自动同步");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法更新同步状态");
+    } finally { setBusy(null); }
+  }
+
+  const configured = availableProjects.filter((project) => statuses[project.id]?.configured);
+  const attention = configured.filter((project) => ["blocked", "error", "needsPull", "unavailable"].includes(statuses[project.id]?.state));
+  const active = configured.filter((project) => ["queued", "syncing", "retrying", "changes"].includes(statuses[project.id]?.state));
+
+  return <section className="sync-center-page">
+    <header className="sync-center-heading">
+      <div><span className="page-heading-icon"><Cloud size={22} /></span><div><h1>同步中心</h1><p>{configured.length} 个项目已连接 GitHub · {attention.length ? `${attention.length} 个需要处理` : "当前没有阻止项"}</p></div></div>
+      <div><button className="button secondary" disabled={busy !== null} onClick={() => void togglePaused()}>{paused ? <PlayCircle size={17} /> : <PauseCircle size={17} />}{paused ? "恢复自动同步" : "暂停自动同步"}</button><button className="button primary" disabled={busy !== null || paused} onClick={() => void syncAll()}><RefreshCw size={17} className={busy === "sync" ? "spin" : ""} />同步全部</button></div>
+    </header>
+    {paused && <div className="sync-center-paused"><PauseCircle size={18} /><div><strong>自动同步已暂停</strong><p>本地变化仍会保留，恢复后继续处理队列。</p></div></div>}
+    <div className="sync-center-summary" aria-label="同步概况"><span><strong>{configured.length}</strong>已连接</span><span><strong>{active.length}</strong>处理中</span><span className={attention.length ? "attention" : ""}><strong>{attention.length}</strong>需要处理</span></div>
+    <section className="sync-project-list" aria-label="项目同步状态">
+      {availableProjects.map((project) => {
+        const status = statuses[project.id];
+        return <article key={project.id} className={`sync-project-row ${status && ["blocked", "error", "needsPull"].includes(status.state) ? "needs-attention" : ""}`}>
+          <span className="project-folder-icon"><FolderKanban size={18} /></span>
+          <div className="sync-project-copy"><strong>{project.name}</strong><span>{status?.message ?? "正在读取同步状态…"}</span></div>
+          <ProjectSyncBadge status={status} />
+          <span className="sync-project-time">{status?.lastSyncAt ? `上次成功 ${relativeTime(status.lastSyncAt)}` : "尚未成功同步"}</span>
+          <button className="button secondary compact" onClick={() => onOpenProject(project)}>查看同步</button>
+        </article>;
+      })}
+      {!availableProjects.length && <div className="empty-state"><Cloud size={28} /><h2>还没有可同步项目</h2><p>先导入一个本地 LaTeX 项目，再选择是否连接 GitHub。</p></div>}
+    </section>
+  </section>;
 }
 
 export default function App() {
@@ -968,6 +1065,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [syncCenterOpen, setSyncCenterOpen] = useState(false);
+  const [selectedProjectTab, setSelectedProjectTab] = useState<"overview" | "github">("overview");
   const [runtimeSettings, setRuntimeSettings] = useState<AppRuntimeSettings>({ closeToTray: true, onboardingCompleted: false, syncPaused: false });
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [showOnboardingHint, setShowOnboardingHint] = useState(false);
@@ -1004,6 +1103,7 @@ export default function App() {
     if (openImport) {
       setSelected(null);
       setSettingsOpen(false);
+      setSyncCenterOpen(false);
       setFilter("all");
       setOpenImportNonce((value) => value + 1);
     }
@@ -1021,7 +1121,7 @@ export default function App() {
     { id: "favorites", label: "收藏", icon: Heart, count: projects.filter((item) => item.favorite && !item.archived && !item.trashed).length },
     { id: "recent", label: "最近使用", icon: Clock3 },
     { id: "archived", label: "已归档", icon: Archive, count: projects.filter((item) => item.archived && !item.trashed).length },
-    { id: "trashed", label: "回收站", icon: Trash2, count: projects.filter((item) => item.trashed).length }
+    { id: "trashed", label: "已移除", icon: Trash2, count: projects.filter((item) => item.trashed).length }
   ];
 
   function goLibrary(nextFilter: ExtendedLibraryFilter = filter) {
@@ -1029,6 +1129,7 @@ export default function App() {
     setActiveTag(null);
     setSelected(null);
     setSettingsOpen(false);
+    setSyncCenterOpen(false);
     void refreshProjects().catch((error) => {
       setToast(error instanceof Error ? error.message : "无法刷新项目库");
     });
@@ -1051,7 +1152,7 @@ export default function App() {
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={!selected && !settingsOpen && filter === item.id ? "active" : ""} aria-current={!selected && !settingsOpen && filter === item.id ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}>
+              <button key={item.id} className={!selected && !settingsOpen && !syncCenterOpen && filter === item.id ? "active" : ""} aria-current={!selected && !settingsOpen && !syncCenterOpen && filter === item.id ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}>
                 <Icon size={18} /><span>{item.label}</span>{item.count !== undefined && <small>{item.count}</small>}
               </button>
             );
@@ -1060,16 +1161,16 @@ export default function App() {
         <section className="sidebar-tags">
           <header><Tags size={15} /><strong>项目标签</strong></header>
           <nav aria-label="标签筛选">
-            <button className={!selected && !settingsOpen && filter === "all" && activeTag === null ? "active" : ""} aria-label="显示全部标签" aria-pressed={!selected && !settingsOpen && filter === "all" && activeTag === null} onClick={() => goLibrary("all")}>
+            <button className={!selected && !settingsOpen && !syncCenterOpen && filter === "all" && activeTag === null ? "active" : ""} aria-label="显示全部标签" aria-pressed={!selected && !settingsOpen && !syncCenterOpen && filter === "all" && activeTag === null} onClick={() => goLibrary("all")}>
               <span className="tag-color all-tags" /><span>全部标签</span><small>{projects.filter((project) => !project.archived && !project.trashed).length}</small>
             </button>
             {tags.map((tag, index) => (
               <button
-                className={!selected && !settingsOpen && activeTag === tag ? "active" : ""}
+                className={!selected && !settingsOpen && !syncCenterOpen && activeTag === tag ? "active" : ""}
                 aria-label={`筛选标签：${tag}`}
                 aria-pressed={!selected && !settingsOpen && activeTag === tag}
                 key={tag}
-                onClick={() => { setActiveTag(tag); setFilter("all"); setSelected(null); }}
+                onClick={() => { setActiveTag(tag); setFilter("all"); setSelected(null); setSettingsOpen(false); setSyncCenterOpen(false); }}
               >
                 <span className="tag-color" style={{ backgroundColor: TAG_COLORS[index % TAG_COLORS.length] }} /><span>{tag}</span><small>{projects.filter((project) => !project.archived && !project.trashed && project.tags.includes(tag)).length}</small>
               </button>
@@ -1077,7 +1178,10 @@ export default function App() {
           </nav>
         </section>
         <div className="sidebar-spacer" />
-        <nav className="sidebar-settings-nav" aria-label="应用导航"><button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(true); }}><Settings2 size={18} /><span>设置</span></button></nav>
+        <nav className="sidebar-settings-nav" aria-label="应用导航">
+          <button className={syncCenterOpen ? "active" : ""} aria-current={syncCenterOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); }}><Cloud size={18} /><span>同步中心</span></button>
+          <button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSyncCenterOpen(false); setSettingsOpen(true); }}><Settings2 size={18} /><span>设置</span></button>
+        </nav>
         <div className="toolchain-card">
           <span className="toolchain-indicator ready" />
           <div><strong>本地项目索引</strong><span>GitHub 为可选同步</span></div>
@@ -1090,20 +1194,22 @@ export default function App() {
       <main className="app-main">
         <div className="window-strip">
           {!navOpen && <IconButton label="打开侧栏" onClick={() => setNavOpen(true)}><Menu size={19} /></IconButton>}
-          {!selected && <span className="window-title">{settingsOpen ? "设置" : "LaTeX 项目管理器"}</span>}
+          {!selected && <span className="window-title">{settingsOpen ? "设置" : syncCenterOpen ? "同步中心" : "LaTeX 项目管理器"}</span>}
           {selected && <button className="breadcrumb-home" onClick={() => goLibrary()}><BookOpenText size={15} />项目库</button>}
           {selected && <><span className="breadcrumb-separator">/</span><span className="breadcrumb-current">{selected.name}</span></>}
           <span className="window-drag-space" />
-          <span className="local-only"><ShieldCheck size={13} />本地模式</span>
+          <span className={`local-only ${runtimeSettings.syncPaused ? "sync-paused" : ""}`}>{runtimeSettings.syncPaused ? <PauseCircle size={13} /> : <ShieldCheck size={13} />}{runtimeSettings.syncPaused ? "同步已暂停" : "本地优先"}</span>
         </div>
         {selected ? (
-          <ProjectView api={runtime.api} project={selected} isDemo={runtime.isDemo} onBack={() => goLibrary()} onNotify={setToast} />
+          <ProjectView key={selected.id} api={runtime.api} project={selected} isDemo={runtime.isDemo} initialTab={selectedProjectTab} onBack={() => goLibrary()} onNotify={setToast} />
         ) : settingsOpen ? (
           <SettingsView api={runtime.api} isDemo={runtime.isDemo} onNotify={setToast} runtimeSettings={runtimeSettings} onRuntimeSettingsChange={setRuntimeSettings} onOpenOnboarding={() => setOnboardingOpen(true)} />
+        ) : syncCenterOpen ? (
+          <SyncCenterView api={runtime.api} projects={projects} paused={runtimeSettings.syncPaused} onPausedChange={(paused) => setRuntimeSettings((current) => ({ ...current, syncPaused: paused }))} onOpenProject={(project) => { setSelectedProjectTab("github"); setSelected(project); setSyncCenterOpen(false); }} onNotify={setToast} />
         ) : (
           <>
-            {showOnboardingHint && <aside className="onboarding-hint" aria-label="v0.5 新手向导提示"><div><BookOpenText size={18} /><span><strong>v0.5 新手向导</strong><small>检查 Git、GitHub、VS Code，并完成第一个安全同步项目。</small></span></div><button className="button secondary" onClick={() => setOnboardingOpen(true)}>开始</button><IconButton label="不再提示" onClick={() => void completeOnboarding(false)}><X size={16} /></IconButton></aside>}
-            <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={(project) => { setSettingsOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />
+            {showOnboardingHint && <aside className="onboarding-hint" aria-label="新手向导提示"><div><BookOpenText size={18} /><span><strong>首次使用向导</strong><small>检查 Git、GitHub、VS Code，并完成第一个安全同步项目。</small></span></div><button className="button secondary" onClick={() => setOnboardingOpen(true)}>开始</button><IconButton label="不再提示" onClick={() => void completeOnboarding(false)}><X size={16} /></IconButton></aside>}
+            <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />
           </>
         )}
       </main>

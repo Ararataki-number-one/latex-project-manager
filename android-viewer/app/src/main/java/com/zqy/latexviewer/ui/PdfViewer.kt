@@ -85,6 +85,7 @@ internal fun PdfPreviewScreen(
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = document.initialPage.coerceIn(0, pageCount - 1)
     )
+    val currentPage = listState.firstVisibleItemIndex.coerceIn(0, pageCount - 1)
 
     LaunchedEffect(document.sha, handle) {
         if (handle == null) return@LaunchedEffect
@@ -109,43 +110,33 @@ internal fun PdfPreviewScreen(
             .fillMaxSize()
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Outlined.PictureAsPdf,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.size(21.dp)
-                )
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        document.name,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        if (handle == null) "PDF 读取失败" else "${handle.renderer.pageCount} 页 · 内置查看器",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                if (sourceItem != null) {
-                    IconButton(onClick = { onDownload(sourceItem) }) {
-                        Icon(Icons.Outlined.Download, contentDescription = "下载 ${document.name}")
-                    }
+            Icon(
+                Icons.Outlined.PictureAsPdf,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(19.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (handle == null) "PDF 读取失败" else "第 ${currentPage + 1} / ${handle.renderer.pageCount} 页",
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+            if (sourceItem != null) {
+                IconButton(onClick = { onDownload(sourceItem) }) {
+                    Icon(Icons.Outlined.Download, contentDescription = "下载 ${document.name}")
                 }
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(6.dp))
 
         if (handle == null) {
             Surface(

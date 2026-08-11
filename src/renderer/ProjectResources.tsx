@@ -98,6 +98,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
   const [visibility, setVisibility] = useState<GitHubRepositoryVisibility>("private");
   const [history, setHistory] = useState<GitHubSyncEvent[]>([]);
   const [initialized, setInitialized] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState<"configure" | "create" | "sync" | "toggle" | "identity" | "login" | "visibility" | null>(null);
 
   const refresh = useCallback(async (initializeDraft = false) => {
@@ -343,7 +344,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
   return (
     <section className="resource-page github-sync-page">
       <header className="resource-heading">
-        <div className="resource-heading-copy"><span className="resource-heading-icon"><GitFork size={22} /></span><div><p className="eyebrow">版本备份与多设备同步</p><h2>GitHub 同步</h2><p>项目中的新增、修改和删除会作为 Git 提交上传；不会执行强制推送。</p></div></div>
+        <div className="resource-heading-copy"><span className="resource-heading-icon"><GitFork size={22} /></span><div><h2>GitHub 同步</h2><p>自动备份项目中的新增、修改和删除；遇到分叉或风险文件时会安全停止。</p></div></div>
         {status.configured && <button className="button primary" onClick={() => void syncNow()} disabled={busy !== null || status.state === "unavailable" || !status.identity.configured}>{busy === "sync" ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}立即同步</button>}
       </header>
 
@@ -351,6 +352,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         <span className="sync-status-icon"><SyncStateIcon state={status.state} /></span>
         <div><strong>{syncStateLabel[status.state]}</strong><p>{status.message}</p></div>
         <span className="sync-status-time">上次成功：{formatTime(status.lastSyncAt)}</span>
+        {status.configured && <button className="button ghost sync-advanced-toggle" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}>{advancedOpen ? "收起设置" : "同步设置"}</button>}
       </div>
 
       {status.securityFindings && status.securityFindings.length > 0 && (
@@ -363,7 +365,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         </section>
       )}
 
-      <section className={`resource-card github-account-card ${account?.authenticated ? "account-ready" : "account-required"}`}>
+      {!status.configured && <section className={`resource-card github-account-card ${account?.authenticated ? "account-ready" : "account-required"}`}>
         <header>
           <div><h3>GitHub 账号</h3><p>通过官方浏览器登录；密码和令牌不会保存到本软件。</p></div>
           {account?.authenticated ? <CheckCircle2 size={19} /> : <LogIn size={19} />}
@@ -376,7 +378,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
           <button className="button secondary" onClick={() => void refreshAccount()} disabled={busy !== null}><RefreshCw size={16} />刷新状态</button>
           {!account?.authenticated && <button className="button primary" onClick={() => void beginGitHubLogin()} disabled={busy !== null}>{busy === "login" ? <LoaderCircle size={16} className="spin" /> : <LogIn size={16} />}{account?.cliAvailable === false ? "安装 GitHub CLI" : "登录 GitHub"}</button>}
         </div>
-      </section>
+      </section>}
 
       {!status.configured && (
         <section className="resource-card github-create-card">
@@ -393,7 +395,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         </section>
       )}
 
-      <section className={`resource-card git-identity-card ${status.identity.configured ? "identity-ready" : "identity-required"}`}>
+      {(!status.configured || !status.identity.configured) && <section className={`resource-card git-identity-card ${status.identity.configured ? "identity-ready" : "identity-required"}`}>
         <header><div><h3>提交身份</h3><p>只保存到当前项目，用来标记 GitHub 上的提交作者。</p></div><UserRound size={18} /></header>
         <div className="git-identity-fields">
           <label className="resource-field"><span>提交姓名</span><div className="input-with-icon"><UserRound size={16} /><input value={identityName} onChange={(event) => setIdentityName(event.target.value)} placeholder="例如：Ararataki-number-one" maxLength={100} /></div></label>
@@ -401,9 +403,9 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
           <button className="button secondary identity-save-button" onClick={() => void saveIdentityAndContinue()} disabled={busy !== null || !identityName.trim() || !identityEmail.trim()}>{busy === "identity" ? <LoaderCircle size={16} className="spin" /> : <CheckCircle2 size={16} />}{status.configured ? "保存并继续同步" : "保存到当前项目"}</button>
         </div>
         <p className={`identity-status ${status.identity.configured ? "ready" : "required"}`}>{status.identity.configured ? `已配置（${status.identity.source === "local" ? "当前项目" : "全局 Git 设置"}）` : "尚未配置；完成此项后即可提交并同步。"}</p>
-      </section>
+      </section>}
 
-      <div className="resource-columns">
+      {(!status.configured || advancedOpen) && <div className="resource-columns sync-advanced-panel">
         <section className="resource-card github-connect-card">
           <header><div><h3>{status.configured ? "仓库连接" : "连接已有仓库"}</h3><p>{status.configured ? "这里显示当前项目的 GitHub 地址。" : "高级方式：连接你已经在 GitHub 创建的仓库。"}</p></div><GitFork size={18} /></header>
           <label className="resource-field"><span>GitHub 仓库地址</span><input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="https://github.com/用户名/仓库名.git" spellCheck={false} /></label>
@@ -431,7 +433,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
           {status.lastCommit && <div className="last-commit"><span>最近提交</span><strong><code>{status.lastCommit.hash}</code>{status.lastCommit.message}</strong><small>{formatTime(status.lastCommit.committedAt)}</small></div>}
           <div className="sync-safety-note"><ShieldCheck size={17} /><div><strong>安全同步策略</strong><p>删除操作会正常进入 Git 历史；远端领先或分叉时停止推送，由你在 VS Code 或 GitHub Desktop 中处理。</p></div></div>
         </section>
-      </div>
+      </div>}
 
       {(status.changedFiles.length > 0 || status.largeFiles.length > 0) && (
         <section className="resource-card pending-files-card">
@@ -443,10 +445,10 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         </section>
       )}
 
-      <section className="resource-card sync-history-card">
-        <header><div><h3>同步时间线</h3><p>最近的排队、同步、重试与安全阻止记录，只保存在本机。</p></div><GitBranch size={18} /></header>
+      <details className="resource-card resource-disclosure sync-history-card">
+        <summary><span><strong>同步时间线</strong><small>最近的排队、重试和安全阻止记录</small></span><GitBranch size={18} /></summary>
         {history.length ? <div className="sync-history-list">{history.map((event) => <div key={event.id} className={`level-${event.level}`}><span className="history-dot" /><div><strong>{syncStateLabel[event.state]}</strong><p>{event.message}</p></div><time>{formatTime(event.occurredAt)}</time></div>)}</div> : <p className="resource-empty-copy">尚无同步记录。</p>}
-      </section>
+      </details>
     </section>
   );
 }
