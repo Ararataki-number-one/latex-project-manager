@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { inflateRawSync } from "node:zlib";
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -145,7 +145,13 @@ describe("project management filesystem operations", () => {
     expect(entries.get("index.ist")?.toString("utf8")).toBe("required index style");
     if (process.platform === "win32") {
       const tarPath = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
-      const listed = await execFileAsync(tarPath, ["-tf", destination], { windowsHide: true });
+      // GitHub's Windows runner can pass a Unicode command-line path to bsdtar
+      // through an OEM code page as "??.zip". The archive's Unicode path and
+      // entries are already verified above through Node's native file APIs, so
+      // use an ASCII copy for the independent bsdtar compatibility check.
+      const tarInput = join(base, "tar-compatibility.zip");
+      await copyFile(destination, tarInput);
+      const listed = await execFileAsync(tarPath, ["-tf", tarInput], { windowsHide: true });
       expect(listed.stdout).toContain("main.tex");
     }
   });
