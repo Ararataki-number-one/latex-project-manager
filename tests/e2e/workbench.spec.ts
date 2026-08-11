@@ -129,7 +129,7 @@ test("Overleaf 风格项目库支持搜索、标签、复制、归档、回收�
   await expect(page.getByRole("checkbox", { name: /自动检查更新/ })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: /发现新版本后自动下载/ })).toBeChecked();
   await expect(page.getByRole("button", { name: "立即检查" })).toBeVisible();
-  await expect(page.getByText("0.3.4", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("0.3.5", { exact: true }).first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
