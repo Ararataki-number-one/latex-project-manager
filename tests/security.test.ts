@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,7 +29,7 @@ describe("renderer security policy", () => {
 
 describe("project access registry", () => {
   it("requires a native selection before accepting a scan candidate", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-access-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-access-")));
     temporaryDirectories.push(root);
     const project = join(root, "project");
     const unrelated = join(root, "unrelated");
@@ -43,7 +43,7 @@ describe("project access registry", () => {
   });
 
   it("does not treat a catalog path that has been replaced as the same project", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-access-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-access-")));
     temporaryDirectories.push(root);
     const project = join(root, "project");
     await mkdir(project);
@@ -52,4 +52,3 @@ describe("project access registry", () => {
     expect(await access.requireProjectRoot(project)).toBe(project);
   });
 });
-

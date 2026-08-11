@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ afterEach(async () => {
 
 describe("original manuscript management", () => {
   it("copies source documents into references without overwriting equal names", async () => {
-    const base = await mkdtemp(join(tmpdir(), "latex-workbench-references-"));
+    const base = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-references-")));
     temporaryDirectories.push(base);
     const root = join(base, "project");
     const sourceA = join(base, "source-a");
@@ -44,7 +44,7 @@ describe("original manuscript management", () => {
   });
 
   it("rejects unsupported files and paths outside the references directory", async () => {
-    const base = await mkdtemp(join(tmpdir(), "latex-workbench-references-"));
+    const base = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-references-")));
     temporaryDirectories.push(base);
     const root = join(base, "project");
     await mkdir(root);

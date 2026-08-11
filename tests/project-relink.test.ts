@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -66,7 +66,7 @@ function summary(projectId: string, rootPath: string): ProjectSummary {
 
 describe("project relinking", () => {
   it("preserves the catalog ID and metadata after the project directory moves", async () => {
-    const base = await mkdtemp(join(tmpdir(), "latex-workbench-relink-"));
+    const base = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-relink-")));
     temporaryDirectories.push(base);
     const original = join(base, "original");
     const moved = join(base, "moved");
@@ -92,7 +92,7 @@ describe("project relinking", () => {
   });
 
   it("rejects a valid LaTeX directory whose manifest belongs to another project", async () => {
-    const base = await mkdtemp(join(tmpdir(), "latex-workbench-relink-"));
+    const base = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-relink-")));
     temporaryDirectories.push(base);
     const original = join(base, "original");
     const wrong = join(base, "wrong");

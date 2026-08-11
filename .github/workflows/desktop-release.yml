@@ -13,6 +13,9 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 35
+    env:
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
     steps:
       - name: Check out source
         uses: actions/checkout@v5

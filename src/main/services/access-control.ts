@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -66,7 +67,15 @@ export class ProjectAccessController {
   /** Seed a root from the persistent catalog without requiring it to exist. */
   seedProjectRoot(root: string): void {
     const lexical = resolve(root);
-    this.projectRoots.set(key(lexical), lexical);
+    let canonical = lexical;
+    try {
+      canonical = realpathSync.native(lexical);
+    } catch {
+      // An unavailable catalog root remains registered lexically and must be
+      // explicitly relinked before it can be trusted again.
+    }
+    this.projectRoots.set(key(lexical), canonical);
+    this.projectRoots.set(key(canonical), canonical);
   }
 
   removeProjectRoot(root: string): void {
