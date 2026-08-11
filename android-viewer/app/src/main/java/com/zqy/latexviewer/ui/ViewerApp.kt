@@ -1,9 +1,14 @@
 package com.zqy.latexviewer.ui
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -100,6 +105,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
@@ -116,6 +122,18 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
     val apkInstaller = remember(context) { ApkInstaller(context.applicationContext) }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    var askedForDownloadNotifications by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.transfer?.workId) {
+        if (state.transfer != null && !askedForDownloadNotifications &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askedForDownloadNotifications = true
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     fun installDownloadedUpdate() {
         val path = state.downloadedApkPath ?: return
