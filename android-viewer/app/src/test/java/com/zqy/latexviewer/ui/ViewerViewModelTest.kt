@@ -25,24 +25,13 @@ class ViewerViewModelTest {
     }
 
     @Test
-    fun validatesMobileProjectIndexAndRejectsUnsafePdfPaths() {
-        val valid = """{
-          "schemaVersion":1,
-          "projectId":"project-one",
-          "name":"Graph Notes",
-          "updatedAt":"2026-08-11T00:00:00.000Z",
-          "defaultOutputId":"mobile-main",
-          "outputs":[{
-            "id":"mobile-main",
-            "name":"Main",
-            "targetId":"main",
-            "entry":"main.tex",
-            "profileId":"full",
-            "pdfPath":"output/main.pdf"
-          }]
-        }""".trimIndent()
-        assertEquals("output/main.pdf", GitHubApi().parseMobileProjectIndex(valid)?.defaultOutput?.pdfPath)
-        assertEquals(null, GitHubApi().parseMobileProjectIndex(valid.replace("output/main.pdf", "../secret.pdf")))
-        assertEquals(null, GitHubApi().parseMobileProjectIndex(valid.replace("output/main.pdf", "output/main.tex")))
+    fun validatesMobilePdfPathsWithoutAndroidRuntimeDependencies() {
+        val api = GitHubApi()
+        assertTrue(api.isSafePdfPath("output/main.pdf"))
+        assertTrue(api.isSafePdfPath("中文目录/讲义.PDF"))
+        assertFalse(api.isSafePdfPath("../secret.pdf"))
+        assertFalse(api.isSafePdfPath("C:/secret.pdf"))
+        assertFalse(api.isSafePdfPath("/secret.pdf"))
+        assertFalse(api.isSafePdfPath("output/main.tex"))
     }
 }

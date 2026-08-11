@@ -212,7 +212,7 @@ class GitHubApi {
         MobileProjectIndex(1, projectId, displayName, updatedAt, defaultOutputId, outputs)
     }.getOrNull()
 
-    private fun isSafePdfPath(path: String): Boolean {
+    internal fun isSafePdfPath(path: String): Boolean {
         if (path.isBlank() || path.startsWith('/') || path.startsWith('\\') || WINDOWS_DRIVE.matches(path)) return false
         val parts = path.replace('\\', '/').split('/')
         return parts.none { it.isBlank() || it == "." || it == ".." } && path.endsWith(".pdf", ignoreCase = true)
