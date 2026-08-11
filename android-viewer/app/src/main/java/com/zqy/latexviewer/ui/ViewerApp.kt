@@ -47,6 +47,7 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Home
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Logout
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Public
@@ -67,6 +69,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -262,6 +267,8 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     ViewerScreen.PDF -> PdfPreviewScreen(
                         state,
                         onDownload = viewModel::downloadFile,
+                        onRetry = viewModel::retryCurrentPdf,
+                        onOpenExternal = viewModel::openCurrentPdfExternally,
                         onPageChanged = viewModel::recordPdfPage
                     )
                     ViewerScreen.SETTINGS -> SettingsScreen(
@@ -285,20 +292,30 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         trackColor = MaterialTheme.colorScheme.surfaceVariant
                     )
                 }
-                state.transfer?.let { transfer ->
+                state.transfer?.takeIf { state.transferPanelVisible && state.screen != ViewerScreen.DOWNLOADS }?.let { transfer ->
                     TransferCard(
                         transfer,
                         onCancel = viewModel::cancelTransfer,
+                        onHide = viewModel::hideTransferPanel,
+                        onOpenDownloads = viewModel::openDownloads,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(16.dp)
                     )
                 }
-                state.completedDownload?.let { download ->
-                    DownloadCompleteDialog(
+                state.completedDownload
+                    ?.takeIf {
+                        state.screen != ViewerScreen.DOWNLOADS &&
+                            (state.transfer == null || !state.transferPanelVisible)
+                    }
+                    ?.let { download ->
+                    DownloadCompleteBanner(
                         download = download,
                         onOpen = viewModel::openCompletedDownload,
-                        onDismiss = viewModel::dismissCompletedDownload
+                        onDismiss = viewModel::dismissCompletedDownload,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(16.dp)
                     )
                 }
             }
@@ -325,7 +342,7 @@ private fun ViewerTopBar(
         ViewerScreen.SETTINGS -> "设置与更新"
         ViewerScreen.CONNECT -> "添加项目"
     }
-    TopAppBar(
+    CenterAlignedTopAppBar(
         title = {
             Column {
                 Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
@@ -670,7 +687,7 @@ private fun DownloadsScreen(
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         item {
             Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 5.dp)) {
@@ -679,21 +696,25 @@ private fun DownloadsScreen(
                 Text("用户下载保存在内部存储/Download/LaTeX项目", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
             }
         }
-        state.transfer?.let { transfer -> item { TransferCard(transfer, onCancelTransfer) } }
+        state.transfer?.let { transfer ->
+            item {
+                TransferCard(transfer, onCancelTransfer)
+                Spacer(Modifier.height(12.dp))
+            }
+        }
         if (state.downloadedFiles.isEmpty()) {
             item { EmptyState("还没有下载文件", "项目 ZIP、PDF 和源码文件下载完成后会显示在这里。") }
         } else {
             item { HomeSectionTitle("最近下载", "本次使用期间") }
-            items(state.downloadedFiles, key = { it.contentUri }) { download ->
+            itemsIndexed(state.downloadedFiles, key = { _, download -> download.contentUri }) { index, download ->
                 Surface(
                     onClick = { onOpen(download) },
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(15.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    color = MaterialTheme.colorScheme.surface
+                    shape = RoundedCornerShape(9.dp),
+                    color = MaterialTheme.colorScheme.background
                 ) {
-                    Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Surface(modifier = Modifier.size(42.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                    Row(modifier = Modifier.padding(horizontal = 4.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(modifier = Modifier.size(38.dp), shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
                             Box(contentAlignment = Alignment.Center) { Icon(if (download.name.endsWith(".pdf", true)) Icons.Outlined.PictureAsPdf else Icons.Outlined.Download, contentDescription = null) }
                         }
                         Spacer(Modifier.width(12.dp))
@@ -704,9 +725,16 @@ private fun DownloadsScreen(
                         Icon(Icons.Outlined.OpenInNew, contentDescription = "打开 ${download.name}")
                     }
                 }
+                if (index != state.downloadedFiles.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 50.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
             }
         }
         item {
+            Spacer(Modifier.height(14.dp))
             Surface(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(15.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
                 Row(modifier = Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.PictureAsPdf, contentDescription = null)
@@ -744,12 +772,12 @@ private fun RepositoryListScreen(
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         item {
             Row(
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                modifier = Modifier.padding(horizontal = 2.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -769,33 +797,13 @@ private fun RepositoryListScreen(
             }
         }
         item {
-            SearchField(
-                value = state.repositoryQuery,
-                onValueChange = onQueryChange,
-                placeholder = "搜索项目"
-            )
-        }
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Column {
-                        Text("默认下载位置", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "内部存储/Download/LaTeX项目",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
+            Column {
+                SearchField(
+                    value = state.repositoryQuery,
+                    onValueChange = onQueryChange,
+                    placeholder = "搜索项目"
+                )
+                Spacer(Modifier.height(12.dp))
             }
         }
         if (filtered.isEmpty()) {
@@ -806,13 +814,19 @@ private fun RepositoryListScreen(
                 )
             }
         } else {
-            items(filtered, key = { it.fullName }) { repository ->
+            itemsIndexed(filtered, key = { _, repository -> repository.fullName }) { index, repository ->
                 RepositoryCard(
                     repository,
                     onClick = { onOpen(repository) },
                     onDownload = { onDownload(repository) },
                     onRemove = { removeCandidate = repository }
                 )
+                if (index != filtered.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 50.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
             }
         }
         item { ReadOnlyFooter() }
@@ -913,90 +927,79 @@ private fun RepositoryCard(
     onDownload: () -> Unit,
     onRemove: () -> Unit
 ) {
-    Card(
+    var menuExpanded by remember { mutableStateOf(false) }
+    Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.background,
+        tonalElevation = 0.dp
     ) {
-        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    modifier = Modifier.size(42.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(21.dp))
-                    }
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        repository.name,
-                        fontSize = 18.sp,
-                        lineHeight = 23.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(3.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            repository.owner,
-                            modifier = Modifier.weight(1f),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        PrivacyPill(repository.isPrivate)
-                    }
-                }
-                Spacer(Modifier.width(6.dp))
+        Row(
+            modifier = Modifier.padding(start = 4.dp, top = 10.dp, bottom = 10.dp, end = 0.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.size(38.dp), contentAlignment = Alignment.Center) {
                 Icon(
-                    Icons.Outlined.ChevronRight,
-                    contentDescription = "浏览 ${repository.name}",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    Icons.Outlined.Folder,
+                    contentDescription = null,
+                    modifier = Modifier.size(29.dp),
+                    tint = MaterialTheme.colorScheme.onSurface
                 )
             }
-            repository.description?.let {
-                Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    it,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
+                    repository.name,
+                    fontSize = 17.sp,
+                    lineHeight = 22.sp,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "${formatBytes(repository.sizeKb * 1024)} · ${shortDate(repository.updatedAt)} 更新",
-                    modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                IconButton(onClick = onDownload) {
-                    Icon(Icons.Outlined.Download, contentDescription = "下载 ${repository.name} ZIP")
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${repository.owner} · ${formatBytes(repository.sizeKb * 1024)}",
+                        modifier = Modifier.weight(1f, fill = false),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    PrivacyPill(repository.isPrivate)
                 }
-                IconButton(onClick = onRemove) {
-                    Icon(
-                        Icons.Outlined.DeleteOutline,
-                        contentDescription = "从手机移除 ${repository.name}",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Box {
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "${repository.name} 更多操作")
+                }
+                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("下载项目 ZIP") },
+                        leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onDownload()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("从手机移除") },
+                        leadingIcon = { Icon(Icons.Outlined.DeleteOutline, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onRemove()
+                        }
                     )
                 }
             }
+            Icon(
+                Icons.Outlined.ChevronRight,
+                contentDescription = "浏览 ${repository.name}",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(19.dp)
+            )
         }
     }
 }
@@ -1016,8 +1019,8 @@ private fun FileListScreen(
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         item {
             RepositorySummary(
@@ -1027,7 +1030,11 @@ private fun FileListScreen(
             )
         }
         item {
-            SearchField(value = state.fileQuery, onValueChange = onQueryChange, placeholder = "搜索当前文件夹")
+            Column {
+                Spacer(Modifier.height(10.dp))
+                SearchField(value = state.fileQuery, onValueChange = onQueryChange, placeholder = "搜索当前文件夹")
+                Spacer(Modifier.height(10.dp))
+            }
         }
         if (filtered.isEmpty()) {
             item { EmptyState("这里没有文件", if (query.isEmpty()) "这个目录为空。" else "没有匹配的文件。") }
@@ -1035,13 +1042,17 @@ private fun FileListScreen(
             itemsIndexed(filtered, key = { _, item -> item.path }) { index, item ->
                 FileRow(
                     item = item,
-                    isFirst = index == 0,
-                    isLast = index == filtered.lastIndex,
                     onClick = { onOpen(item) },
                     onDownload = if (item.kind == GitHubContentKind.FILE) {
                         { onDownloadFile(item) }
                     } else null
                 )
+                if (index != filtered.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 48.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
             }
         }
         item { ReadOnlyFooter() }
@@ -1056,19 +1067,18 @@ private fun RepositorySummary(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
+        color = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        shape = RoundedCornerShape(10.dp)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier = Modifier.size(40.dp),
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.primaryContainer
+                modifier = Modifier.size(38.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(21.dp))
@@ -1111,37 +1121,28 @@ private fun RepositorySummary(
 @Composable
 private fun FileRow(
     item: GitHubContent,
-    isFirst: Boolean,
-    isLast: Boolean,
     onClick: () -> Unit,
     onDownload: (() -> Unit)?
 ) {
     val isFolder = item.kind == GitHubContentKind.DIRECTORY
     val isText = item.kind == GitHubContentKind.FILE && isLikelyText(item.name)
     val isPdf = item.kind == GitHubContentKind.FILE && ViewerViewModel.isPdfFile(item.name)
-    val rowShape = when {
-        isFirst && isLast -> RoundedCornerShape(14.dp)
-        isFirst -> RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)
-        isLast -> RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp)
-        else -> RoundedCornerShape(0.dp)
-    }
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = rowShape,
-        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.background,
         tonalElevation = 0.dp
     ) {
         Row(
             modifier = Modifier
-                .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), rowShape)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 3.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
                 modifier = Modifier.size(36.dp),
-                shape = RoundedCornerShape(10.dp),
-                color = if (isFolder) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                shape = RoundedCornerShape(9.dp),
+                color = if (isFolder) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
@@ -1551,63 +1552,50 @@ private fun SettingSwitchRow(
 }
 
 @Composable
-private fun DownloadCompleteDialog(
+private fun DownloadCompleteBanner(
     download: DownloadedFile,
     onOpen: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = {
-            Icon(
-                Icons.Outlined.CheckCircle,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary
-            )
-        },
-        title = { Text("下载完成") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(download.name, fontWeight = FontWeight.SemiBold)
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shadowElevation = 6.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Outlined.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+            Spacer(Modifier.width(11.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(download.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    "已保存到：",
+                    "已保存到 ${download.displayPath}",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    SelectionContainer {
-                        Text(
-                            download.displayPath,
-                            modifier = Modifier.padding(12.dp),
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
-                Text("是否现在打开？", style = MaterialTheme.typography.bodyMedium)
             }
-        },
-        confirmButton = {
-            Button(onClick = onOpen) {
-                Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("现在打开")
+            TextButton(onClick = onOpen) { Text("打开") }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Outlined.Clear, contentDescription = "隐藏下载完成提示", modifier = Modifier.size(18.dp))
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("稍后") }
         }
-    )
+    }
 }
 
 @Composable
 private fun TransferCard(
     transfer: TransferUiState,
     onCancel: (() -> Unit)? = null,
+    onHide: (() -> Unit)? = null,
+    onOpenDownloads: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val determinate = transfer.total > 0
@@ -1616,12 +1604,12 @@ private fun TransferCard(
     } else 0f
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.inverseSurface,
         contentColor = MaterialTheme.colorScheme.inverseOnSurface,
         shadowElevation = 8.dp
     ) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     transfer.label,
@@ -1631,10 +1619,9 @@ private fun TransferCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 if (determinate) Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
-                onCancel?.let {
-                    Spacer(Modifier.width(4.dp))
+                onHide?.let {
                     IconButton(onClick = it, modifier = Modifier.size(34.dp)) {
-                        Icon(Icons.Outlined.Clear, contentDescription = "取消下载", modifier = Modifier.size(18.dp))
+                        Icon(Icons.Outlined.ExpandMore, contentDescription = "隐藏下载进度", modifier = Modifier.size(19.dp))
                     }
                 }
             }
@@ -1647,7 +1634,10 @@ private fun TransferCard(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "${formatBytes(transfer.downloaded)} / ${formatBytes(transfer.total)}",
+                    buildString {
+                        append("${formatBytes(transfer.downloaded)} / ${formatBytes(transfer.total)}")
+                        if (transfer.bytesPerSecond > 0) append(" · ${formatBytes(transfer.bytesPerSecond)}/s")
+                    },
                     style = MaterialTheme.typography.bodyMedium
                 )
             } else {
@@ -1657,10 +1647,19 @@ private fun TransferCard(
                     when {
                         transfer.waitingForNetwork -> "等待网络或系统调度；任务不会因息屏消失"
                         transfer.downloaded <= 0 -> "正在连接 GitHub…"
-                        else -> "已接收 ${formatBytes(transfer.downloaded)}"
+                        else -> buildString {
+                            append("已接收 ${formatBytes(transfer.downloaded)}")
+                            if (transfer.bytesPerSecond > 0) append(" · ${formatBytes(transfer.bytesPerSecond)}/s")
+                        }
                     },
                     style = MaterialTheme.typography.bodyMedium
                 )
+            }
+            if (onCancel != null || onOpenDownloads != null) {
+                Row(modifier = Modifier.align(Alignment.End)) {
+                    onOpenDownloads?.let { TextButton(onClick = it) { Text("查看下载") } }
+                    onCancel?.let { TextButton(onClick = it) { Text("取消") } }
+                }
             }
         }
     }

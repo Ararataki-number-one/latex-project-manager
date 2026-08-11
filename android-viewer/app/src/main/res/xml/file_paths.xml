@@ -2,4 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-files-path name="external_downloads" path="Download/" />
     <files-path name="internal_updates" path="updates/" />
+    <cache-path name="pdf_preview_cache" path="pdf-preview/" />
 </paths>

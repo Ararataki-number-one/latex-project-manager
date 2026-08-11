@@ -1,6 +1,9 @@
 package com.zqy.latexviewer.ui
 
 import com.zqy.latexviewer.data.GitHubApi
+import com.zqy.latexviewer.model.GitHubContent
+import com.zqy.latexviewer.model.GitHubContentKind
+import com.zqy.latexviewer.model.GitHubRepository
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -48,4 +51,51 @@ class ViewerViewModelTest {
         )
         assertEquals(null, api.preferredDownloadUrl("https://example.com/book.pdf"))
     }
+
+    @Test
+    fun providesFallbackDownloadSourcesAndPrioritizesAuthenticatedApiForPrivateRepositories() {
+        val api = GitHubApi()
+        val item = GitHubContent(
+            name = "book.pdf",
+            path = "output/book.pdf",
+            kind = GitHubContentKind.FILE,
+            size = 10_000_000,
+            sha = "blob-sha",
+            htmlUrl = null,
+            downloadUrl = "https://raw.githubusercontent.com/owner/repo/main/output/book.pdf"
+        )
+        val publicRepository = repository(isPrivate = false)
+        val privateRepository = repository(isPrivate = true)
+
+        val publicSources = api.downloadUrlCandidates(publicRepository, item)
+        assertEquals("media.githubusercontent.com", java.net.URL(publicSources.first()).host)
+        assertTrue(publicSources.any { it.startsWith("https://api.github.com/") })
+
+        val privateSources = api.downloadUrlCandidates(privateRepository, item)
+        assertTrue(privateSources.first().startsWith("https://api.github.com/"))
+        assertTrue(privateSources.size >= 2)
+    }
+
+    @Test
+    fun capsPdfRenderMemoryForVeryLargeAndTallPages() {
+        val normal = calculateRenderSize(595, 842, 1440)
+        assertTrue(normal.first <= 1200)
+        assertTrue(normal.first.toLong() * normal.second <= 2_400_000L)
+
+        val tall = calculateRenderSize(100, 100_000, 1080)
+        assertTrue(tall.first > 0 && tall.second > 0)
+        assertTrue(tall.first.toLong() * tall.second <= 2_400_000L)
+    }
+
+    private fun repository(isPrivate: Boolean) = GitHubRepository(
+        name = "repo",
+        fullName = "owner/repo",
+        owner = "owner",
+        description = null,
+        isPrivate = isPrivate,
+        defaultBranch = "main",
+        updatedAt = "",
+        htmlUrl = "https://github.com/owner/repo",
+        sizeKb = 0
+    )
 }

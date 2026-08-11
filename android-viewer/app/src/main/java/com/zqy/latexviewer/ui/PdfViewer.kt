@@ -21,24 +21,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +60,9 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private data class PdfRendererHandle(
     val descriptor: ParcelFileDescriptor,
@@ -65,6 +73,8 @@ private data class PdfRendererHandle(
 internal fun PdfPreviewScreen(
     state: ViewerUiState,
     onDownload: (GitHubContent) -> Unit,
+    onRetry: () -> Unit,
+    onOpenExternal: () -> Unit,
     onPageChanged: (pageIndex: Int, pageCount: Int) -> Unit
 ) {
     val document = state.pdfDocument ?: return
@@ -73,7 +83,8 @@ internal fun PdfPreviewScreen(
     val handleResult by produceState<Result<PdfRendererHandle>?>(
         initialValue = null,
         document.localPath,
-        document.contentUri
+        document.contentUri,
+        document.openedAt
     ) {
         value = withContext(Dispatchers.IO) {
             runCatching {
@@ -96,14 +107,16 @@ internal fun PdfPreviewScreen(
     val handle = handleResult?.getOrNull()
     val loadingDocument = handleResult == null
     val openFailure = handleResult?.exceptionOrNull()
-    val pageCount = handle?.renderer?.pageCount ?: 1
-    val listState = rememberLazyListState(
-        initialFirstVisibleItemIndex = document.initialPage.coerceAtLeast(0)
-    )
-    val currentPage = listState.firstVisibleItemIndex.coerceIn(0, pageCount - 1)
+    val pageCount = handle?.renderer?.pageCount?.coerceAtLeast(0) ?: 0
+    val listState = remember(document.openedAt, pageCount) {
+        LazyListState(
+            firstVisibleItemIndex = if (pageCount > 0) document.initialPage.coerceIn(0, pageCount - 1) else 0
+        )
+    }
+    val currentPage = if (pageCount > 0) listState.firstVisibleItemIndex.coerceIn(0, pageCount - 1) else 0
 
     LaunchedEffect(document.sha, handle) {
-        if (handle == null) return@LaunchedEffect
+        if (handle == null || pageCount <= 0) return@LaunchedEffect
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
             .collect { page -> onPageChanged(page.coerceIn(0, pageCount - 1), pageCount) }
@@ -142,7 +155,8 @@ internal fun PdfPreviewScreen(
                 when {
                     loadingDocument -> "正在打开 PDF…"
                     handle == null -> "PDF 读取失败"
-                    else -> "第 ${currentPage + 1} / ${handle.renderer.pageCount} 页"
+                    pageCount <= 0 -> "PDF 没有可显示的页面"
+                    else -> "第 ${currentPage + 1} / $pageCount 页"
                 },
                 modifier = Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -153,6 +167,9 @@ internal fun PdfPreviewScreen(
                 IconButton(onClick = { onDownload(sourceItem) }) {
                     Icon(Icons.Outlined.Download, contentDescription = "下载 ${document.name}")
                 }
+            }
+            IconButton(onClick = onOpenExternal) {
+                Icon(Icons.Outlined.OpenInNew, contentDescription = "使用其他 PDF 应用打开")
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -185,6 +202,29 @@ internal fun PdfPreviewScreen(
                         pdfOpenFailureMessage(openFailure),
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onRetry) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("重新下载")
+                        }
+                        TextButton(onClick = onOpenExternal) { Text("其他应用打开") }
+                    }
+                }
+            }
+        } else if (pageCount <= 0) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.errorContainer
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text("PDF 没有可显示的页面", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("文件可能已损坏或使用了内置查看器不支持的格式。")
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = onOpenExternal) { Text("使用其他 PDF 应用打开") }
                 }
             }
         } else {
@@ -193,8 +233,8 @@ internal fun PdfPreviewScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items((0 until handle.renderer.pageCount).toList(), key = { it }) { pageIndex ->
-                    PdfPage(handle.renderer, pageIndex)
+                items(count = pageCount, key = { it }) { pageIndex ->
+                    PdfPage(handle.renderer, pageIndex, onOpenExternal)
                 }
                 item {
                     Text(
@@ -220,33 +260,44 @@ private fun pdfOpenFailureMessage(failure: Throwable?): String = when (failure) 
 }
 
 @Composable
-private fun PdfPage(renderer: PdfRenderer, pageIndex: Int) {
+private fun PdfPage(renderer: PdfRenderer, pageIndex: Int, onOpenExternal: () -> Unit) {
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val density = LocalDensity.current
-        val targetWidth = with(density) { maxWidth.roundToPx() }.coerceIn(1, 1600)
-        val bitmap by produceState<Bitmap?>(
+        val requestedWidth = with(density) { maxWidth.roundToPx() }.coerceAtLeast(1)
+        val renderResult by produceState<Result<Bitmap>?>(
             initialValue = null,
             renderer,
             pageIndex,
-            targetWidth
+            requestedWidth
         ) {
             value = withContext(Dispatchers.IO) {
-                synchronized(renderer) {
-                    renderer.openPage(pageIndex).use { page ->
-                        val targetHeight = (targetWidth.toLong() * page.height / page.width)
-                            .toInt()
-                            .coerceAtLeast(1)
-                        Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888).also { image ->
-                            image.eraseColor(AndroidColor.WHITE)
-                            page.render(image, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                runCatching {
+                    synchronized(renderer) {
+                        renderer.openPage(pageIndex).use { page ->
+                            val (targetWidth, targetHeight) = calculateRenderSize(
+                                page.width,
+                                page.height,
+                                requestedWidth
+                            )
+                            Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888).also { image ->
+                                image.eraseColor(AndroidColor.WHITE)
+                                try {
+                                    page.render(image, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                } catch (failure: Throwable) {
+                                    image.recycle()
+                                    throw failure
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+        val bitmap = renderResult?.getOrNull()
+        val renderFailure = renderResult?.exceptionOrNull()
 
         DisposableEffect(bitmap) {
-            onDispose { bitmap?.recycle() }
+            onDispose { bitmap?.takeUnless(Bitmap::isRecycled)?.recycle() }
         }
 
         Surface(
@@ -256,7 +307,7 @@ private fun PdfPage(renderer: PdfRenderer, pageIndex: Int) {
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             val page = bitmap
-            if (page == null) {
+            if (renderResult == null) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -264,6 +315,23 @@ private fun PdfPage(renderer: PdfRenderer, pageIndex: Int) {
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.dp)
+                }
+            } else if (page == null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("第 ${pageIndex + 1} 页渲染失败", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        renderFailure?.message ?: "页面过大、损坏或不受系统 PDF 引擎支持",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    TextButton(onClick = onOpenExternal) { Text("使用其他 PDF 应用打开") }
                 }
             } else {
                 Image(
@@ -279,3 +347,21 @@ private fun PdfPage(renderer: PdfRenderer, pageIndex: Int) {
         }
     }
 }
+
+internal fun calculateRenderSize(
+    pageWidth: Int,
+    pageHeight: Int,
+    requestedWidth: Int,
+    maximumWidth: Int = MAX_RENDER_WIDTH,
+    maximumPixels: Long = MAX_RENDER_PIXELS
+): Pair<Int, Int> {
+    require(pageWidth > 0 && pageHeight > 0 && requestedWidth > 0)
+    val widthScale = min(requestedWidth, maximumWidth).toDouble() / pageWidth.toDouble()
+    val pixelScale = sqrt(maximumPixels.toDouble() / (pageWidth.toLong() * pageHeight.toLong()).toDouble())
+    val scale = min(widthScale, pixelScale).coerceAtLeast(1.0 / maxOf(pageWidth, pageHeight))
+    return (pageWidth * scale).roundToInt().coerceAtLeast(1) to
+        (pageHeight * scale).roundToInt().coerceAtLeast(1)
+}
+
+private const val MAX_RENDER_WIDTH = 1200
+private const val MAX_RENDER_PIXELS = 2_400_000L

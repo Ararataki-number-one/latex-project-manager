@@ -67,10 +67,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/android
+          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android-viewer/app/build.gradle.kts | head -n 1)"
+          test -n "$VERSION"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            cp android-viewer/app/build/outputs/apk/release/app-release.apk "dist/android/LaTeX 项目查看器 Android 0.6.1.apk"
+            cp android-viewer/app/build/outputs/apk/release/app-release.apk "dist/android/LaTeX.Android.$VERSION.apk"
           else
-            cp android-viewer/app/build/outputs/apk/debug/app-debug.apk "dist/android/LaTeX 项目查看器 Android 0.6.1-debug.apk"
+            cp android-viewer/app/build/outputs/apk/debug/app-debug.apk "dist/android/LaTeX.Android.$VERSION-debug.apk"
           fi
 
       - name: Upload APK

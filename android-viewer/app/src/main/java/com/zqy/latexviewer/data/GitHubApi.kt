@@ -12,8 +12,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
-import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -106,29 +107,37 @@ class GitHubApi {
         repository: GitHubRepository,
         item: GitHubContent,
         token: String?,
-        output: OutputStream,
+        destination: File,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         require(item.kind == GitHubContentKind.FILE) { "只能下载文件" }
-        val apiUrl = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
-        val directUrl = preferredDownloadUrl(item.downloadUrl)
-        streamRequest(
-            directUrl ?: apiUrl,
-            token,
-            if (directUrl == null) RAW_ACCEPT else BINARY_ACCEPT,
-            output,
-            onProgress
+        downloadWithFallback(
+            candidates = downloadCandidates(repository, item),
+            token = token,
+            destination = destination,
+            expectPdf = item.name.endsWith(".pdf", ignoreCase = true),
+            onProgress = onProgress
         )
     }
 
     suspend fun downloadRepositoryArchive(
         repository: GitHubRepository,
         token: String?,
-        output: OutputStream,
+        destination: File,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/zipball/${encode(repository.defaultBranch)}"
-        streamRequest(url, token, ARCHIVE_ACCEPT, output, onProgress)
+        val apiUrl = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/zipball/${encode(repository.defaultBranch)}"
+        val browserUrl = "https://github.com/${encode(repository.owner)}/${encode(repository.name)}/archive/refs/heads/${encode(repository.defaultBranch)}.zip"
+        downloadWithFallback(
+            candidates = listOf(
+                DownloadCandidate(apiUrl, ARCHIVE_ACCEPT),
+                DownloadCandidate(browserUrl, BINARY_ACCEPT)
+            ),
+            token = token,
+            destination = destination,
+            expectPdf = false,
+            onProgress = onProgress
+        )
     }
 
     suspend fun latestAndroidRelease(): AndroidReleaseAsset = withContext(Dispatchers.IO) {
@@ -165,10 +174,19 @@ class GitHubApi {
 
     suspend fun downloadAndroidUpdate(
         asset: AndroidReleaseAsset,
-        output: OutputStream,
+        destination: File,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
-        streamRequest(asset.apiUrl, null, BINARY_ACCEPT, output, onProgress)
+        downloadWithFallback(
+            candidates = listOf(
+                DownloadCandidate(asset.downloadUrl, BINARY_ACCEPT),
+                DownloadCandidate(asset.apiUrl, BINARY_ACCEPT)
+            ).filter { it.url.startsWith("https://") },
+            token = null,
+            destination = destination,
+            expectPdf = false,
+            onProgress = onProgress
+        )
     }
 
     fun isInlineText(fileName: String): Boolean {
@@ -230,6 +248,25 @@ class GitHubApi {
             in GITHUB_DOWNLOAD_HOSTS -> value
             else -> null
         }
+    }
+
+    internal fun downloadUrlCandidates(repository: GitHubRepository, item: GitHubContent): List<String> =
+        downloadCandidates(repository, item).map(DownloadCandidate::url)
+
+    private fun downloadCandidates(
+        repository: GitHubRepository,
+        item: GitHubContent
+    ): List<DownloadCandidate> {
+        val apiUrl = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
+        val direct = item.downloadUrl?.let { raw ->
+            runCatching { URL(raw) }.getOrNull()
+                ?.takeIf { it.protocol == "https" && it.host.lowercase() in GITHUB_DOWNLOAD_HOSTS }
+                ?.let { DownloadCandidate(raw, BINARY_ACCEPT) }
+        }
+        val media = preferredDownloadUrl(item.downloadUrl)?.let { DownloadCandidate(it, BINARY_ACCEPT) }
+        val api = DownloadCandidate(apiUrl, RAW_ACCEPT)
+        val ordered = if (repository.isPrivate) listOf(api, media, direct) else listOf(media, direct, api)
+        return ordered.filterNotNull().distinctBy(DownloadCandidate::url)
     }
 
     private fun parseRepository(value: JSONObject): GitHubRepository {
@@ -297,61 +334,167 @@ class GitHubApi {
         }
     }
 
-    private fun streamRequest(
-        url: String,
+    private fun downloadWithFallback(
+        candidates: List<DownloadCandidate>,
         token: String?,
-        accept: String,
-        output: OutputStream,
+        destination: File,
+        expectPdf: Boolean,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            instanceFollowRedirects = true
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = DOWNLOAD_READ_TIMEOUT_MS
-            setRequestProperty("Accept", accept)
-            setRequestProperty("X-GitHub-Api-Version", API_VERSION)
-            setRequestProperty("User-Agent", "LaTeX-Project-Viewer-Android")
-            setRequestProperty("Cache-Control", "no-cache")
-            setRequestProperty("Pragma", "no-cache")
-            setRequestProperty("Connection", "keep-alive")
-            token?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                setRequestProperty("Authorization", "Bearer $it")
+        require(candidates.isNotEmpty()) { "没有可用的安全下载地址" }
+        destination.parentFile?.mkdirs()
+        if (expectPdf && destination.isFile) {
+            runCatching { validatePdfPrefix(destination, complete = false) }.onFailure {
+                destination.delete()
             }
         }
-        try {
-            val status = connection.responseCode
-            if (status !in 200..299) {
-                val body = connection.errorStream
-                    ?.use { readLimited(it, MAX_ERROR_BYTES) }
-                    ?.toString(Charsets.UTF_8)
-                    .orEmpty()
-                throw GitHubApiException(errorMessage(status, body))
+
+        var lastFailure: Throwable? = null
+        candidates.forEachIndexed { index, candidate ->
+            try {
+                streamRequestToFile(
+                    candidate = candidate,
+                    token = token,
+                    destination = destination,
+                    expectPdf = expectPdf,
+                    failFastOnSlowStart = index < candidates.lastIndex,
+                    onProgress = onProgress
+                )
+                if (expectPdf) validatePdfPrefix(destination, complete = true)
+                return
+            } catch (failure: Throwable) {
+                if (Thread.currentThread().isInterrupted) throw failure
+                lastFailure = failure
+                if (failure is InvalidDownloadContentException) destination.delete()
             }
-            val total = connection.contentLengthLong.coerceAtLeast(-1L)
-            if (total > MAX_DOWNLOAD_BYTES) throw GitHubApiException("下载内容超过 4 GB，无法保存")
-            connection.inputStream.use { input ->
-                // Larger sequential reads substantially reduce per-chunk coroutine/UI overhead
-                // for book-sized PDF and ZIP downloads while keeping memory use predictable.
-                val buffer = ByteArray(1024 * 1024)
-                var downloaded = 0L
-                onProgress(0, total)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    downloaded += read
-                    if (downloaded > MAX_DOWNLOAD_BYTES) {
-                        throw GitHubApiException("下载内容超过 4 GB，无法保存")
-                    }
-                    output.write(buffer, 0, read)
-                    onProgress(downloaded, total)
+        }
+        throw lastFailure ?: GitHubApiException("下载失败，请稍后重试")
+    }
+
+    private fun streamRequestToFile(
+        candidate: DownloadCandidate,
+        token: String?,
+        destination: File,
+        expectPdf: Boolean,
+        failFastOnSlowStart: Boolean,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) {
+        var mayRestart = true
+        while (true) {
+            val existing = destination.takeIf(File::isFile)?.length()?.coerceAtLeast(0L) ?: 0L
+            val connection = (URL(candidate.url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = true
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+                setRequestProperty("Accept", candidate.accept)
+                setRequestProperty("Accept-Encoding", "identity")
+                setRequestProperty("X-GitHub-Api-Version", API_VERSION)
+                setRequestProperty("User-Agent", "LaTeX-Project-Viewer-Android")
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("Pragma", "no-cache")
+                setRequestProperty("Connection", "keep-alive")
+                if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
+                token?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                    setRequestProperty("Authorization", "Bearer $it")
                 }
-                output.flush()
             }
-        } finally {
-            connection.disconnect()
+            try {
+                val status = connection.responseCode
+                if (status == HTTP_RANGE_NOT_SATISFIABLE && existing > 0) {
+                    val remoteTotal = parseUnsatisfiedTotal(connection.getHeaderField("Content-Range"))
+                    if (remoteTotal == existing) {
+                        onProgress(existing, existing)
+                        return
+                    }
+                    if (mayRestart) {
+                        mayRestart = false
+                        destination.delete()
+                        continue
+                    }
+                }
+                if (status !in 200..299) {
+                    val body = connection.errorStream
+                        ?.use { readLimited(it, MAX_ERROR_BYTES) }
+                        ?.toString(Charsets.UTF_8)
+                        .orEmpty()
+                    throw GitHubApiException(errorMessage(status, body))
+                }
+
+                val appending = status == HttpURLConnection.HTTP_PARTIAL && existing > 0
+                val downloadedBeforeRequest = if (appending) existing else 0L
+                if (!appending && existing > 0) destination.delete()
+                val responseBytes = connection.contentLengthLong.coerceAtLeast(-1L)
+                val total = parseContentRangeTotal(connection.getHeaderField("Content-Range"))
+                    ?: responseBytes.takeIf { it >= 0 }?.let { it + downloadedBeforeRequest }
+                    ?: -1L
+                if (total > MAX_DOWNLOAD_BYTES) throw GitHubApiException("下载内容超过 4 GB，无法保存")
+
+                val startedAt = System.nanoTime()
+                var downloaded = downloadedBeforeRequest
+                var pdfPrefixValidated = !expectPdf || downloadedBeforeRequest > 0L
+                onProgress(downloaded, total)
+                FileOutputStream(destination, appending).use { output ->
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            if (downloaded > MAX_DOWNLOAD_BYTES) {
+                                throw GitHubApiException("下载内容超过 4 GB，无法保存")
+                            }
+                            if (!pdfPrefixValidated && downloaded >= PDF_PREFIX_PROBE_BYTES) {
+                                output.flush()
+                                validatePdfPrefix(destination, complete = false)
+                                pdfPrefixValidated = true
+                            }
+                            onProgress(downloaded, total)
+                            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+                            val receivedThisRequest = downloaded - downloadedBeforeRequest
+                            if (failFastOnSlowStart && elapsedMs >= SLOW_SOURCE_WINDOW_MS &&
+                                receivedThisRequest < SLOW_SOURCE_MIN_BYTES
+                            ) {
+                                output.flush()
+                                if (expectPdf) validatePdfPrefix(destination, complete = false)
+                                throw SlowDownloadSourceException()
+                            }
+                        }
+                    }
+                    output.fd.sync()
+                }
+                if (downloaded <= 0L) throw GitHubApiException("GitHub 返回了空文件")
+                return
+            } finally {
+                connection.disconnect()
+            }
         }
     }
+
+    private fun validatePdfPrefix(file: File, complete: Boolean) {
+        if (!file.isFile || file.length() <= 0) {
+            if (complete) throw InvalidDownloadContentException("下载到的 PDF 是空文件")
+            return
+        }
+        val probe = ByteArray(PDF_PREFIX_PROBE_BYTES)
+        val read = file.inputStream().use { it.read(probe) }.coerceAtLeast(0)
+        val header = String(probe, 0, read, Charsets.US_ASCII)
+        if ("%PDF-" in header) return
+        if (header.startsWith("version https://git-lfs.github.com/spec/v1")) {
+            throw InvalidDownloadContentException("GitHub 返回了 Git LFS 指针，正在尝试备用下载地址")
+        }
+        if (complete || read >= PDF_PREFIX_PROBE_BYTES || header.trimStart().startsWith("<")) {
+            throw InvalidDownloadContentException("GitHub 返回的内容不是有效 PDF")
+        }
+    }
+
+    private fun parseContentRangeTotal(value: String?): Long? = value
+        ?.substringAfter('/', "")
+        ?.takeIf { it != "*" }
+        ?.toLongOrNull()
+
+    private fun parseUnsatisfiedTotal(value: String?): Long? = parseContentRangeTotal(value)
 
     private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
         val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
@@ -406,7 +549,12 @@ class GitHubApi {
         const val BINARY_ACCEPT = "application/octet-stream"
         const val CONNECT_TIMEOUT_MS = 15_000
         const val READ_TIMEOUT_MS = 30_000
-        const val DOWNLOAD_READ_TIMEOUT_MS = 120_000
+        const val DOWNLOAD_READ_TIMEOUT_MS = 35_000
+        const val DOWNLOAD_BUFFER_BYTES = 1024 * 1024
+        const val PDF_PREFIX_PROBE_BYTES = 1024
+        const val SLOW_SOURCE_WINDOW_MS = 15_000L
+        const val SLOW_SOURCE_MIN_BYTES = 1536L * 1024
+        const val HTTP_RANGE_NOT_SATISFIABLE = 416
         const val MAX_JSON_BYTES = 5 * 1024 * 1024
         const val MAX_ERROR_BYTES = 128 * 1024
         const val MAX_INLINE_FILE_BYTES = 1_500_000
@@ -434,3 +582,9 @@ class GitHubApi {
 }
 
 class GitHubApiException(message: String) : Exception(message)
+
+private data class DownloadCandidate(val url: String, val accept: String)
+
+private class InvalidDownloadContentException(message: String) : Exception(message)
+
+private class SlowDownloadSourceException : Exception("当前 GitHub 下载源响应过慢，正在切换备用地址")

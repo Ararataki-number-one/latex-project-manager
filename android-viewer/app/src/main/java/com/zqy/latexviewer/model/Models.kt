@@ -45,7 +45,8 @@ data class PdfDocument(
     val contentUri: String? = null,
     val repositoryFullName: String? = null,
     val sha: String? = null,
-    val initialPage: Int = 0
+    val initialPage: Int = 0,
+    val openedAt: Long = System.nanoTime()
 )
 
 data class MobilePdfOutput(

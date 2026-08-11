@@ -49,6 +49,7 @@ data class BackgroundDownloadTask(
     val createdAt: Long = System.currentTimeMillis(),
     val owner: String? = null,
     val repository: String? = null,
+    val isPrivate: Boolean = false,
     val branch: String? = null,
     val path: String? = null,
     val sha: String? = null,
@@ -80,6 +81,7 @@ data class BackgroundDownloadTask(
                         createdAt = value.optLong("createdAt", System.currentTimeMillis()),
                         owner = value.optionalString("owner"),
                         repository = value.optionalString("repository"),
+                        isPrivate = value.optBoolean("isPrivate", false),
                         branch = value.optionalString("branch"),
                         path = value.optionalString("path"),
                         sha = value.optionalString("sha"),
@@ -130,6 +132,7 @@ class BackgroundDownloadManager(context: Context) {
             mimeType = mimeType,
             owner = repository.owner,
             repository = repository.name,
+            isPrivate = repository.isPrivate,
             branch = repository.defaultBranch,
             path = item.path,
             sha = item.sha,
@@ -146,6 +149,7 @@ class BackgroundDownloadManager(context: Context) {
             mimeType = "application/zip",
             owner = repository.owner,
             repository = repository.name,
+            isPrivate = repository.isPrivate,
             branch = repository.defaultBranch
         )
     )
@@ -163,6 +167,7 @@ class BackgroundDownloadManager(context: Context) {
             mimeType = "application/pdf",
             owner = repository.owner,
             repository = repository.name,
+            isPrivate = repository.isPrivate,
             branch = repository.defaultBranch,
             path = item.path,
             sha = item.sha,
@@ -203,7 +208,7 @@ class BackgroundDownloadManager(context: Context) {
             .addTag(metadataTag(payload))
             .build()
         workManager.enqueueUniqueWork(
-            "latex-download-${request.id}",
+            task.uniqueWorkName(),
             ExistingWorkPolicy.KEEP,
             request
         )
@@ -265,6 +270,7 @@ class DownloadWorker(
             val api = GitHubApi()
             val token = SecureTokenStore(applicationContext).read()
             val store = DownloadStore(applicationContext)
+            val staging = store.stagingFile(id.toString())
             var lastPublishAt = 0L
             val onProgress: (Long, Long) -> Unit = { downloaded, total ->
                 val now = System.currentTimeMillis()
@@ -277,24 +283,22 @@ class DownloadWorker(
                 BackgroundDownloadKind.PUBLIC_FILE -> {
                     val repository = task.repositoryModel()
                     val item = task.contentModel()
-                    val file = store.savePublicDownload(task.name, task.mimeType) { stream ->
-                        api.downloadFile(repository, item, token, stream, onProgress)
-                    }
+                    api.downloadFile(repository, item, token, staging, onProgress)
+                    val file = store.publishPublicDownloadFromFile(task.name, task.mimeType, staging)
                     downloadedFileOutput(file)
                 }
                 BackgroundDownloadKind.REPOSITORY_ARCHIVE -> {
-                    val file = store.savePublicDownload(task.name, task.mimeType) { stream ->
-                        api.downloadRepositoryArchive(task.repositoryModel(), token, stream, onProgress)
-                    }
+                    api.downloadRepositoryArchive(task.repositoryModel(), token, staging, onProgress)
+                    val file = store.publishPublicDownloadFromFile(task.name, task.mimeType, staging)
                     downloadedFileOutput(file)
                 }
                 BackgroundDownloadKind.PDF_PREVIEW -> {
-                    val file = store.savePdfPreview(
+                    api.downloadFile(task.repositoryModel(), task.contentModel(), token, staging, onProgress)
+                    val file = store.commitPdfPreviewFromFile(
                         task.cacheKey ?: error("PDF 缓存键缺失"),
-                        task.cacheLimitBytes
-                    ) { stream ->
-                        api.downloadFile(task.repositoryModel(), task.contentModel(), token, stream, onProgress)
-                    }
+                        task.cacheLimitBytes,
+                        staging
+                    )
                     workDataOf(
                         BackgroundDownloadManager.KEY_OUTPUT_NAME to task.name,
                         BackgroundDownloadManager.KEY_OUTPUT_PATH to file.absolutePath,
@@ -304,9 +308,8 @@ class DownloadWorker(
                 }
                 BackgroundDownloadKind.APP_UPDATE -> {
                     val asset = task.releaseAsset()
-                    val file = store.saveUpdate(asset) { stream ->
-                        api.downloadAndroidUpdate(asset, stream, onProgress)
-                    }
+                    api.downloadAndroidUpdate(asset, staging, onProgress)
+                    val file = store.commitUpdateFromFile(asset, staging)
                     workDataOf(
                         BackgroundDownloadManager.KEY_OUTPUT_NAME to task.name,
                         BackgroundDownloadManager.KEY_OUTPUT_PATH to file.absolutePath,
@@ -318,11 +321,16 @@ class DownloadWorker(
             notifyCompleted(task)
             Result.success(output)
         } catch (cancelled: CancellationException) {
+            DownloadStore(applicationContext).discardStaging(
+                DownloadStore(applicationContext).stagingFile(id.toString())
+            )
             throw cancelled
         } catch (failure: Throwable) {
             if (runAttemptCount < MAX_RETRY_ATTEMPTS && failure.isRetryableDownloadFailure()) {
                 Result.retry()
             } else {
+                val store = DownloadStore(applicationContext)
+                store.discardStaging(store.stagingFile(id.toString()))
                 Result.failure(workDataOf(
                     BackgroundDownloadManager.KEY_ERROR to (failure.message ?: "下载失败，请稍后重试")
                 ))
@@ -336,7 +344,7 @@ class DownloadWorker(
             BackgroundDownloadManager.KEY_DOWNLOADED to downloaded.coerceAtLeast(0),
             BackgroundDownloadManager.KEY_TOTAL to total
         )
-        runCatching { setProgressAsync(progress).get() }
+        runCatching { setProgressAsync(progress) }
         runCatching { notificationManager.notify(notificationId, notification(task, downloaded, total, true)) }
     }
 
@@ -419,7 +427,7 @@ class DownloadWorker(
 
     private companion object {
         const val NOTIFICATION_CHANNEL = "latex_downloads"
-        const val PROGRESS_INTERVAL_MS = 500L
+        const val PROGRESS_INTERVAL_MS = 1_000L
         const val MAX_RETRY_ATTEMPTS = 3
     }
 }
@@ -429,7 +437,7 @@ private fun BackgroundDownloadTask.repositoryModel(): GitHubRepository = GitHubR
     fullName = repositoryFullName ?: error("仓库信息缺失"),
     owner = owner ?: error("仓库所有者缺失"),
     description = null,
-    isPrivate = false,
+    isPrivate = this.isPrivate,
     defaultBranch = branch ?: "main",
     updatedAt = "",
     htmlUrl = "https://github.com/${repositoryFullName}",
@@ -465,6 +473,7 @@ private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
     .put("createdAt", createdAt)
     .put("owner", owner)
     .put("repository", repository)
+    .put("isPrivate", isPrivate)
     .put("branch", branch)
     .put("path", path)
     .put("sha", sha)
@@ -478,6 +487,16 @@ private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
     .put("assetApiUrl", assetApiUrl)
     .put("assetDownloadUrl", assetDownloadUrl)
     .put("assetSha256", assetSha256)
+
+private fun BackgroundDownloadTask.uniqueWorkName(): String {
+    val identity = when (kind) {
+        BackgroundDownloadKind.PUBLIC_FILE -> "${repositoryFullName}:${path}:${sha}"
+        BackgroundDownloadKind.REPOSITORY_ARCHIVE -> "${repositoryFullName}:${branch}"
+        BackgroundDownloadKind.PDF_PREVIEW -> cacheKey.orEmpty()
+        BackgroundDownloadKind.APP_UPDATE -> releaseVersion.orEmpty()
+    }
+    return "latex-download-${kind.name.lowercase()}-${identity.hashCode().toUInt().toString(16)}"
+}
 
 private fun JSONObject.optionalString(key: String): String? = optString(key)
     .takeIf { it.isNotBlank() && it != "null" }

@@ -19,6 +19,73 @@ import java.io.OutputStream
 import java.security.MessageDigest
 
 class DownloadStore(private val context: Context) {
+    fun stagingFile(taskId: String): File {
+        val safeId = taskId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
+        val directory = File(context.cacheDir, "background-downloads").apply { mkdirs() }
+        return File(directory, "${safeId.ifBlank { "download" }}.part")
+    }
+
+    fun discardStaging(file: File) {
+        runCatching { if (file.isFile) file.delete() }
+    }
+
+    suspend fun publishPublicDownloadFromFile(
+        displayName: String,
+        mimeType: String,
+        source: File
+    ): DownloadedFile = withContext(Dispatchers.IO) {
+        require(source.isFile && source.length() > 0) { "下载文件为空或已经丢失" }
+        val downloaded = savePublicDownload(displayName, mimeType) { output ->
+            source.inputStream().use { input -> input.copyTo(output, COPY_BUFFER_BYTES) }
+        }
+        source.delete()
+        downloaded
+    }
+
+    suspend fun commitPdfPreviewFromFile(
+        cacheKey: String,
+        maxCacheBytes: Long = DEFAULT_PDF_CACHE_BYTES,
+        source: File
+    ): File = withContext(Dispatchers.IO) {
+        val directory = pdfCacheDirectory()
+        val fileName = pdfCacheName(cacheKey)
+        val destination = File(directory, fileName)
+        try {
+            validatePdf(source)
+            if (destination.exists() && !destination.delete()) {
+                throw IllegalStateException("无法替换 PDF 预览缓存")
+            }
+            moveOrCopy(source, destination)
+            destination.setLastModified(System.currentTimeMillis())
+            trimPdfCache(directory, destination, maxCacheBytes)
+            destination
+        } catch (failure: Throwable) {
+            source.delete()
+            throw failure
+        }
+    }
+
+    suspend fun commitUpdateFromFile(asset: AndroidReleaseAsset, source: File): File = withContext(Dispatchers.IO) {
+        val directory = updateDirectory().apply { mkdirs() }
+        val destination = File(directory, safeName(asset.name))
+        try {
+            require(source.isFile && source.length() > 0) { "更新包为空或已经丢失" }
+            if (asset.size > 0 && source.length() != asset.size) {
+                throw IllegalStateException("更新包大小校验失败，请重新下载")
+            }
+            verifyDigest(source, asset.sha256)
+            if (destination.exists() && !destination.delete()) {
+                throw IllegalStateException("无法替换旧的更新包")
+            }
+            moveOrCopy(source, destination)
+            directory.listFiles()?.filter { it != destination }?.forEach { it.delete() }
+            destination
+        } catch (failure: Throwable) {
+            source.delete()
+            throw failure
+        }
+    }
+
     suspend fun savePublicDownload(
         displayName: String,
         mimeType: String,
@@ -38,8 +105,7 @@ class DownloadStore(private val context: Context) {
         writer: suspend (OutputStream) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val directory = File(context.cacheDir, "pdf-preview").apply { mkdirs() }
-        val fileName = cacheKey.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
-            .let { if (it.endsWith(".pdf", ignoreCase = true)) it else "$it.pdf" }
+        val fileName = pdfCacheName(cacheKey)
         val destination = File(directory, fileName)
         val temporary = File(directory, "$fileName.part")
         if (destination.isFile) {
@@ -69,8 +135,7 @@ class DownloadStore(private val context: Context) {
     }
 
     suspend fun findPdfPreview(cacheKey: String): File? = withContext(Dispatchers.IO) {
-        val fileName = cacheKey.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
-            .let { if (it.endsWith(".pdf", ignoreCase = true)) it else "$it.pdf" }
+        val fileName = pdfCacheName(cacheKey)
         val candidate = File(pdfCacheDirectory(), fileName)
         if (!candidate.isFile) return@withContext null
         runCatching { validatePdf(candidate) }.getOrElse {
@@ -91,6 +156,30 @@ class DownloadStore(private val context: Context) {
         val input = context.contentResolver.openInputStream(Uri.parse(file.contentUri))
             ?: throw IllegalStateException("无法读取已下载的 PDF")
         input.use { it.copyTo(output, 512 * 1024) }
+    }
+
+    fun cachedPdfAsDownloadedFile(localPath: String, displayName: String): DownloadedFile {
+        val file = File(localPath).canonicalFile
+        val cacheRoot = pdfCacheDirectory().canonicalFile
+        require(file.isFile && file.length() > 0 && file.toPath().startsWith(cacheRoot.toPath())) {
+            "找不到可分享的 PDF 缓存"
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        return DownloadedFile(
+            name = safeDownloadName(displayName).let { if (it.endsWith(".pdf", true)) it else "$it.pdf" },
+            contentUri = uri.toString(),
+            displayPath = file.absolutePath,
+            mimeType = "application/pdf",
+            size = file.length()
+        )
+    }
+
+    fun deleteCachedPdf(localPath: String?): Boolean {
+        val value = localPath ?: return false
+        val file = runCatching { File(value).canonicalFile }.getOrNull() ?: return false
+        val cacheRoot = pdfCacheDirectory().canonicalFile
+        if (!file.toPath().startsWith(cacheRoot.toPath())) return false
+        return !file.exists() || file.delete()
     }
 
     suspend fun pdfCacheBytes(): Long = withContext(Dispatchers.IO) {
@@ -176,6 +265,22 @@ class DownloadStore(private val context: Context) {
     }
 
     private fun pdfCacheDirectory(): File = File(context.cacheDir, "pdf-preview").apply { mkdirs() }
+
+    private fun pdfCacheName(cacheKey: String): String = cacheKey
+        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .take(120)
+        .let { if (it.endsWith(".pdf", ignoreCase = true)) it else "$it.pdf" }
+
+    private fun moveOrCopy(source: File, destination: File) {
+        if (source.renameTo(destination)) return
+        source.inputStream().use { input ->
+            FileOutputStream(destination).use { output ->
+                input.copyTo(output, COPY_BUFFER_BYTES)
+                output.fd.sync()
+            }
+        }
+        source.delete()
+    }
 
     private fun trimPdfCache(directory: File, keep: File, maxCacheBytes: Long) {
         val limit = maxCacheBytes.coerceAtLeast(64L * 1024 * 1024)
@@ -326,5 +431,6 @@ class DownloadStore(private val context: Context) {
     private companion object {
         const val DOWNLOAD_FOLDER = "LaTeX项目"
         const val DEFAULT_PDF_CACHE_BYTES = 512L * 1024 * 1024
+        const val COPY_BUFFER_BYTES = 1024 * 1024
     }
 }

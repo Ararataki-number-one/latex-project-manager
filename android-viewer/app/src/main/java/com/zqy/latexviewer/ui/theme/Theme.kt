@@ -22,14 +22,14 @@ private val LightColors = lightColorScheme(
     onPrimaryContainer = Color(0xFF075B48),
     secondary = Color(0xFF10A37F),
     onSecondary = Color.White,
-    background = Color(0xFFF7F7F8),
+    background = Color(0xFFFFFFFF),
     onBackground = Color(0xFF111111),
     surface = Color(0xFFFFFFFF),
     onSurface = Color(0xFF111111),
-    surfaceVariant = Color(0xFFF0F0F0),
+    surfaceVariant = Color(0xFFF4F4F4),
     onSurfaceVariant = Color(0xFF666666),
     outline = Color(0xFFD9D9D9),
-    outlineVariant = Color(0xFFE9E9E9),
+    outlineVariant = Color(0xFFEDEDED),
     error = Color(0xFFB42318),
     errorContainer = Color(0xFFFFE9E7)
 )

@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 
 enum class ViewerScreen {
     HOME,
@@ -48,7 +49,8 @@ data class TransferUiState(
     val label: String,
     val downloaded: Long = 0,
     val total: Long = -1,
-    val waitingForNetwork: Boolean = false
+    val waitingForNetwork: Boolean = false,
+    val bytesPerSecond: Long = 0
 )
 
 data class ViewerUiState(
@@ -70,6 +72,7 @@ data class ViewerUiState(
     val externalFile: DownloadedFile? = null,
     val loading: Boolean = false,
     val transfer: TransferUiState? = null,
+    val transferPanelVisible: Boolean = true,
     val error: String? = null,
     val notice: String? = null,
     val externalUrl: String? = null,
@@ -97,7 +100,9 @@ class ViewerViewModel(
     val state: StateFlow<ViewerUiState> = _state.asStateFlow()
     private var settingsReturnScreen = ViewerScreen.HOME
     private var viewerReturnScreen = ViewerScreen.HOME
+    private var pendingPdfOpenKey: String? = null
     private val seenFinishedDownloads = mutableSetOf<String>()
+    private val transferSamples = mutableMapOf<String, Pair<Long, Long>>()
 
     init {
         observeBackgroundDownloads()
@@ -123,19 +128,33 @@ class ViewerViewModel(
     }
 
     fun openAddProject() {
+        pendingPdfOpenKey = null
         _state.update { it.copy(screen = ViewerScreen.CONNECT, error = null) }
     }
 
     fun openHome() {
+        pendingPdfOpenKey = null
         _state.update { it.copy(screen = ViewerScreen.HOME, currentRepository = null, currentPath = "", error = null) }
     }
 
     fun openProjects() {
+        pendingPdfOpenKey = null
         _state.update { it.copy(screen = ViewerScreen.REPOSITORIES, currentRepository = null, currentPath = "", error = null) }
     }
 
     fun openDownloads() {
-        _state.update { it.copy(screen = ViewerScreen.DOWNLOADS, currentRepository = null, currentPath = "", error = null) }
+        pendingPdfOpenKey = null
+        _state.value.completedDownloadWorkId?.let(preferences::markDownloadWorkHandled)
+        _state.update {
+            it.copy(
+                screen = ViewerScreen.DOWNLOADS,
+                currentRepository = null,
+                currentPath = "",
+                completedDownload = null,
+                completedDownloadWorkId = null,
+                error = null
+            )
+        }
     }
 
     fun loadRepositories() {
@@ -189,6 +208,7 @@ class ViewerViewModel(
     }
 
     fun openRepositoryReference(reference: String) {
+        pendingPdfOpenKey = null
         launchRequest {
             val repository = api.getRepository(reference, tokenStore.read())
             rememberRepository(repository)
@@ -197,11 +217,13 @@ class ViewerViewModel(
     }
 
     fun openRepository(repository: GitHubRepository) {
+        pendingPdfOpenKey = null
         rememberRepository(repository)
         launchRequest { openRepositoryContents(repository, "") }
     }
 
     fun openMobilePdf(repository: GitHubRepository, output: MobilePdfOutput) {
+        pendingPdfOpenKey = pdfOpenKey(repository.fullName, output.pdfPath)
         if (_state.value.screen != ViewerScreen.PDF) viewerReturnScreen = _state.value.screen
         val previous = preferences.readingProgress(repository.fullName, output.pdfPath)
         viewModelScope.launch {
@@ -230,8 +252,13 @@ class ViewerViewModel(
                     if (latest.sha != previous.sha) {
                         openOrQueuePdfLatest(repository, latest, output.name)
                         showNotice("发现新版本，正在后台更新 ${output.name}")
+                    } else {
+                        pendingPdfOpenKey = null
                     }
-                }.onFailure { showNotice("当前离线阅读；联网后可检查最新版") }
+                }.onFailure {
+                    pendingPdfOpenKey = null
+                    showNotice("当前离线阅读；联网后可检查最新版")
+                }
             } else {
                 launchRequest {
                     val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
@@ -320,7 +347,8 @@ class ViewerViewModel(
                             name = downloaded.name,
                             path = downloaded.displayPath,
                             htmlUrl = null,
-                            localPath = local.absolutePath
+                            localPath = local.absolutePath,
+                            contentUri = downloaded.contentUri
                         )
                     )
                 }
@@ -355,9 +383,57 @@ class ViewerViewModel(
         _state.update { it.copy(externalFile = null) }
     }
 
+    fun openCurrentPdfExternally() {
+        val document = _state.value.pdfDocument ?: return
+        val localPath = document.localPath ?: return
+        runCatching { downloadStore.cachedPdfAsDownloadedFile(localPath, document.name) }
+            .onSuccess { file -> _state.update { it.copy(externalFile = file) } }
+            .onFailure { showError(it.message ?: "无法交给其他 PDF 应用打开") }
+    }
+
+    fun retryCurrentPdf() {
+        val document = _state.value.pdfDocument ?: return
+        val repository = document.repositoryFullName?.let { fullName ->
+            _state.value.repositories.firstOrNull { it.fullName.equals(fullName, ignoreCase = true) }
+                ?: _state.value.currentRepository?.takeIf { it.fullName.equals(fullName, ignoreCase = true) }
+        }
+        if (repository != null) {
+            pendingPdfOpenKey = pdfOpenKey(repository.fullName, document.path)
+            viewModelScope.launch {
+                runCatching {
+                    downloadStore.deleteCachedPdf(document.localPath)
+                    val latest = api.getContent(repository, document.path, tokenStore.read())
+                    backgroundDownloads.enqueuePdf(repository, latest, document.name, preferences.pdfCacheLimitBytes)
+                    showNotice("正在重新下载 ${document.name}，可以隐藏进度并继续使用应用")
+                }.onFailure { showError(it.message ?: "无法重新下载 PDF") }
+            }
+            return
+        }
+
+        val sourceUri = document.contentUri
+        if (sourceUri.isNullOrBlank()) {
+            showError("这个 PDF 没有可用的重新下载来源，请尝试使用其他 PDF 应用打开")
+            return
+        }
+        viewModelScope.launch {
+            val previousSize = document.localPath?.let { File(it).takeIf(File::isFile)?.length() } ?: 0L
+            runCatching {
+                downloadStore.deleteCachedPdf(document.localPath)
+                val local = downloadStore.materializePdfForViewer(
+                    DownloadedFile(document.name, sourceUri, document.path, "application/pdf", previousSize),
+                    preferences.pdfCacheLimitBytes
+                )
+                _state.update {
+                    it.copy(pdfDocument = document.copy(localPath = local.absolutePath, openedAt = System.nanoTime()))
+                }
+            }.onFailure { showError(it.message ?: "无法重新读取已下载的 PDF") }
+        }
+    }
+
     fun openSettings() {
         val current = _state.value.screen
         if (current == ViewerScreen.SETTINGS) return
+        pendingPdfOpenKey = null
         settingsReturnScreen = current
         _state.update { it.copy(screen = ViewerScreen.SETTINGS, error = null) }
     }
@@ -468,6 +544,7 @@ class ViewerViewModel(
     }
 
     fun goBack() {
+        pendingPdfOpenKey = null
         val current = _state.value
         when (current.screen) {
             ViewerScreen.TEXT -> _state.update {
@@ -613,6 +690,7 @@ class ViewerViewModel(
     }
 
     private fun openPdf(repository: GitHubRepository, item: GitHubContent) {
+        pendingPdfOpenKey = pdfOpenKey(repository.fullName, item.path)
         launchRequest {
             val latest = api.getContent(repository, item.path, tokenStore.read())
             openOrQueuePdfLatest(repository, latest, latest.name)
@@ -620,6 +698,7 @@ class ViewerViewModel(
     }
 
     private suspend fun openOrQueuePdfLatest(repository: GitHubRepository, latest: GitHubContent, displayName: String) {
+        pendingPdfOpenKey = pdfOpenKey(repository.fullName, latest.path)
         val previous = preferences.readingProgress(repository.fullName, latest.path)
         val cacheKey = "${repository.owner}-${repository.name}-${latest.sha}.pdf"
         val file = downloadStore.findPdfPreview(cacheKey)
@@ -629,6 +708,7 @@ class ViewerViewModel(
             return
         }
         openPdfDocument(repository, latest, displayName, file.absolutePath, previous)
+        pendingPdfOpenKey = null
     }
 
     private fun openPdfDocument(
@@ -705,6 +785,10 @@ class ViewerViewModel(
         _state.value.transfer?.workId?.let { runCatching { backgroundDownloads.cancel(java.util.UUID.fromString(it)) } }
     }
 
+    fun hideTransferPanel() {
+        _state.update { it.copy(transferPanelVisible = false) }
+    }
+
     private fun observeBackgroundDownloads() {
         viewModelScope.launch {
             backgroundDownloads.snapshots.collect { snapshots ->
@@ -712,19 +796,38 @@ class ViewerViewModel(
                     it.state in setOf(WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED, WorkInfo.State.RUNNING)
                 }
                 _state.update { current ->
+                    val nextTransfer = active?.let { snapshot ->
+                        val workId = snapshot.workId.toString()
+                        val now = System.currentTimeMillis()
+                        val previous = transferSamples[workId]
+                        val measuredSpeed = previous?.let { (at, bytes) ->
+                            val elapsed = now - at
+                            val delta = snapshot.downloaded - bytes
+                            if (elapsed >= 500 && delta >= 0) delta * 1_000L / elapsed else null
+                        }
+                        transferSamples[workId] = now to snapshot.downloaded
+                        TransferUiState(
+                            workId = workId,
+                            label = if (snapshot.state == WorkInfo.State.RUNNING) {
+                                snapshot.task.label
+                            } else {
+                                "排队中 · ${snapshot.task.name}"
+                            },
+                            downloaded = snapshot.downloaded,
+                            total = snapshot.total,
+                            waitingForNetwork = snapshot.state != WorkInfo.State.RUNNING,
+                            bytesPerSecond = measuredSpeed
+                                ?: current.transfer?.takeIf { it.workId == workId }?.bytesPerSecond
+                                ?: 0L
+                        )
+                    }
+                    if (nextTransfer == null) transferSamples.clear()
                     current.copy(
-                        transfer = active?.let { snapshot ->
-                            TransferUiState(
-                                workId = snapshot.workId.toString(),
-                                label = if (snapshot.state == WorkInfo.State.RUNNING) {
-                                    snapshot.task.label
-                                } else {
-                                    "排队中 · ${snapshot.task.name}"
-                                },
-                                downloaded = snapshot.downloaded,
-                                total = snapshot.total,
-                                waitingForNetwork = snapshot.state != WorkInfo.State.RUNNING
-                            )
+                        transfer = nextTransfer,
+                        transferPanelVisible = when {
+                            nextTransfer == null -> true
+                            current.transfer?.workId != nextTransfer.workId -> true
+                            else -> current.transferPanelVisible
                         }
                     )
                 }
@@ -738,10 +841,16 @@ class ViewerViewModel(
                         when (snapshot.state) {
                             WorkInfo.State.SUCCEEDED -> handleSuccessfulDownload(snapshot)
                             WorkInfo.State.FAILED -> {
+                                if (snapshot.task.kind == BackgroundDownloadKind.PDF_PREVIEW) {
+                                    pendingPdfOpenKey = null
+                                }
                                 preferences.markDownloadWorkHandled(workId)
                                 showError(snapshot.error ?: "${snapshot.task.name} 下载失败，请重试")
                             }
                             WorkInfo.State.CANCELLED -> {
+                                if (snapshot.task.kind == BackgroundDownloadKind.PDF_PREVIEW) {
+                                    pendingPdfOpenKey = null
+                                }
                                 preferences.markDownloadWorkHandled(workId)
                                 showNotice("已取消 ${snapshot.task.name}")
                             }
@@ -781,8 +890,14 @@ class ViewerViewModel(
                         htmlUrl = "${repository.htmlUrl}/blob/${repository.defaultBranch}/$path",
                         downloadUrl = snapshot.task.downloadUrl
                     )
-                    openPdfDocument(repository, item, snapshot.task.name, localPath)
-                    showNotice("${snapshot.task.name} 已下载，可以离线阅读")
+                    val key = pdfOpenKey(repository.fullName, path)
+                    if (pendingPdfOpenKey == key) {
+                        openPdfDocument(repository, item, snapshot.task.name, localPath)
+                        pendingPdfOpenKey = null
+                        showNotice("${snapshot.task.name} 已下载，可以离线阅读")
+                    } else {
+                        showNotice("${snapshot.task.name} 已缓存，可从首页或项目中打开")
+                    }
                 }
                 preferences.markDownloadWorkHandled(workId)
             }
@@ -827,6 +942,9 @@ class ViewerViewModel(
         val mime = output.getString(BackgroundDownloadManager.KEY_OUTPUT_MIME) ?: "application/octet-stream"
         return DownloadedFile(name, uri, path, mime, output.getLong(BackgroundDownloadManager.KEY_OUTPUT_SIZE, 0L))
     }
+
+    private fun pdfOpenKey(repositoryFullName: String, path: String): String =
+        "${repositoryFullName.lowercase()}:${path.replace('\\', '/')}"
 
     private fun launchRequest(block: suspend () -> Unit) {
         if (_state.value.loading) return
