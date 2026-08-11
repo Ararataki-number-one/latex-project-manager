@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, Menu, nativeImage, nativeTheme, Notification, session, shell, Tray } from "electron";
+import { app, BrowserWindow, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray } from "electron";
 import { registerIpcHandlers, type IpcRuntimeController } from "./ipc";
 import type { AppRuntimeSettings, GitHubSyncEvent } from "../shared/types";
 import { isTrustedRendererUrl, rendererContentSecurityPolicy } from "./services/electron-security";
@@ -19,11 +19,14 @@ function rendererDocumentUrl(): string {
 }
 
 function createWindow(allowedUrl: string): BrowserWindow {
+  const workArea = screen.getPrimaryDisplay().workAreaSize;
+  const initialWidth = Math.min(1480, Math.max(760, workArea.width - 32));
+  const initialHeight = Math.min(940, Math.max(560, workArea.height - 32));
   const window = new BrowserWindow({
-    width: 1480,
-    height: 940,
-    minWidth: 980,
-    minHeight: 680,
+    width: initialWidth,
+    height: initialHeight,
+    minWidth: Math.min(980, initialWidth),
+    minHeight: Math.min(680, initialHeight),
     show: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#17191c" : "#f5f6f7",
     title: "LaTeX 项目管理器",
@@ -37,8 +40,20 @@ function createWindow(allowedUrl: string): BrowserWindow {
       devTools: isDevelopment
     }
   });
+  window.center();
 
-  window.on("ready-to-show", () => window.show());
+  window.once("ready-to-show", () => window.show());
+  window.webContents.once("did-finish-load", () => {
+    // A renderer can finish before Chromium emits ready-to-show on some Windows
+    // graphics/scale combinations. Never leave the app running only in the tray.
+    if (!window.isVisible()) window.show();
+  });
+  window.webContents.once("did-fail-load", () => {
+    if (!window.isVisible()) window.show();
+  });
+  window.webContents.once("render-process-gone", () => {
+    if (!window.isVisible()) window.show();
+  });
   window.on("close", (event) => {
     if (!quitting && runtime?.runtimeSettings().closeToTray) {
       event.preventDefault();

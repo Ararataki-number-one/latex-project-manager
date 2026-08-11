@@ -160,6 +160,9 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
   await page.getByRole("button", { name: "重新打开新手向导" }).click();
   const onboarding = page.getByRole("dialog", { name: "配置 LaTeX 项目管理器" });
   await expect(onboarding).toBeVisible();
+  await expect(onboarding.getByLabel("新手引导第 1 步，共 3 步")).toContainText("检查环境");
+  await expect(onboarding.getByText("连接 GitHub", { exact: true })).toBeVisible();
+  await expect(onboarding.getByText("导入项目", { exact: true })).toBeVisible();
   await expect(onboarding.getByText("Git LFS", { exact: true })).toBeVisible();
   await onboarding.getByRole("button", { name: "暂时关闭新手引导" }).click();
   await expectNoHorizontalOverflow(page);
@@ -169,11 +172,17 @@ test("导入项目会询问是否自动创建 GitHub 仓库", async ({ page }) =
   await page.goto("/");
   await page.getByRole("button", { name: "导入项目" }).click();
   const dialog = page.getByRole("dialog", { name: "导入 LaTeX 项目" });
+  await expect(dialog.getByLabel("导入进度")).toContainText("选择目录");
+  await dialog.getByRole("button", { name: "选择目录" }).click();
+  await expect(dialog.locator(".candidate")).toHaveCount(2);
+  await dialog.locator(".candidate").filter({ hasText: probability }).click();
+  await expect(dialog.getByRole("button", { name: "加入本机项目库" })).toBeEnabled();
   const sync = dialog.getByRole("checkbox", { name: /导入后启用 GitHub 自动同步/ });
   await expect(sync).not.toBeChecked();
   await sync.check();
   await expect(dialog.getByText("新仓库可见性", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("combobox")).toHaveValue("private");
+  await expect(dialog.getByRole("button", { name: "导入并开启同步" })).toBeEnabled();
 });
 
 test("同步中心汇总项目状态并直达项目同步页", async ({ page }) => {
@@ -181,6 +190,9 @@ test("同步中心汇总项目状态并直达项目同步页", async ({ page }) 
   await page.getByRole("navigation", { name: "应用导航" }).getByRole("button", { name: "同步中心" }).click();
   await expect(page.getByRole("heading", { name: "同步中心" })).toBeVisible();
   await expect(page.getByLabel("同步概况")).toBeVisible();
+  await expect(page.getByLabel("同步概况")).toContainText("待同步");
+  await expect(page.getByLabel("同步概况")).toContainText("同步中");
+  await expect(page.getByText("客户端只做安全快进")).toBeVisible();
   await expect(page.getByRole("button", { name: "暂停自动同步" })).toBeVisible();
   await expect(page.getByRole("button", { name: "同步全部" })).toBeVisible();
 

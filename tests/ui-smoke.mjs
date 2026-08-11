@@ -30,6 +30,21 @@ await desktop.getByRole("table", { name: "项目列表" }).waitFor();
 await assertNoOverflow(desktop, "desktopLibrary");
 await desktop.screenshot({ path: "test-results/ui-library-desktop.png", fullPage: true });
 
+await desktop.getByRole("button", { name: "导入项目" }).click();
+const desktopImport = desktop.getByRole("dialog", { name: "导入 LaTeX 项目" });
+await desktopImport.getByRole("button", { name: "选择目录" }).click();
+await desktopImport.locator(".candidate").first().click();
+await assertNoOverflow(desktop, "desktopImport");
+await desktop.screenshot({ path: "test-results/ui-import-desktop.png", fullPage: true });
+await desktopImport.getByRole("button", { name: "关闭" }).click();
+
+await desktop.getByRole("button", { name: "开始" }).click();
+const desktopOnboarding = desktop.getByRole("dialog", { name: "配置 LaTeX 项目管理器" });
+await desktopOnboarding.waitFor();
+await assertNoOverflow(desktop, "desktopOnboarding");
+await desktop.screenshot({ path: "test-results/ui-onboarding-desktop.png", fullPage: true });
+await desktopOnboarding.getByRole("button", { name: "暂时关闭新手引导" }).click();
+
 const probability = "概率方法笔记";
 await projectRow(desktop, probability).getByRole("button", { name: `更多操作 ${probability}` }).click();
 await desktop.getByRole("dialog", { name: `项目操作 ${probability}` }).waitFor();
@@ -61,6 +76,12 @@ await mobile.goto(previewUrl, { waitUntil: "networkidle" });
 await mobile.getByRole("table", { name: "项目列表" }).waitFor();
 await assertNoOverflow(mobile, "mobileLibrary");
 await mobile.screenshot({ path: "test-results/ui-library-mobile.png", fullPage: true });
+await mobile.getByRole("button", { name: "导入项目" }).click();
+const mobileImport = mobile.getByRole("dialog", { name: "导入 LaTeX 项目" });
+await mobileImport.waitFor();
+await assertNoOverflow(mobile, "mobileImport");
+await mobile.screenshot({ path: "test-results/ui-import-mobile.png", fullPage: true });
+await mobileImport.getByRole("button", { name: "关闭" }).click();
 const mobileMenuTrigger = projectRow(mobile, probability).getByRole("button", { name: `更多操作 ${probability}` });
 await mobileMenuTrigger.click();
 const mobileProjectMenu = mobile.getByRole("dialog", { name: `项目操作 ${probability}` });

@@ -80,8 +80,16 @@ function ProjectSyncBadge({ status }: { status?: GitHubSyncStatus }) {
     label = "安全阻止";
     tone = "error";
     icon = <ShieldCheck size={12} />;
+  } else if (status?.configured && status.state === "changes") {
+    label = "待同步";
+    tone = "pending";
+    icon = <Clock3 size={12} />;
   } else if (status?.configured && status.state === "synced") {
     label = "已同步";
+    tone = "success";
+    icon = <CheckCircle2 size={12} />;
+  } else if (status?.configured && status.state === "ready") {
+    label = "已连接";
     tone = "success";
     icon = <CheckCircle2 size={12} />;
   } else if (status?.configured && new Set(["error", "needsPull", "unavailable"]).has(status.state)) {
@@ -156,10 +164,19 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [syncOnImport, setSyncOnImport] = useState(false);
   const [importVisibility, setImportVisibility] = useState<GitHubRepositoryVisibility>("private");
   const [importingPath, setImportingPath] = useState<string | null>(null);
+  const [selectedImportPath, setSelectedImportPath] = useState<string | null>(null);
 
   useEffect(() => {
     if (openImportNonce > 0) setImportOpen(true);
   }, [openImportNonce]);
+
+  useEffect(() => {
+    if (importOpen) return;
+    setCandidates([]);
+    setSelectedImportPath(null);
+    setSyncOnImport(false);
+    setImportVisibility("private");
+  }, [importOpen]);
 
   useEffect(() => {
     if (!menuProjectId) return;
@@ -503,7 +520,9 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
     try {
       const root = await api.dialogs.openDirectory();
       if (!root) return;
-      setCandidates(await api.library.scan(root, { maxDepth: 3 }));
+      const scanned = await api.library.scan(root, { maxDepth: 3 });
+      setCandidates(scanned);
+      setSelectedImportPath(scanned.length === 1 ? scanned[0].rootPath : null);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "扫描失败");
     } finally {
@@ -791,31 +810,45 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
       )}
 
       {importOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setImportOpen(false)}>
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setImportOpen(false)} onKeyDown={(event) => { if (event.key === "Escape") setImportOpen(false); }}>
           <section className="modal import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title" onMouseDown={(event) => event.stopPropagation()}>
             <header className="modal-header">
-              <div><p className="eyebrow">只读扫描 · Read-only scan</p><h2 id="import-title">导入 LaTeX 项目</h2></div>
+              <div><p className="eyebrow">本地项目库</p><h2 id="import-title">导入 LaTeX 项目</h2><span>只登记项目位置，不复制或修改源文件</span></div>
               <IconButton label="关闭" onClick={() => setImportOpen(false)}><X size={18} /></IconButton>
             </header>
-            <div className="scan-callout">
-              <FolderInput size={22} />
-              <div><strong>选择资料库或项目目录</strong><p>默认递归 3 层，只识别入口，不修改任何 `.tex` 文件。</p></div>
-              <button className="button primary" onClick={() => void scanLibrary()} disabled={scanning}>{scanning ? "正在扫描…" : "选择目录"}</button>
+            <ol className="import-progress" aria-label="导入进度">
+              {["选择目录", "选择项目", "导入方式"].map((label, index) => {
+                const step = candidates.length === 0 ? 0 : selectedImportPath ? 2 : 1;
+                return <li key={label} className={index < step ? "completed" : index === step ? "current" : "locked"} aria-current={index === step ? "step" : undefined}><span>{index < step ? <Check size={14} /> : index + 1}</span><strong>{label}</strong></li>;
+              })}
+            </ol>
+            <div className="import-stage import-source-stage">
+              <div className="import-stage-heading"><span>1</span><div><strong>从电脑中选择目录</strong><p>可选择单个项目，也可选择资料库。默认向下扫描 3 层。</p></div></div>
+              <button className="button primary" onClick={() => void scanLibrary()} disabled={scanning}>{scanning ? <><RefreshCw size={16} className="spin" />正在扫描…</> : <><FolderInput size={16} />{candidates.length ? "重新选择目录" : "选择目录"}</>}</button>
             </div>
-            <div className="import-sync-choice">
-              <label className="sync-toggle"><span><strong>导入后启用 GitHub 自动同步</strong><small>自动创建新仓库，并同步新增、删除和文件内容修改</small></span><input type="checkbox" checked={syncOnImport} onChange={(event) => setSyncOnImport(event.target.checked)} /></label>
-              {syncOnImport && <div className="import-sync-options"><label><span>新仓库可见性</span><select value={importVisibility} onChange={(event) => setImportVisibility(event.target.value as GitHubRepositoryVisibility)}><option value="private">私有（推荐）</option><option value="public">公开</option></select></label><p>仓库名会根据项目名称自动生成。请先在“设置 → GitHub 连接”登录账号。</p></div>}
+            <div className={`import-stage import-project-stage ${candidates.length ? "ready" : "locked"}`}>
+              <div className="import-stage-heading"><span>2</span><div><strong>选择要加入项目库的项目</strong><p>{candidates.length ? `已识别 ${candidates.length} 个项目，选择其中一个继续。` : "选择目录后，这里会列出识别到的 LaTeX 主文件。"}</p></div></div>
+              <div className="candidate-list">
+                {candidates.length === 0 && <div className="import-empty"><BookOpenText size={24} /><span>等待选择目录</span><small>扫描过程只读，不会改写 `.tex`、`.bib` 或 `.cls`。</small></div>}
+                {candidates.map((candidate) => {
+                  const selected = selectedImportPath === candidate.rootPath;
+                  return <button type="button" className={`candidate ${selected ? "selected" : ""}`} key={candidate.rootPath} aria-pressed={selected} onClick={() => setSelectedImportPath(candidate.rootPath)} disabled={importingPath !== null}>
+                    <span className="candidate-icon"><BookOpenText size={19} /></span>
+                    <span className="candidate-copy"><strong>{candidate.name}</strong><small title={candidate.rootPath}>{candidate.rootPath}</small><em>{candidate.entries.length} 个入口 · {candidate.entries.map((entry) => `${entry.relativePath} (${entry.className})`).join("、")}</em></span>
+                    <span className="candidate-radio" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
+                  </button>;
+                })}
+              </div>
             </div>
-            <div className="candidate-list">
-              {candidates.length === 0 && <p className="empty-inline">扫描结果会显示在这里。浏览器演示模式可返回两组模拟项目。</p>}
-              {candidates.map((candidate) => (
-                <div className="candidate" key={candidate.rootPath}>
-                  <BookOpenText size={20} />
-                  <div><strong>{candidate.name}</strong><p>{candidate.rootPath}</p><span>{candidate.entries.length} 个入口：{candidate.entries.map((entry) => `${entry.relativePath} (${entry.className})`).join("、")}</span></div>
-                  <button className="button secondary" disabled={importingPath !== null} onClick={() => void importCandidate(candidate)}>{importingPath === candidate.rootPath ? "正在导入…" : syncOnImport ? "导入并同步" : "选择"}</button>
-                </div>
-              ))}
+            <div className={`import-stage import-sync-choice ${selectedImportPath ? "ready" : "locked"}`}>
+              <div className="import-stage-heading"><span>3</span><div><strong>选择导入方式</strong><p>默认只加入本机项目库；GitHub 同步可稍后再开启。</p></div></div>
+              <label className="sync-toggle"><span><strong>同时创建 GitHub 仓库并自动同步</strong><small>后续新增、修改和删除会在停止变化约 10 秒后安全同步</small></span><input type="checkbox" aria-label="导入后启用 GitHub 自动同步" checked={syncOnImport} onChange={(event) => setSyncOnImport(event.target.checked)} disabled={!selectedImportPath} /></label>
+              {syncOnImport && <div className="import-sync-options"><label><span>新仓库可见性</span><select value={importVisibility} onChange={(event) => setImportVisibility(event.target.value as GitHubRepositoryVisibility)}><option value="private">私有（推荐）</option><option value="public">公开</option></select></label><p>{importVisibility === "public" ? "公开仓库中的源码和原始文稿对所有人可见；首次上传前仍会进行安全检查。" : "仓库名会根据项目名称自动生成，登录凭据由 GitHub CLI 管理。"}</p></div>}
             </div>
+            <footer className="import-actions">
+              <div><ShieldCheck size={17} /><span>源文件保持原位；同步前会扫描私钥、令牌和大型文件。</span></div>
+              <button className="button primary" disabled={!selectedImportPath || importingPath !== null} onClick={() => { const candidate = candidates.find((item) => item.rootPath === selectedImportPath); if (candidate) void importCandidate(candidate); }}>{importingPath ? <><RefreshCw size={16} className="spin" />正在导入…</> : syncOnImport ? "导入并开启同步" : "加入本机项目库"}</button>
+            </footer>
             {isDemo && <p className="demo-note">演示模式不会写入目录；桌面客户端中选择后会进入迁移预览。</p>}
           </section>
         </div>
@@ -1097,15 +1130,17 @@ function SyncCenterView({ api, projects, paused, onPausedChange, onOpenProject, 
 
   const configured = availableProjects.filter((project) => statuses[project.id]?.configured);
   const attention = configured.filter((project) => ["blocked", "error", "needsPull", "unavailable"].includes(statuses[project.id]?.state));
-  const active = configured.filter((project) => ["queued", "syncing", "retrying", "changes"].includes(statuses[project.id]?.state));
+  const pending = configured.filter((project) => statuses[project.id]?.state === "changes");
+  const active = configured.filter((project) => ["queued", "syncing", "retrying"].includes(statuses[project.id]?.state));
 
   return <section className="sync-center-page">
     <header className="sync-center-heading">
-      <div><span className="page-heading-icon"><Cloud size={22} /></span><div><h1>同步中心</h1><p>{configured.length} 个项目已连接 GitHub · {attention.length ? `${attention.length} 个需要处理` : "当前没有阻止项"}</p></div></div>
+      <div><span className="page-heading-icon"><Cloud size={22} /></span><div><h1>同步中心</h1><p>{configured.length} 个项目已连接 GitHub · {attention.length ? `${attention.length} 个需要处理` : pending.length ? `${pending.length} 个等待同步` : active.length ? `${active.length} 个正在同步` : "全部已同步"}</p></div></div>
       <div><button className="button secondary" disabled={busy !== null} onClick={() => void togglePaused()}>{paused ? <PlayCircle size={17} /> : <PauseCircle size={17} />}{paused ? "恢复自动同步" : "暂停自动同步"}</button><button className="button primary" disabled={busy !== null || paused} onClick={() => void syncAll()}><RefreshCw size={17} className={busy === "sync" ? "spin" : ""} />同步全部</button></div>
     </header>
     {paused && <div className="sync-center-paused"><PauseCircle size={18} /><div><strong>自动同步已暂停</strong><p>本地变化仍会保留，恢复后继续处理队列。</p></div></div>}
-    <div className="sync-center-summary" aria-label="同步概况"><span><strong>{configured.length}</strong>已连接</span><span><strong>{active.length}</strong>处理中</span><span className={attention.length ? "attention" : ""}><strong>{attention.length}</strong>需要处理</span></div>
+    <div className="sync-center-summary" aria-label="同步概况"><span><small>已连接</small><strong>{configured.length}</strong></span><span className={pending.length ? "pending" : ""}><small>待同步</small><strong>{pending.length}</strong></span><span className={active.length ? "active" : ""}><small>同步中</small><strong>{active.length}</strong></span><span className={attention.length ? "attention" : ""}><small>需要处理</small><strong>{attention.length}</strong></span></div>
+    <div className="sync-center-explainer"><ShieldCheck size={17} /><span>客户端只做安全快进，不会自动合并冲突或强制推送；遇到风险会暂停并提示你处理。</span></div>
     <section className="sync-project-list" aria-label="项目同步状态">
       {availableProjects.map((project) => {
         const status = statuses[project.id];
