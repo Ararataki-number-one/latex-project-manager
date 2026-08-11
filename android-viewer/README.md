@@ -28,7 +28,7 @@
 要求：
 
 - JDK 17
-- Android SDK 37
+- Android SDK 36
 - Android Studio 支持 Android Gradle Plugin 9.1.1
 
 用 Android Studio 打开本目录，等待 Gradle 同步后运行 `app`。命令行也可以使用：
