@@ -2,7 +2,7 @@
 
 一个 Windows 优先、完全在本机运行的 LaTeX 项目管理软件。它把分散在不同目录中的项目集中成类似 Overleaf“所有项目”的列表，但不接管源码编辑、PDF 阅读或正式编译。
 
-桌面端用于整理项目；写作、编译和调试继续交给 VS Code、LaTeX Workshop 或其他外部工具。仓库同时包含一个只读的 Android 客户端，用于查看 GitHub 上的项目文件。
+桌面端用于整理项目；写作、编译和调试继续交给 VS Code、LaTeX Workshop 或其他外部工具。仓库同时包含一个只读的 Android 客户端，用于管理并查看多个 GitHub 项目。
 
 ## 桌面端
 
@@ -66,12 +66,13 @@
 
 源码位于 [`android-viewer`](android-viewer)。它使用 Jetpack Compose 构建，采用中性留白、圆角卡片和系统浅色/深色主题：
 
-- 列出 GitHub 公开与私有仓库；
+- 把多个 GitHub 公开或私有仓库持久保存在手机项目库中，并可随时添加、切换或移除本机入口；
 - 浏览目录与默认分支；
-- 在手机中阅读 `.tex`、`.bib`、`.cls`、`.sty`、Markdown 和常见文本文件；
+- 使用内置代码查看器阅读 `.tex`、`.bib`、`.cls`、`.sty`、Markdown 和常见文本文件；
+- 使用 Android 原生 PDF 渲染器在应用内分页阅读 PDF；
 - 搜索仓库和当前目录；
-- 每个文件都可以单独选择位置下载，PDF、图片等二进制文件无需先打开 GitHub 网页；
-- 每个仓库可以整体下载为 ZIP；
+- 每个文件都可以单独下载，每个仓库也可以整体下载为 ZIP；
+- 普通下载默认保存到 `内部存储/Download/LaTeX项目`，完成后显示准确位置并提供“现在打开”；
 - 自动检查 Android 新版本，也可以自动下载 APK，校验后由 Android 系统确认安装；
 - 没有编辑、提交、上传或删除功能；
 - GitHub 令牌由 Android Keystore 加密保存。

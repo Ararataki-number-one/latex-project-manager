@@ -1,8 +1,9 @@
 package com.zqy.latexviewer.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,12 +31,15 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Clear
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -44,6 +48,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Logout
 import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
@@ -51,6 +56,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -94,6 +100,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.ui.theme.LaTeXViewerTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -104,32 +111,6 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
     val apkInstaller = remember(context) { ApkInstaller(context.applicationContext) }
-    var pendingFile by remember { mutableStateOf<GitHubContent?>(null) }
-    var pendingRepository by remember { mutableStateOf<GitHubRepository?>(null) }
-    val fileDownloadLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { destination ->
-        val item = pendingFile
-        pendingFile = null
-        if (destination != null && item != null) viewModel.downloadFile(item, destination)
-    }
-    val projectDownloadLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/zip")
-    ) { destination ->
-        val repository = pendingRepository
-        pendingRepository = null
-        if (destination != null && repository != null) viewModel.downloadRepository(repository, destination)
-    }
-
-    fun requestFileDownload(item: GitHubContent) {
-        pendingFile = item
-        fileDownloadLauncher.launch(item.name)
-    }
-
-    fun requestProjectDownload(repository: GitHubRepository) {
-        pendingRepository = repository
-        projectDownloadLauncher.launch("${repository.name}-${repository.defaultBranch}.zip")
-    }
 
     fun installDownloadedUpdate() {
         val path = state.downloadedApkPath ?: return
@@ -142,7 +123,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
             .onFailure { viewModel.showError(it.message ?: "无法打开 Android 安装界面") }
     }
 
-    BackHandler(enabled = state.screen != ViewerScreen.CONNECT) { viewModel.goBack() }
+    BackHandler(enabled = state.screen != ViewerScreen.REPOSITORIES) { viewModel.goBack() }
 
     LaunchedEffect(state.error) {
         state.error?.let {
@@ -155,6 +136,26 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
         state.externalUrl?.let { url ->
             runCatching { uriHandler.openUri(url) }
             viewModel.consumeExternalUrl()
+        }
+    }
+
+    LaunchedEffect(state.externalFile) {
+        state.externalFile?.let { file ->
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(Uri.parse(file.contentUri), file.mimeType)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching {
+                context.startActivity(Intent.createChooser(intent, "打开 ${file.name}"))
+            }.onFailure { failure ->
+                val message = if (failure is ActivityNotFoundException) {
+                    "手机上没有可以打开 ${file.name} 的应用"
+                } else {
+                    failure.message ?: "无法打开已下载的文件"
+                }
+                viewModel.showError(message)
+            }
+            viewModel.consumeExternalFile()
         }
     }
 
@@ -171,16 +172,15 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
             contentWindowInsets = WindowInsets.safeDrawing,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
-                if (state.screen != ViewerScreen.CONNECT) {
-                    ViewerTopBar(
-                        state = state,
-                        onBack = viewModel::goBack,
-                        onRefresh = viewModel::refresh,
-                        onOpenGitHub = viewModel::openCurrentOnGitHub,
-                        onSettings = viewModel::openSettings,
-                        onDisconnect = viewModel::disconnect
-                    )
-                }
+                ViewerTopBar(
+                    state = state,
+                    onBack = viewModel::goBack,
+                    onAddProject = viewModel::openAddProject,
+                    onRefresh = viewModel::refresh,
+                    onOpenGitHub = viewModel::openCurrentOnGitHub,
+                    onSettings = viewModel::openSettings,
+                    onDisconnect = viewModel::disconnect
+                )
             }
         ) { contentPadding ->
             Box(
@@ -200,19 +200,25 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         state = state,
                         onQueryChange = viewModel::updateRepositoryQuery,
                         onOpen = viewModel::openRepository,
-                        onDownload = ::requestProjectDownload,
+                        onDownload = viewModel::downloadRepository,
+                        onAdd = viewModel::openAddProject,
+                        onRemove = viewModel::removeRepository,
                         onOpenSettings = viewModel::openSettings
                     )
                     ViewerScreen.FILES -> FileListScreen(
                         state = state,
                         onQueryChange = viewModel::updateFileQuery,
                         onOpen = viewModel::openContent,
-                        onDownloadFile = ::requestFileDownload,
-                        onDownloadProject = ::requestProjectDownload
+                        onDownloadFile = viewModel::downloadFile,
+                        onDownloadProject = viewModel::downloadRepository
                     )
                     ViewerScreen.TEXT -> TextPreviewScreen(
                         state,
-                        onDownload = { item -> requestFileDownload(item) }
+                        onDownload = viewModel::downloadFile
+                    )
+                    ViewerScreen.PDF -> PdfPreviewScreen(
+                        state,
+                        onDownload = viewModel::downloadFile
                     )
                     ViewerScreen.SETTINGS -> SettingsScreen(
                         state = state,
@@ -241,6 +247,13 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                             .padding(16.dp)
                     )
                 }
+                state.completedDownload?.let { download ->
+                    DownloadCompleteDialog(
+                        download = download,
+                        onOpen = viewModel::openCompletedDownload,
+                        onDismiss = viewModel::dismissCompletedDownload
+                    )
+                }
             }
         }
     }
@@ -251,6 +264,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
 private fun ViewerTopBar(
     state: ViewerUiState,
     onBack: () -> Unit,
+    onAddProject: () -> Unit,
     onRefresh: () -> Unit,
     onOpenGitHub: () -> Unit,
     onSettings: () -> Unit,
@@ -259,9 +273,10 @@ private fun ViewerTopBar(
     val title = when (state.screen) {
         ViewerScreen.REPOSITORIES -> "项目"
         ViewerScreen.FILES -> state.currentRepository?.name ?: "项目文件"
-        ViewerScreen.TEXT -> state.document?.name ?: "文件"
+        ViewerScreen.TEXT -> state.document?.name ?: "代码查看器"
+        ViewerScreen.PDF -> state.pdfDocument?.name ?: "PDF 查看器"
         ViewerScreen.SETTINGS -> "设置与更新"
-        ViewerScreen.CONNECT -> "LaTeX 项目"
+        ViewerScreen.CONNECT -> "添加项目"
     }
     TopAppBar(
         title = {
@@ -279,12 +294,19 @@ private fun ViewerTopBar(
             }
         },
         navigationIcon = {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+            if (state.screen != ViewerScreen.REPOSITORIES) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                }
             }
         },
         actions = {
-            if (state.screen == ViewerScreen.FILES || state.screen == ViewerScreen.TEXT) {
+            if (state.screen == ViewerScreen.REPOSITORIES) {
+                IconButton(onClick = onAddProject) {
+                    Icon(Icons.Outlined.Add, contentDescription = "添加项目")
+                }
+            }
+            if (state.screen == ViewerScreen.FILES || state.screen == ViewerScreen.TEXT || state.screen == ViewerScreen.PDF) {
                 IconButton(onClick = onOpenGitHub) {
                     Icon(Icons.Outlined.OpenInNew, contentDescription = "在 GitHub 中打开")
                 }
@@ -340,10 +362,10 @@ private fun ConnectScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
-        Text("LaTeX 项目", style = MaterialTheme.typography.headlineLarge)
+        Text("添加 GitHub 项目", style = MaterialTheme.typography.headlineLarge)
         Spacer(Modifier.height(8.dp))
         Text(
-            "在手机上安静地查看 GitHub 中的项目文件。",
+            "项目会保存在手机项目库中，可以继续添加多个。",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -356,8 +378,8 @@ private fun ConnectScreen(
             OutlinedTextField(
                 value = repository,
                 onValueChange = { repository = it },
-                label = { Text("公开仓库（可选）") },
-                placeholder = { Text("owner/repository") },
+                label = { Text("GitHub 仓库地址") },
+                placeholder = { Text("owner/repository 或完整网址") },
                 leadingIcon = { Icon(Icons.Outlined.CloudQueue, contentDescription = null) },
                 singleLine = true,
                 shape = RoundedCornerShape(14.dp),
@@ -398,7 +420,7 @@ private fun ConnectScreen(
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                 } else {
-                    Text(if (tokenStored && token.isBlank() && repository.isBlank()) "打开我的项目" else "继续")
+                    Text(if (repository.isBlank()) "载入可访问仓库" else "添加并打开项目")
                 }
             }
             OutlinedButton(
@@ -441,7 +463,7 @@ private fun ConnectScreen(
         }
         Spacer(Modifier.height(18.dp))
         Text(
-            "此应用没有编辑、提交或删除功能。",
+            "从手机项目库移除项目不会删除 GitHub 仓库。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -454,6 +476,8 @@ private fun RepositoryListScreen(
     onQueryChange: (String) -> Unit,
     onOpen: (GitHubRepository) -> Unit,
     onDownload: (GitHubRepository) -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (GitHubRepository) -> Unit,
     onOpenSettings: () -> Unit
 ) {
     val query = state.repositoryQuery.trim()
@@ -464,6 +488,7 @@ private fun RepositoryListScreen(
         }
     }
     val listState = rememberLazyListState()
+    var removeCandidate by remember { mutableStateOf<GitHubRepository?>(null) }
 
     LazyColumn(
         state = listState,
@@ -472,14 +497,24 @@ private fun RepositoryListScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
-                Text("你的项目", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "${state.repositories.size} 个可访问仓库 · 按最近更新排序",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+            Row(
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("项目库", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${state.repositories.size} 个项目 · 保存在这台手机",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                OutlinedButton(onClick = onAdd, shape = RoundedCornerShape(12.dp)) {
+                    Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("添加")
+                }
             }
         }
         item {
@@ -488,6 +523,29 @@ private fun RepositoryListScreen(
                 onValueChange = onQueryChange,
                 placeholder = "搜索项目"
             )
+        }
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text("默认下载位置", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "内部存储/Download/LaTeX项目",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            }
         }
         if (state.updateAvailable) {
             item {
@@ -517,17 +575,41 @@ private fun RepositoryListScreen(
             }
         }
         if (filtered.isEmpty()) {
-            item { EmptyState("没有匹配的项目", "可以更换关键词，或检查令牌的仓库权限。") }
+            item {
+                EmptyState(
+                    if (state.repositories.isEmpty()) "还没有项目" else "没有匹配的项目",
+                    if (state.repositories.isEmpty()) "点击“添加”，输入 GitHub 仓库地址。" else "请更换搜索关键词。"
+                )
+            }
         } else {
             items(filtered, key = { it.fullName }) { repository ->
                 RepositoryCard(
                     repository,
                     onClick = { onOpen(repository) },
-                    onDownload = { onDownload(repository) }
+                    onDownload = { onDownload(repository) },
+                    onRemove = { removeCandidate = repository }
                 )
             }
         }
         item { ReadOnlyFooter() }
+    }
+
+    removeCandidate?.let { repository ->
+        AlertDialog(
+            onDismissRequest = { removeCandidate = null },
+            icon = { Icon(Icons.Outlined.DeleteOutline, contentDescription = null) },
+            title = { Text("从手机移除项目？") },
+            text = { Text("将移除 ${repository.fullName} 的本机入口，不会删除或修改 GitHub 仓库。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    removeCandidate = null
+                    onRemove(repository)
+                }) { Text("移除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { removeCandidate = null }) { Text("取消") }
+            }
+        )
     }
 }
 
@@ -535,7 +617,8 @@ private fun RepositoryListScreen(
 private fun RepositoryCard(
     repository: GitHubRepository,
     onClick: () -> Unit,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onRemove: () -> Unit
 ) {
     Card(
         onClick = onClick,
@@ -598,6 +681,13 @@ private fun RepositoryCard(
                 Icon(
                     Icons.Outlined.Download,
                     contentDescription = "下载 ${repository.name} 整个项目 ZIP",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onRemove) {
+                Icon(
+                    Icons.Outlined.DeleteOutline,
+                    contentDescription = "从手机移除 ${repository.name}",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -701,6 +791,7 @@ private fun RepositorySummary(
 private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() -> Unit)?) {
     val isFolder = item.kind == GitHubContentKind.DIRECTORY
     val isText = item.kind == GitHubContentKind.FILE && isLikelyText(item.name)
+    val isPdf = item.kind == GitHubContentKind.FILE && ViewerViewModel.isPdfFile(item.name)
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -722,6 +813,7 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() ->
                     Icon(
                         when {
                             isFolder -> Icons.Outlined.Folder
+                            isPdf -> Icons.Outlined.PictureAsPdf
                             isText -> Icons.Outlined.Code
                             else -> Icons.Outlined.Description
                         },
@@ -737,6 +829,7 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() ->
                 Text(
                     when {
                         isFolder -> "文件夹"
+                        isPdf -> "${formatBytes(item.size)} · 内置 PDF 查看器"
                         isText && item.size <= 1_500_000 -> "${formatBytes(item.size)} · 可直接阅读"
                         else -> "${formatBytes(item.size)} · 在 GitHub 中查看"
                     },
@@ -754,7 +847,7 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() ->
                 }
             }
             Icon(
-                if (isFolder || isText) Icons.Outlined.ChevronRight else Icons.Outlined.OpenInNew,
+                if (isFolder || isText || isPdf) Icons.Outlined.ChevronRight else Icons.Outlined.OpenInNew,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(19.dp)
@@ -798,7 +891,7 @@ private fun TextPreviewScreen(state: ViewerUiState, onDownload: (GitHubContent) 
                     color = MaterialTheme.colorScheme.primaryContainer
                 ) {
                     Text(
-                        "只读",
+                        "代码 · 只读",
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                         style = MaterialTheme.typography.labelLarge
@@ -993,6 +1086,29 @@ private fun SettingsScreen(
             }
         }
         item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Outlined.Download, contentDescription = null)
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text("文件默认下载位置", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "内部存储/Download/LaTeX项目",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        item {
             Text(
                 "APK 下载后会进行文件大小和 SHA-256 校验。Android 系统仍会要求你确认安装；应用不能绕过系统安全提示。",
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
@@ -1022,6 +1138,60 @@ private fun SettingSwitchRow(
         Spacer(Modifier.width(14.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+@Composable
+private fun DownloadCompleteDialog(
+    download: DownloadedFile,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Outlined.CheckCircle,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary
+            )
+        },
+        title = { Text("下载完成") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(download.name, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "已保存到：",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    SelectionContainer {
+                        Text(
+                            download.displayPath,
+                            modifier = Modifier.padding(12.dp),
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+                Text("是否现在打开？", style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+        confirmButton = {
+            Button(onClick = onOpen) {
+                Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("现在打开")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("稍后") }
+        }
+    )
 }
 
 @Composable

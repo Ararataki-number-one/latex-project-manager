@@ -37,6 +37,22 @@ data class TextDocument(
     val htmlUrl: String?
 )
 
+data class PdfDocument(
+    val name: String,
+    val path: String,
+    val htmlUrl: String?,
+    val localPath: String? = null,
+    val contentUri: String? = null
+)
+
+data class DownloadedFile(
+    val name: String,
+    val contentUri: String,
+    val displayPath: String,
+    val mimeType: String,
+    val size: Long
+)
+
 data class AndroidReleaseAsset(
     val version: String,
     val releaseTag: String,
