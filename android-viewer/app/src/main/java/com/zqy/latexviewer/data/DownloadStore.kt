@@ -81,6 +81,18 @@ class DownloadStore(private val context: Context) {
         candidate
     }
 
+    suspend fun materializePdfForViewer(
+        file: DownloadedFile,
+        maxCacheBytes: Long = DEFAULT_PDF_CACHE_BYTES
+    ): File = savePdfPreview(
+        cacheKey = "download-${file.contentUri.hashCode().toUInt().toString(16)}-${file.size}.pdf",
+        maxCacheBytes = maxCacheBytes
+    ) { output ->
+        val input = context.contentResolver.openInputStream(Uri.parse(file.contentUri))
+            ?: throw IllegalStateException("无法读取已下载的 PDF")
+        input.use { it.copyTo(output, 512 * 1024) }
+    }
+
     suspend fun pdfCacheBytes(): Long = withContext(Dispatchers.IO) {
         pdfCacheDirectory().listFiles()
             ?.filter { it.isFile && !it.name.endsWith(".part") }
@@ -103,7 +115,7 @@ class DownloadStore(private val context: Context) {
             ?: throw IllegalStateException("无法打开已下载的文件")
         val bytes = input.use { stream ->
             val output = ByteArrayOutputStream()
-            val buffer = ByteArray(16 * 1024)
+            val buffer = ByteArray(128 * 1024)
             while (true) {
                 val read = stream.read(buffer)
                 if (read < 0) break

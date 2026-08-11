@@ -1,0 +1,491 @@
+package com.zqy.latexviewer.data
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import com.zqy.latexviewer.MainActivity
+import com.zqy.latexviewer.model.AndroidReleaseAsset
+import com.zqy.latexviewer.model.DownloadedFile
+import com.zqy.latexviewer.model.GitHubContent
+import com.zqy.latexviewer.model.GitHubContentKind
+import com.zqy.latexviewer.model.GitHubRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import org.json.JSONObject
+import java.util.Base64
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+
+enum class BackgroundDownloadKind {
+    PUBLIC_FILE,
+    REPOSITORY_ARCHIVE,
+    PDF_PREVIEW,
+    APP_UPDATE
+}
+
+data class BackgroundDownloadTask(
+    val kind: BackgroundDownloadKind,
+    val label: String,
+    val name: String,
+    val mimeType: String,
+    val createdAt: Long = System.currentTimeMillis(),
+    val owner: String? = null,
+    val repository: String? = null,
+    val branch: String? = null,
+    val path: String? = null,
+    val sha: String? = null,
+    val size: Long = -1,
+    val downloadUrl: String? = null,
+    val cacheKey: String? = null,
+    val cacheLimitBytes: Long = 512L * 1024 * 1024,
+    val releaseVersion: String? = null,
+    val releaseTag: String? = null,
+    val releaseUrl: String? = null,
+    val assetApiUrl: String? = null,
+    val assetDownloadUrl: String? = null,
+    val assetSha256: String? = null
+) {
+    val repositoryFullName: String?
+        get() = if (owner.isNullOrBlank() || repository.isNullOrBlank()) null else "$owner/$repository"
+
+    companion object {
+        fun fromJson(raw: String?): BackgroundDownloadTask? = raw
+            ?.takeIf { it.isNotBlank() }
+            ?.let { payload ->
+                runCatching {
+                    val value = JSONObject(payload)
+                    BackgroundDownloadTask(
+                        kind = BackgroundDownloadKind.valueOf(value.getString("kind")),
+                        label = value.getString("label"),
+                        name = value.getString("name"),
+                        mimeType = value.getString("mimeType"),
+                        createdAt = value.optLong("createdAt", System.currentTimeMillis()),
+                        owner = value.optionalString("owner"),
+                        repository = value.optionalString("repository"),
+                        branch = value.optionalString("branch"),
+                        path = value.optionalString("path"),
+                        sha = value.optionalString("sha"),
+                        size = value.optLong("size", -1),
+                        downloadUrl = value.optionalString("downloadUrl"),
+                        cacheKey = value.optionalString("cacheKey"),
+                        cacheLimitBytes = value.optLong("cacheLimitBytes", 512L * 1024 * 1024),
+                        releaseVersion = value.optionalString("releaseVersion"),
+                        releaseTag = value.optionalString("releaseTag"),
+                        releaseUrl = value.optionalString("releaseUrl"),
+                        assetApiUrl = value.optionalString("assetApiUrl"),
+                        assetDownloadUrl = value.optionalString("assetDownloadUrl"),
+                        assetSha256 = value.optionalString("assetSha256")
+                    )
+                }.getOrNull()
+            }
+    }
+}
+
+data class BackgroundDownloadSnapshot(
+    val workId: UUID,
+    val task: BackgroundDownloadTask,
+    val state: WorkInfo.State,
+    val downloaded: Long,
+    val total: Long,
+    val output: Data,
+    val error: String?
+)
+
+class BackgroundDownloadManager(context: Context) {
+    private val workManager = WorkManager.getInstance(context.applicationContext)
+
+    val snapshots: Flow<List<BackgroundDownloadSnapshot>> = workManager
+        .getWorkInfosByTagFlow(DOWNLOAD_TAG)
+        .map { workInfos ->
+            workInfos.mapNotNull(::snapshotOf).sortedByDescending { it.task.createdAt }
+        }
+
+    fun enqueueFile(
+        repository: GitHubRepository,
+        item: GitHubContent,
+        mimeType: String
+    ): UUID = enqueue(
+        BackgroundDownloadTask(
+            kind = BackgroundDownloadKind.PUBLIC_FILE,
+            label = "正在下载 ${item.name}",
+            name = item.name,
+            mimeType = mimeType,
+            owner = repository.owner,
+            repository = repository.name,
+            branch = repository.defaultBranch,
+            path = item.path,
+            sha = item.sha,
+            size = item.size,
+            downloadUrl = item.downloadUrl
+        )
+    )
+
+    fun enqueueRepository(repository: GitHubRepository): UUID = enqueue(
+        BackgroundDownloadTask(
+            kind = BackgroundDownloadKind.REPOSITORY_ARCHIVE,
+            label = "正在下载 ${repository.name}",
+            name = "${repository.name}-${repository.defaultBranch}.zip",
+            mimeType = "application/zip",
+            owner = repository.owner,
+            repository = repository.name,
+            branch = repository.defaultBranch
+        )
+    )
+
+    fun enqueuePdf(
+        repository: GitHubRepository,
+        item: GitHubContent,
+        displayName: String,
+        cacheLimitBytes: Long
+    ): UUID = enqueue(
+        BackgroundDownloadTask(
+            kind = BackgroundDownloadKind.PDF_PREVIEW,
+            label = "正在下载 $displayName",
+            name = displayName.ifBlank { item.name },
+            mimeType = "application/pdf",
+            owner = repository.owner,
+            repository = repository.name,
+            branch = repository.defaultBranch,
+            path = item.path,
+            sha = item.sha,
+            size = item.size,
+            downloadUrl = item.downloadUrl,
+            cacheKey = "${repository.owner}-${repository.name}-${item.sha}.pdf",
+            cacheLimitBytes = cacheLimitBytes
+        )
+    )
+
+    fun enqueueUpdate(asset: AndroidReleaseAsset): UUID = enqueue(
+        BackgroundDownloadTask(
+            kind = BackgroundDownloadKind.APP_UPDATE,
+            label = "正在下载 Android ${asset.version}",
+            name = asset.name,
+            mimeType = "application/vnd.android.package-archive",
+            size = asset.size,
+            releaseVersion = asset.version,
+            releaseTag = asset.releaseTag,
+            releaseUrl = asset.releaseUrl,
+            assetApiUrl = asset.apiUrl,
+            assetDownloadUrl = asset.downloadUrl,
+            assetSha256 = asset.sha256
+        )
+    )
+
+    fun cancel(workId: UUID) {
+        workManager.cancelWorkById(workId)
+    }
+
+    private fun enqueue(task: BackgroundDownloadTask): UUID {
+        val payload = task.toJson().toString()
+        val request = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setInputData(workDataOf(KEY_TASK to payload))
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
+            .addTag(DOWNLOAD_TAG)
+            .addTag(metadataTag(payload))
+            .build()
+        workManager.enqueueUniqueWork(
+            "latex-download-${request.id}",
+            ExistingWorkPolicy.KEEP,
+            request
+        )
+        return request.id
+    }
+
+    private fun snapshotOf(info: WorkInfo): BackgroundDownloadSnapshot? {
+        val encoded = info.tags.firstOrNull { it.startsWith(METADATA_TAG_PREFIX) }
+            ?.removePrefix(METADATA_TAG_PREFIX)
+            ?: return null
+        val payload = runCatching {
+            String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
+        }.getOrNull() ?: return null
+        val task = BackgroundDownloadTask.fromJson(payload) ?: return null
+        return BackgroundDownloadSnapshot(
+            workId = info.id,
+            task = task,
+            state = info.state,
+            downloaded = info.progress.getLong(KEY_DOWNLOADED, 0L),
+            total = info.progress.getLong(KEY_TOTAL, task.size),
+            output = info.outputData,
+            error = info.outputData.getString(KEY_ERROR)
+        )
+    }
+
+    private fun metadataTag(payload: String): String = METADATA_TAG_PREFIX +
+        Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray(Charsets.UTF_8))
+
+    companion object {
+        const val DOWNLOAD_TAG = "latex-background-download"
+        const val KEY_TASK = "task"
+        const val KEY_DOWNLOADED = "downloaded"
+        const val KEY_TOTAL = "total"
+        const val KEY_ERROR = "error"
+        const val KEY_OUTPUT_NAME = "output_name"
+        const val KEY_OUTPUT_URI = "output_uri"
+        const val KEY_OUTPUT_PATH = "output_path"
+        const val KEY_OUTPUT_MIME = "output_mime"
+        const val KEY_OUTPUT_SIZE = "output_size"
+        private const val METADATA_TAG_PREFIX = "latex-download-meta:"
+    }
+}
+
+class DownloadWorker(
+    appContext: Context,
+    parameters: WorkerParameters
+) : CoroutineWorker(appContext, parameters) {
+    private val notificationManager = appContext.getSystemService(NotificationManager::class.java)
+
+    override suspend fun doWork(): Result {
+        val task = BackgroundDownloadTask.fromJson(inputData.getString(BackgroundDownloadManager.KEY_TASK))
+            ?: return Result.failure(workDataOf(BackgroundDownloadManager.KEY_ERROR to "下载任务信息已损坏"))
+        val expectedTotal = task.size.takeIf { it > 0 } ?: -1L
+        createNotificationChannel()
+        setForeground(foregroundInfo(task, 0, expectedTotal))
+        publishProgress(task, 0, expectedTotal, force = true)
+
+        return try {
+            val api = GitHubApi()
+            val token = SecureTokenStore(applicationContext).read()
+            val store = DownloadStore(applicationContext)
+            var lastPublishAt = 0L
+            val onProgress: (Long, Long) -> Unit = { downloaded, total ->
+                val now = System.currentTimeMillis()
+                if (now - lastPublishAt >= PROGRESS_INTERVAL_MS || (total > 0 && downloaded >= total)) {
+                    publishProgress(task, downloaded, total, force = true)
+                    lastPublishAt = now
+                }
+            }
+            val output = when (task.kind) {
+                BackgroundDownloadKind.PUBLIC_FILE -> {
+                    val repository = task.repositoryModel()
+                    val item = task.contentModel()
+                    val file = store.savePublicDownload(task.name, task.mimeType) { stream ->
+                        api.downloadFile(repository, item, token, stream, onProgress)
+                    }
+                    downloadedFileOutput(file)
+                }
+                BackgroundDownloadKind.REPOSITORY_ARCHIVE -> {
+                    val file = store.savePublicDownload(task.name, task.mimeType) { stream ->
+                        api.downloadRepositoryArchive(task.repositoryModel(), token, stream, onProgress)
+                    }
+                    downloadedFileOutput(file)
+                }
+                BackgroundDownloadKind.PDF_PREVIEW -> {
+                    val file = store.savePdfPreview(
+                        task.cacheKey ?: error("PDF 缓存键缺失"),
+                        task.cacheLimitBytes
+                    ) { stream ->
+                        api.downloadFile(task.repositoryModel(), task.contentModel(), token, stream, onProgress)
+                    }
+                    workDataOf(
+                        BackgroundDownloadManager.KEY_OUTPUT_NAME to task.name,
+                        BackgroundDownloadManager.KEY_OUTPUT_PATH to file.absolutePath,
+                        BackgroundDownloadManager.KEY_OUTPUT_MIME to task.mimeType,
+                        BackgroundDownloadManager.KEY_OUTPUT_SIZE to file.length()
+                    )
+                }
+                BackgroundDownloadKind.APP_UPDATE -> {
+                    val asset = task.releaseAsset()
+                    val file = store.saveUpdate(asset) { stream ->
+                        api.downloadAndroidUpdate(asset, stream, onProgress)
+                    }
+                    workDataOf(
+                        BackgroundDownloadManager.KEY_OUTPUT_NAME to task.name,
+                        BackgroundDownloadManager.KEY_OUTPUT_PATH to file.absolutePath,
+                        BackgroundDownloadManager.KEY_OUTPUT_MIME to task.mimeType,
+                        BackgroundDownloadManager.KEY_OUTPUT_SIZE to file.length()
+                    )
+                }
+            }
+            notifyCompleted(task)
+            Result.success(output)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            if (runAttemptCount < MAX_RETRY_ATTEMPTS && failure.isRetryableDownloadFailure()) {
+                Result.retry()
+            } else {
+                Result.failure(workDataOf(
+                    BackgroundDownloadManager.KEY_ERROR to (failure.message ?: "下载失败，请稍后重试")
+                ))
+            }
+        }
+    }
+
+    private fun publishProgress(task: BackgroundDownloadTask, downloaded: Long, total: Long, force: Boolean) {
+        if (!force) return
+        val progress = workDataOf(
+            BackgroundDownloadManager.KEY_DOWNLOADED to downloaded.coerceAtLeast(0),
+            BackgroundDownloadManager.KEY_TOTAL to total
+        )
+        runCatching { setProgressAsync(progress).get() }
+        runCatching { notificationManager.notify(notificationId, notification(task, downloaded, total, true)) }
+    }
+
+    private fun foregroundInfo(task: BackgroundDownloadTask, downloaded: Long, total: Long): ForegroundInfo {
+        val notification = notification(task, downloaded, total, true)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            ForegroundInfo(notificationId, notification)
+        }
+    }
+
+    private fun notification(
+        task: BackgroundDownloadTask,
+        downloaded: Long,
+        total: Long,
+        ongoing: Boolean
+    ): android.app.Notification {
+        val openIntent = Intent(applicationContext, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val contentIntent = PendingIntent.getActivity(
+            applicationContext,
+            notificationId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val builder = NotificationCompat.Builder(applicationContext, NOTIFICATION_CHANNEL)
+            .setSmallIcon(if (ongoing) android.R.drawable.stat_sys_download else android.R.drawable.stat_sys_download_done)
+            .setContentTitle(if (ongoing) task.label else "下载完成")
+            .setContentText(if (ongoing) "熄屏或切换应用后仍会继续" else task.name)
+            .setContentIntent(contentIntent)
+            .setOnlyAlertOnce(true)
+            .setOngoing(ongoing)
+            .setAutoCancel(!ongoing)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+        if (ongoing) {
+            if (total > 0) {
+                val percent = ((downloaded * 100L) / total).coerceIn(0, 100).toInt()
+                builder.setProgress(100, percent, false).setSubText("$percent%")
+            } else {
+                builder.setProgress(0, 0, true)
+            }
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "取消",
+                WorkManager.getInstance(applicationContext).createCancelPendingIntent(id)
+            )
+        }
+        return builder.build()
+    }
+
+    private fun notifyCompleted(task: BackgroundDownloadTask) {
+        runCatching { notificationManager.notify(notificationId, notification(task, task.size, task.size, false)) }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                NOTIFICATION_CHANNEL,
+                "文件下载",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "显示 GitHub 项目文件和应用更新的后台下载进度"
+            }
+        )
+    }
+
+    private fun downloadedFileOutput(file: DownloadedFile): Data = workDataOf(
+        BackgroundDownloadManager.KEY_OUTPUT_NAME to file.name,
+        BackgroundDownloadManager.KEY_OUTPUT_URI to file.contentUri,
+        BackgroundDownloadManager.KEY_OUTPUT_PATH to file.displayPath,
+        BackgroundDownloadManager.KEY_OUTPUT_MIME to file.mimeType,
+        BackgroundDownloadManager.KEY_OUTPUT_SIZE to file.size
+    )
+
+    private val notificationId: Int
+        get() = (id.hashCode() and 0x0fffffff).coerceAtLeast(1000)
+
+    private companion object {
+        const val NOTIFICATION_CHANNEL = "latex_downloads"
+        const val PROGRESS_INTERVAL_MS = 500L
+        const val MAX_RETRY_ATTEMPTS = 3
+    }
+}
+
+private fun BackgroundDownloadTask.repositoryModel(): GitHubRepository = GitHubRepository(
+    name = repository ?: error("仓库名称缺失"),
+    fullName = repositoryFullName ?: error("仓库信息缺失"),
+    owner = owner ?: error("仓库所有者缺失"),
+    description = null,
+    isPrivate = false,
+    defaultBranch = branch ?: "main",
+    updatedAt = "",
+    htmlUrl = "https://github.com/${repositoryFullName}",
+    sizeKb = 0
+)
+
+private fun BackgroundDownloadTask.contentModel(): GitHubContent = GitHubContent(
+    name = path?.substringAfterLast('/') ?: name,
+    path = path ?: error("下载路径缺失"),
+    kind = GitHubContentKind.FILE,
+    size = size,
+    sha = sha.orEmpty(),
+    htmlUrl = repositoryFullName?.let { "https://github.com/$it/blob/${branch ?: "main"}/$path" },
+    downloadUrl = downloadUrl
+)
+
+private fun BackgroundDownloadTask.releaseAsset(): AndroidReleaseAsset = AndroidReleaseAsset(
+    version = releaseVersion ?: error("更新版本缺失"),
+    releaseTag = releaseTag.orEmpty(),
+    releaseUrl = releaseUrl.orEmpty(),
+    name = name,
+    apiUrl = assetApiUrl ?: error("更新下载地址缺失"),
+    downloadUrl = assetDownloadUrl.orEmpty(),
+    size = size,
+    sha256 = assetSha256
+)
+
+private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
+    .put("kind", kind.name)
+    .put("label", label)
+    .put("name", name)
+    .put("mimeType", mimeType)
+    .put("createdAt", createdAt)
+    .put("owner", owner)
+    .put("repository", repository)
+    .put("branch", branch)
+    .put("path", path)
+    .put("sha", sha)
+    .put("size", size)
+    .put("downloadUrl", downloadUrl)
+    .put("cacheKey", cacheKey)
+    .put("cacheLimitBytes", cacheLimitBytes)
+    .put("releaseVersion", releaseVersion)
+    .put("releaseTag", releaseTag)
+    .put("releaseUrl", releaseUrl)
+    .put("assetApiUrl", assetApiUrl)
+    .put("assetDownloadUrl", assetDownloadUrl)
+    .put("assetSha256", assetSha256)
+
+private fun JSONObject.optionalString(key: String): String? = optString(key)
+    .takeIf { it.isNotBlank() && it != "null" }
+
+private fun Throwable.isRetryableDownloadFailure(): Boolean {
+    if (this is IllegalArgumentException || this is SecurityException) return false
+    val detail = message.orEmpty()
+    return listOf("令牌无效", "没有读取", "没有找到", "超过 4 GB", "不是有效的 PDF").none {
+        detail.contains(it)
+    }
+}

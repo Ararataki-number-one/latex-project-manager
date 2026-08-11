@@ -111,7 +111,7 @@ class GitHubApi {
     ) = withContext(Dispatchers.IO) {
         require(item.kind == GitHubContentKind.FILE) { "只能下载文件" }
         val apiUrl = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
-        val directUrl = trustedGitHubDownloadUrl(item.downloadUrl)
+        val directUrl = preferredDownloadUrl(item.downloadUrl)
         streamRequest(
             directUrl ?: apiUrl,
             token,
@@ -218,10 +218,18 @@ class GitHubApi {
         return parts.none { it.isBlank() || it == "." || it == ".." } && path.endsWith(".pdf", ignoreCase = true)
     }
 
-    private fun trustedGitHubDownloadUrl(value: String?): String? {
+    internal fun preferredDownloadUrl(value: String?): String? {
         val parsed = runCatching { URL(value ?: return null) }.getOrNull() ?: return null
         if (parsed.protocol != "https") return null
-        return value.takeIf { parsed.host.lowercase() in GITHUB_DOWNLOAD_HOSTS }
+        return when (parsed.host.lowercase()) {
+            "raw.githubusercontent.com" -> buildString {
+                append("https://media.githubusercontent.com/media")
+                append(parsed.path)
+                parsed.query?.takeIf { it.isNotBlank() }?.let { append('?').append(it) }
+            }
+            in GITHUB_DOWNLOAD_HOSTS -> value
+            else -> null
+        }
     }
 
     private fun parseRepository(value: JSONObject): GitHubRepository {
@@ -323,7 +331,9 @@ class GitHubApi {
             val total = connection.contentLengthLong.coerceAtLeast(-1L)
             if (total > MAX_DOWNLOAD_BYTES) throw GitHubApiException("下载内容超过 4 GB，无法保存")
             connection.inputStream.use { input ->
-                val buffer = ByteArray(256 * 1024)
+                // Larger sequential reads substantially reduce per-chunk coroutine/UI overhead
+                // for book-sized PDF and ZIP downloads while keeping memory use predictable.
+                val buffer = ByteArray(1024 * 1024)
                 var downloaded = 0L
                 onProgress(0, total)
                 while (true) {

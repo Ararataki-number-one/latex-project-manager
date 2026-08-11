@@ -3,7 +3,12 @@ package com.zqy.latexviewer.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.work.WorkInfo
 import com.zqy.latexviewer.data.AppPreferences
+import com.zqy.latexviewer.data.BackgroundDownloadKind
+import com.zqy.latexviewer.data.BackgroundDownloadManager
+import com.zqy.latexviewer.data.BackgroundDownloadSnapshot
+import com.zqy.latexviewer.data.BackgroundDownloadTask
 import com.zqy.latexviewer.data.DownloadStore
 import com.zqy.latexviewer.data.GitHubApi
 import com.zqy.latexviewer.data.SecureTokenStore
@@ -23,6 +28,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -38,9 +44,11 @@ enum class ViewerScreen {
 }
 
 data class TransferUiState(
+    val workId: String,
     val label: String,
     val downloaded: Long = 0,
-    val total: Long = -1
+    val total: Long = -1,
+    val waitingForNetwork: Boolean = false
 )
 
 data class ViewerUiState(
@@ -57,6 +65,7 @@ data class ViewerUiState(
     val document: TextDocument? = null,
     val pdfDocument: PdfDocument? = null,
     val completedDownload: DownloadedFile? = null,
+    val completedDownloadWorkId: String? = null,
     val downloadedFiles: List<DownloadedFile> = emptyList(),
     val externalFile: DownloadedFile? = null,
     val loading: Boolean = false,
@@ -80,6 +89,7 @@ class ViewerViewModel(
     private val api: GitHubApi,
     private val tokenStore: SecureTokenStore,
     private val downloadStore: DownloadStore,
+    private val backgroundDownloads: BackgroundDownloadManager,
     private val preferences: AppPreferences,
     private val currentVersion: String
 ) : ViewModel() {
@@ -87,8 +97,10 @@ class ViewerViewModel(
     val state: StateFlow<ViewerUiState> = _state.asStateFlow()
     private var settingsReturnScreen = ViewerScreen.HOME
     private var viewerReturnScreen = ViewerScreen.HOME
+    private val seenFinishedDownloads = mutableSetOf<String>()
 
     init {
+        observeBackgroundDownloads()
         loadRepositories()
         refreshCacheUsage()
         if (_state.value.autoCheckUpdates) checkForUpdates(silent = true)
@@ -216,14 +228,14 @@ class ViewerViewModel(
                 runCatching {
                     val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
                     if (latest.sha != previous.sha) {
-                        openPdfLatest(repository, latest, output.name)
-                        showNotice("发现新版本，已更新 ${output.name}")
+                        openOrQueuePdfLatest(repository, latest, output.name)
+                        showNotice("发现新版本，正在后台更新 ${output.name}")
                     }
                 }.onFailure { showNotice("当前离线阅读；联网后可检查最新版") }
             } else {
-                launchTransfer("正在下载 ${output.name}") {
+                launchRequest {
                     val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
-                    openPdfLatest(repository, latest, output.name)
+                    openOrQueuePdfLatest(repository, latest, output.name)
                 }
             }
         }
@@ -271,49 +283,48 @@ class ViewerViewModel(
     fun downloadFile(item: GitHubContent) {
         val repository = _state.value.currentRepository ?: return
         if (item.kind != GitHubContentKind.FILE) return
-        launchTransfer("正在下载 ${item.name}") {
+        launchRequest {
             val latest = api.getContent(repository, item.path, tokenStore.read())
-            val downloaded = downloadStore.savePublicDownload(latest.name, mimeTypeFor(latest.name)) { output ->
-                api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer)
-            }
-            recordDownload(downloaded)
+            backgroundDownloads.enqueueFile(repository, latest, mimeTypeFor(latest.name))
+            showNotice("${latest.name} 已加入后台下载，息屏后仍会继续")
         }
     }
 
     fun downloadRepository(repository: GitHubRepository) {
-        val fileName = "${repository.name}-${repository.defaultBranch}.zip"
-        launchTransfer("正在下载 $fileName") {
-            val downloaded = downloadStore.savePublicDownload(fileName, "application/zip") { output ->
-                api.downloadRepositoryArchive(repository, tokenStore.read(), output, ::updateTransfer)
-            }
-            recordDownload(downloaded)
-        }
+        backgroundDownloads.enqueueRepository(repository)
+        showNotice("${repository.name} 已加入后台下载，息屏后仍会继续")
     }
 
     fun dismissCompletedDownload() {
-        _state.update { it.copy(completedDownload = null) }
+        _state.value.completedDownloadWorkId?.let(preferences::markDownloadWorkHandled)
+        _state.update { it.copy(completedDownload = null, completedDownloadWorkId = null) }
     }
 
     fun openCompletedDownload() {
         val downloaded = _state.value.completedDownload ?: return
-        _state.update { it.copy(completedDownload = null) }
+        _state.value.completedDownloadWorkId?.let(preferences::markDownloadWorkHandled)
+        _state.update { it.copy(completedDownload = null, completedDownloadWorkId = null) }
         openDownloaded(downloaded)
     }
 
     fun openDownloaded(downloaded: DownloadedFile) {
         viewerReturnScreen = _state.value.screen
         when {
-            isPdfFile(downloaded.name) -> _state.update {
-                it.copy(
-                    screen = ViewerScreen.PDF,
-                    document = null,
-                    pdfDocument = PdfDocument(
-                        name = downloaded.name,
-                        path = downloaded.displayPath,
-                        htmlUrl = null,
-                        contentUri = downloaded.contentUri
+            isPdfFile(downloaded.name) -> launchRequest {
+                val local = downloadStore.materializePdfForViewer(downloaded, preferences.pdfCacheLimitBytes)
+                _state.update {
+                    it.copy(
+                        screen = ViewerScreen.PDF,
+                        document = null,
+                        pdfDocument = PdfDocument(
+                            name = downloaded.name,
+                            path = downloaded.displayPath,
+                            htmlUrl = null,
+                            localPath = local.absolutePath
+                        )
                     )
-                )
+                }
+                refreshCacheUsage()
             }
             api.isInlineText(downloaded.name) && downloaded.size <= MAX_INLINE_BYTES -> launchRequest {
                 val content = downloadStore.readDownloadedText(downloaded, MAX_INLINE_BYTES.toInt())
@@ -329,10 +340,12 @@ class ViewerViewModel(
         }
     }
 
-    private fun recordDownload(downloaded: DownloadedFile) {
+    private fun recordDownload(downloaded: DownloadedFile, workId: String) {
+        preferences.saveDownloadedFile(downloaded)
         _state.update {
             it.copy(
-                completedDownload = downloaded,
+                completedDownload = it.completedDownload ?: downloaded,
+                completedDownloadWorkId = it.completedDownloadWorkId ?: workId,
                 downloadedFiles = (listOf(downloaded) + it.downloadedFiles.filterNot { item -> item.contentUri == downloaded.contentUri }).take(30)
             )
         }
@@ -444,18 +457,8 @@ class ViewerViewModel(
             showNotice("当前已经是最新版本")
             return
         }
-        launchTransfer("正在下载 Android ${release.version}") {
-            val file = downloadStore.saveUpdate(release) { output ->
-                api.downloadAndroidUpdate(release, output, ::updateTransfer)
-            }
-            _state.update {
-                it.copy(
-                    downloadedApkPath = file.absolutePath,
-                    updateMessage = "新版本 ${release.version} 已下载，可以安装"
-                )
-            }
-            showNotice("更新包下载完成，请确认安装")
-        }
+        backgroundDownloads.enqueueUpdate(release)
+        showNotice("Android ${release.version} 已加入后台下载，息屏后仍会继续")
     }
 
     fun openReleasePage() {
@@ -587,6 +590,7 @@ class ViewerViewModel(
         tokenStored = tokenStore.hasToken(),
         mobileIndexes = preferences.cachedMobileIndexes(),
         recentReading = preferences.mostRecentReading(),
+        downloadedFiles = preferences.downloadedFiles(),
         currentVersion = currentVersion,
         autoCheckUpdates = preferences.autoCheckUpdates,
         autoDownloadUpdates = preferences.autoDownloadUpdates,
@@ -609,19 +613,31 @@ class ViewerViewModel(
     }
 
     private fun openPdf(repository: GitHubRepository, item: GitHubContent) {
-        launchTransfer("正在检查最新版 ${item.name}") {
+        launchRequest {
             val latest = api.getContent(repository, item.path, tokenStore.read())
-            openPdfLatest(repository, latest, latest.name)
+            openOrQueuePdfLatest(repository, latest, latest.name)
         }
     }
 
-    private suspend fun openPdfLatest(repository: GitHubRepository, latest: GitHubContent, displayName: String) {
+    private suspend fun openOrQueuePdfLatest(repository: GitHubRepository, latest: GitHubContent, displayName: String) {
         val previous = preferences.readingProgress(repository.fullName, latest.path)
-        val file = downloadStore.savePdfPreview(
-            "${repository.owner}-${repository.name}-${latest.sha}.pdf",
-            preferences.pdfCacheLimitBytes
-        ) { output -> api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer) }
-        if (previous != null && previous.sha != latest.sha) showNotice("发现新版本：${latest.name}")
+        val cacheKey = "${repository.owner}-${repository.name}-${latest.sha}.pdf"
+        val file = downloadStore.findPdfPreview(cacheKey)
+        if (file == null) {
+            backgroundDownloads.enqueuePdf(repository, latest, displayName, preferences.pdfCacheLimitBytes)
+            showNotice("${displayName.ifBlank { latest.name }} 已加入后台下载，息屏后仍会继续")
+            return
+        }
+        openPdfDocument(repository, latest, displayName, file.absolutePath, previous)
+    }
+
+    private fun openPdfDocument(
+        repository: GitHubRepository,
+        latest: GitHubContent,
+        displayName: String,
+        localPath: String,
+        previous: ReadingProgress? = preferences.readingProgress(repository.fullName, latest.path)
+    ) {
         val initialPage = previous?.pageIndex?.coerceAtLeast(0) ?: 0
         _state.update {
             it.copy(
@@ -631,7 +647,7 @@ class ViewerViewModel(
                     name = displayName.ifBlank { latest.name },
                     path = latest.path,
                     htmlUrl = latest.htmlUrl,
-                    localPath = file.absolutePath,
+                    localPath = localPath,
                     repositoryFullName = repository.fullName,
                     sha = latest.sha,
                     initialPage = initialPage
@@ -685,6 +701,133 @@ class ViewerViewModel(
         }
     }
 
+    fun cancelTransfer() {
+        _state.value.transfer?.workId?.let { runCatching { backgroundDownloads.cancel(java.util.UUID.fromString(it)) } }
+    }
+
+    private fun observeBackgroundDownloads() {
+        viewModelScope.launch {
+            backgroundDownloads.snapshots.collect { snapshots ->
+                val active = snapshots.firstOrNull {
+                    it.state in setOf(WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED, WorkInfo.State.RUNNING)
+                }
+                _state.update { current ->
+                    current.copy(
+                        transfer = active?.let { snapshot ->
+                            TransferUiState(
+                                workId = snapshot.workId.toString(),
+                                label = if (snapshot.state == WorkInfo.State.RUNNING) {
+                                    snapshot.task.label
+                                } else {
+                                    "排队中 · ${snapshot.task.name}"
+                                },
+                                downloaded = snapshot.downloaded,
+                                total = snapshot.total,
+                                waitingForNetwork = snapshot.state != WorkInfo.State.RUNNING
+                            )
+                        }
+                    )
+                }
+
+                snapshots
+                    .filter { it.state in setOf(WorkInfo.State.SUCCEEDED, WorkInfo.State.FAILED, WorkInfo.State.CANCELLED) }
+                    .forEach { snapshot ->
+                        val workId = snapshot.workId.toString()
+                        if (workId in seenFinishedDownloads || preferences.isDownloadWorkHandled(workId)) return@forEach
+                        seenFinishedDownloads += workId
+                        when (snapshot.state) {
+                            WorkInfo.State.SUCCEEDED -> handleSuccessfulDownload(snapshot)
+                            WorkInfo.State.FAILED -> {
+                                preferences.markDownloadWorkHandled(workId)
+                                showError(snapshot.error ?: "${snapshot.task.name} 下载失败，请重试")
+                            }
+                            WorkInfo.State.CANCELLED -> {
+                                preferences.markDownloadWorkHandled(workId)
+                                showNotice("已取消 ${snapshot.task.name}")
+                            }
+                            else -> Unit
+                        }
+                    }
+            }
+        }
+    }
+
+    private fun handleSuccessfulDownload(snapshot: BackgroundDownloadSnapshot) {
+        val workId = snapshot.workId.toString()
+        when (snapshot.task.kind) {
+            BackgroundDownloadKind.PUBLIC_FILE,
+            BackgroundDownloadKind.REPOSITORY_ARCHIVE -> {
+                val downloaded = snapshot.downloadedFile() ?: run {
+                    preferences.markDownloadWorkHandled(workId)
+                    showError("下载已结束，但无法读取保存位置")
+                    return
+                }
+                recordDownload(downloaded, workId)
+            }
+            BackgroundDownloadKind.PDF_PREVIEW -> {
+                val localPath = snapshot.output.getString(BackgroundDownloadManager.KEY_OUTPUT_PATH)
+                val repository = repositoryFor(snapshot.task)
+                val path = snapshot.task.path
+                val sha = snapshot.task.sha
+                if (localPath.isNullOrBlank() || repository == null || path.isNullOrBlank() || sha.isNullOrBlank()) {
+                    showError("PDF 已下载，但缓存信息不完整，请重新打开")
+                } else {
+                    val item = GitHubContent(
+                        name = path.substringAfterLast('/'),
+                        path = path,
+                        kind = GitHubContentKind.FILE,
+                        size = snapshot.output.getLong(BackgroundDownloadManager.KEY_OUTPUT_SIZE, snapshot.task.size),
+                        sha = sha,
+                        htmlUrl = "${repository.htmlUrl}/blob/${repository.defaultBranch}/$path",
+                        downloadUrl = snapshot.task.downloadUrl
+                    )
+                    openPdfDocument(repository, item, snapshot.task.name, localPath)
+                    showNotice("${snapshot.task.name} 已下载，可以离线阅读")
+                }
+                preferences.markDownloadWorkHandled(workId)
+            }
+            BackgroundDownloadKind.APP_UPDATE -> {
+                val path = snapshot.output.getString(BackgroundDownloadManager.KEY_OUTPUT_PATH)
+                if (path.isNullOrBlank()) {
+                    showError("更新包下载完成，但没有找到安装文件")
+                } else {
+                    _state.update {
+                        it.copy(
+                            downloadedApkPath = path,
+                            updateMessage = "新版本 ${snapshot.task.releaseVersion.orEmpty()} 已下载，可以安装"
+                        )
+                    }
+                    showNotice("更新包下载完成，请确认安装")
+                }
+                preferences.markDownloadWorkHandled(workId)
+            }
+        }
+    }
+
+    private fun repositoryFor(task: BackgroundDownloadTask): GitHubRepository? {
+        val fullName = task.repositoryFullName ?: return null
+        return _state.value.repositories.firstOrNull { it.fullName.equals(fullName, ignoreCase = true) }
+            ?: GitHubRepository(
+                name = task.repository ?: return null,
+                fullName = fullName,
+                owner = task.owner ?: return null,
+                description = null,
+                isPrivate = false,
+                defaultBranch = task.branch ?: "main",
+                updatedAt = "",
+                htmlUrl = "https://github.com/$fullName",
+                sizeKb = 0
+            )
+    }
+
+    private fun BackgroundDownloadSnapshot.downloadedFile(): DownloadedFile? {
+        val name = output.getString(BackgroundDownloadManager.KEY_OUTPUT_NAME) ?: return null
+        val uri = output.getString(BackgroundDownloadManager.KEY_OUTPUT_URI) ?: return null
+        val path = output.getString(BackgroundDownloadManager.KEY_OUTPUT_PATH) ?: return null
+        val mime = output.getString(BackgroundDownloadManager.KEY_OUTPUT_MIME) ?: "application/octet-stream"
+        return DownloadedFile(name, uri, path, mime, output.getLong(BackgroundDownloadManager.KEY_OUTPUT_SIZE, 0L))
+    }
+
     private fun launchRequest(block: suspend () -> Unit) {
         if (_state.value.loading) return
         viewModelScope.launch {
@@ -695,25 +838,6 @@ class ViewerViewModel(
         }
     }
 
-    private fun launchTransfer(label: String, block: suspend () -> Unit) {
-        if (_state.value.transfer != null) {
-            showError("已有下载正在进行，请稍候")
-            return
-        }
-        viewModelScope.launch {
-            _state.update { it.copy(transfer = TransferUiState(label), error = null) }
-            runCatching { block() }
-                .onFailure { failure -> showError(failure.message ?: "下载失败，请稍后重试") }
-            _state.update { it.copy(transfer = null) }
-        }
-    }
-
-    private fun updateTransfer(downloaded: Long, total: Long) {
-        _state.update { state ->
-            state.copy(transfer = state.transfer?.copy(downloaded = downloaded, total = total))
-        }
-    }
-
     companion object {
         private const val MAX_INLINE_BYTES = 1_500_000L
 
@@ -721,6 +845,7 @@ class ViewerViewModel(
             api: GitHubApi,
             tokenStore: SecureTokenStore,
             downloadStore: DownloadStore,
+            backgroundDownloads: BackgroundDownloadManager,
             preferences: AppPreferences,
             currentVersion: String
         ): ViewModelProvider.Factory {
@@ -728,7 +853,7 @@ class ViewerViewModel(
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     require(modelClass.isAssignableFrom(ViewerViewModel::class.java))
-                    return ViewerViewModel(api, tokenStore, downloadStore, preferences, currentVersion) as T
+                    return ViewerViewModel(api, tokenStore, downloadStore, backgroundDownloads, preferences, currentVersion) as T
                 }
             }
         }

@@ -34,4 +34,18 @@ class ViewerViewModelTest {
         assertFalse(api.isSafePdfPath("/secret.pdf"))
         assertFalse(api.isSafePdfPath("output/main.tex"))
     }
+
+    @Test
+    fun prefersGithubMediaHostForBinaryAndLfsDownloads() {
+        val api = GitHubApi()
+        assertEquals(
+            "https://media.githubusercontent.com/media/owner/repo/main/output/book.pdf",
+            api.preferredDownloadUrl("https://raw.githubusercontent.com/owner/repo/main/output/book.pdf")
+        )
+        assertEquals(
+            "https://media.githubusercontent.com/media/owner/repo/main/output/book.pdf",
+            api.preferredDownloadUrl("https://media.githubusercontent.com/media/owner/repo/main/output/book.pdf")
+        )
+        assertEquals(null, api.preferredDownloadUrl("https://example.com/book.pdf"))
+    }
 }

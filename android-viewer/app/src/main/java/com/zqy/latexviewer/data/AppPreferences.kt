@@ -1,6 +1,7 @@
 package com.zqy.latexviewer.data
 
 import android.content.Context
+import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
 import com.zqy.latexviewer.model.ReadingProgress
@@ -48,6 +49,51 @@ class AppPreferences(context: Context) {
             KEY_PDF_CACHE_LIMIT,
             value.coerceIn(MIN_PDF_CACHE_LIMIT_BYTES, MAX_PDF_CACHE_LIMIT_BYTES)
         ).apply()
+
+    fun downloadedFiles(): List<DownloadedFile> {
+        val raw = preferences.getString(KEY_DOWNLOAD_HISTORY, null) ?: return emptyList()
+        return runCatching {
+            val values = JSONArray(raw)
+            buildList {
+                for (index in 0 until values.length()) {
+                    val value = values.getJSONObject(index)
+                    add(DownloadedFile(
+                        name = value.getString("name"),
+                        contentUri = value.getString("contentUri"),
+                        displayPath = value.getString("displayPath"),
+                        mimeType = value.getString("mimeType"),
+                        size = value.optLong("size")
+                    ))
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveDownloadedFile(file: DownloadedFile) {
+        val updated = (listOf(file) + downloadedFiles().filterNot { it.contentUri == file.contentUri }).take(30)
+        val values = JSONArray()
+        updated.forEach { item ->
+            values.put(JSONObject()
+                .put("name", item.name)
+                .put("contentUri", item.contentUri)
+                .put("displayPath", item.displayPath)
+                .put("mimeType", item.mimeType)
+                .put("size", item.size))
+        }
+        preferences.edit().putString(KEY_DOWNLOAD_HISTORY, values.toString()).apply()
+    }
+
+    fun isDownloadWorkHandled(workId: String): Boolean = preferences
+        .getStringSet(KEY_HANDLED_DOWNLOADS, emptySet())
+        .orEmpty()
+        .contains(workId)
+
+    fun markDownloadWorkHandled(workId: String) {
+        val current = preferences.getStringSet(KEY_HANDLED_DOWNLOADS, emptySet()).orEmpty().toMutableList()
+        current.remove(workId)
+        current.add(workId)
+        preferences.edit().putStringSet(KEY_HANDLED_DOWNLOADS, current.takeLast(100).toSet()).apply()
+    }
 
     fun readingProgress(repositoryFullName: String, pdfPath: String): ReadingProgress? =
         allReadingProgress().firstOrNull {
@@ -162,6 +208,8 @@ class AppPreferences(context: Context) {
         const val KEY_AUTO_DOWNLOAD = "auto_download_updates"
         const val KEY_REPOSITORIES = "saved_repositories"
         const val KEY_PDF_CACHE_LIMIT = "pdf_cache_limit_bytes"
+        const val KEY_DOWNLOAD_HISTORY = "download_history_v1"
+        const val KEY_HANDLED_DOWNLOADS = "handled_downloads_v1"
         const val KEY_READING_PREFIX = "reading_v1:"
         const val KEY_INDEX_PREFIX = "mobile_index_v1:"
         const val DEFAULT_PDF_CACHE_LIMIT_BYTES = 512L * 1024 * 1024

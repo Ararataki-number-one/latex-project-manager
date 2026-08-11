@@ -227,6 +227,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     ViewerScreen.DOWNLOADS -> DownloadsScreen(
                         state = state,
                         onOpen = viewModel::openDownloaded,
+                        onCancelTransfer = viewModel::cancelTransfer,
                         onOpenSettings = viewModel::openSettings
                     )
                     ViewerScreen.FILES -> FileListScreen(
@@ -269,6 +270,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                 state.transfer?.let { transfer ->
                     TransferCard(
                         transfer,
+                        onCancel = viewModel::cancelTransfer,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(16.dp)
@@ -644,6 +646,7 @@ private fun HomeScreen(
 private fun DownloadsScreen(
     state: ViewerUiState,
     onOpen: (DownloadedFile) -> Unit,
+    onCancelTransfer: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     LazyColumn(
@@ -658,7 +661,7 @@ private fun DownloadsScreen(
                 Text("用户下载保存在内部存储/Download/LaTeX项目", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
             }
         }
-        state.transfer?.let { transfer -> item { TransferCard(transfer) } }
+        state.transfer?.let { transfer -> item { TransferCard(transfer, onCancelTransfer) } }
         if (state.downloadedFiles.isEmpty()) {
             item { EmptyState("还没有下载文件", "项目 ZIP、PDF 和源码文件下载完成后会显示在这里。") }
         } else {
@@ -1584,7 +1587,11 @@ private fun DownloadCompleteDialog(
 }
 
 @Composable
-private fun TransferCard(transfer: TransferUiState, modifier: Modifier = Modifier) {
+private fun TransferCard(
+    transfer: TransferUiState,
+    onCancel: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
     val determinate = transfer.total > 0
     val progress = if (determinate) {
         (transfer.downloaded.toFloat() / transfer.total.toFloat()).coerceIn(0f, 1f)
@@ -1606,6 +1613,12 @@ private fun TransferCard(transfer: TransferUiState, modifier: Modifier = Modifie
                     overflow = TextOverflow.Ellipsis
                 )
                 if (determinate) Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
+                onCancel?.let {
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(onClick = it, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Outlined.Clear, contentDescription = "取消下载", modifier = Modifier.size(18.dp))
+                    }
+                }
             }
             Spacer(Modifier.height(8.dp))
             if (determinate) {
@@ -1623,7 +1636,11 @@ private fun TransferCard(transfer: TransferUiState, modifier: Modifier = Modifie
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.secondary)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (transfer.downloaded <= 0) "正在连接 GitHub…" else "已接收 ${formatBytes(transfer.downloaded)}",
+                    when {
+                        transfer.waitingForNetwork -> "等待网络或系统调度；任务不会因息屏消失"
+                        transfer.downloaded <= 0 -> "正在连接 GitHub…"
+                        else -> "已接收 ${formatBytes(transfer.downloaded)}"
+                    },
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
