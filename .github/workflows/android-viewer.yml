@@ -55,6 +55,7 @@ jobs:
         shell: bash
         run: |
           chmod +x gradlew
+          ./gradlew --no-daemon testDebugUnitTest
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             ./gradlew --no-daemon assembleRelease
           else
