@@ -59,6 +59,17 @@ class GitHubApi {
         )
     }
 
+    suspend fun getContent(
+        repository: GitHubRepository,
+        path: String,
+        token: String?
+    ): GitHubContent = withContext(Dispatchers.IO) {
+        val normalizedPath = path.trim('/').takeIf { it.isNotEmpty() }
+            ?: throw GitHubApiException("文件路径不能为空")
+        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(normalizedPath)}?ref=${encode(repository.defaultBranch)}"
+        parseContent(JSONObject(request(url, token, JSON_ACCEPT, MAX_JSON_BYTES)))
+    }
+
     suspend fun readTextFile(
         repository: GitHubRepository,
         item: GitHubContent,
@@ -203,6 +214,8 @@ class GitHubApi {
             setRequestProperty("Accept", accept)
             setRequestProperty("X-GitHub-Api-Version", API_VERSION)
             setRequestProperty("User-Agent", "LaTeX-Project-Viewer-Android")
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("Pragma", "no-cache")
             token?.trim()?.takeIf { it.isNotEmpty() }?.let {
                 setRequestProperty("Authorization", "Bearer $it")
             }
@@ -235,6 +248,9 @@ class GitHubApi {
             setRequestProperty("Accept", accept)
             setRequestProperty("X-GitHub-Api-Version", API_VERSION)
             setRequestProperty("User-Agent", "LaTeX-Project-Viewer-Android")
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("Pragma", "no-cache")
+            setRequestProperty("Connection", "keep-alive")
             token?.trim()?.takeIf { it.isNotEmpty() }?.let {
                 setRequestProperty("Authorization", "Bearer $it")
             }
@@ -251,7 +267,7 @@ class GitHubApi {
             val total = connection.contentLengthLong.coerceAtLeast(-1L)
             if (total > MAX_DOWNLOAD_BYTES) throw GitHubApiException("下载内容超过 4 GB，无法保存")
             connection.inputStream.use { input ->
-                val buffer = ByteArray(64 * 1024)
+                val buffer = ByteArray(256 * 1024)
                 var downloaded = 0L
                 onProgress(0, total)
                 while (true) {

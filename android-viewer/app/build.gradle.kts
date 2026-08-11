@@ -21,8 +21,8 @@ android {
         applicationId = "com.zqy.latexviewer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.3.1"
+        versionCode = 5
+        versionName = "0.4.0"
     }
 
     val releaseStorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }

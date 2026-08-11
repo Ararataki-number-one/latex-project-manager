@@ -201,8 +201,9 @@ class ViewerViewModel(
         val repository = _state.value.currentRepository ?: return
         if (item.kind != GitHubContentKind.FILE) return
         launchTransfer("正在下载 ${item.name}") {
-            val downloaded = downloadStore.savePublicDownload(item.name, mimeTypeFor(item.name)) { output ->
-                api.downloadFile(repository, item, tokenStore.read(), output, ::updateTransfer)
+            val latest = api.getContent(repository, item.path, tokenStore.read())
+            val downloaded = downloadStore.savePublicDownload(latest.name, mimeTypeFor(latest.name)) { output ->
+                api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer)
             }
             _state.update { it.copy(completedDownload = downloaded) }
         }
@@ -471,18 +472,19 @@ class ViewerViewModel(
     }
 
     private fun openPdf(repository: GitHubRepository, item: GitHubContent) {
-        launchTransfer("正在打开 ${item.name}") {
-            val file = downloadStore.savePdfPreview("${repository.owner}-${repository.name}-${item.sha}.pdf") { output ->
-                api.downloadFile(repository, item, tokenStore.read(), output, ::updateTransfer)
+        launchTransfer("正在检查最新版 ${item.name}") {
+            val latest = api.getContent(repository, item.path, tokenStore.read())
+            val file = downloadStore.savePdfPreview("${repository.owner}-${repository.name}-${latest.sha}.pdf") { output ->
+                api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer)
             }
             _state.update {
                 it.copy(
                     screen = ViewerScreen.PDF,
                     document = null,
                     pdfDocument = PdfDocument(
-                        name = item.name,
-                        path = item.path,
-                        htmlUrl = item.htmlUrl,
+                        name = latest.name,
+                        path = latest.path,
+                        htmlUrl = latest.htmlUrl,
                         localPath = file.absolutePath
                     )
                 )

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -731,8 +732,8 @@ private fun FileListScreen(
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             RepositorySummary(
@@ -747,9 +748,11 @@ private fun FileListScreen(
         if (filtered.isEmpty()) {
             item { EmptyState("这里没有文件", if (query.isEmpty()) "这个目录为空。" else "没有匹配的文件。") }
         } else {
-            items(filtered, key = { it.path }) { item ->
+            itemsIndexed(filtered, key = { _, item -> item.path }) { index, item ->
                 FileRow(
-                    item,
+                    item = item,
+                    isFirst = index == 0,
+                    isLast = index == filtered.lastIndex,
                     onClick = { onOpen(item) },
                     onDownload = if (item.kind == GitHubContentKind.FILE) {
                         { onDownloadFile(item) }
@@ -769,64 +772,91 @@ private fun RepositorySummary(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        shape = RoundedCornerShape(18.dp)
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(repository.fullName, style = MaterialTheme.typography.titleMedium)
-                    Text("分支 ${repository.defaultBranch}", style = MaterialTheme.typography.bodyMedium)
-                }
-                PrivacyPill(repository.isPrivate)
-            }
-            Spacer(Modifier.height(12.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
-            Spacer(Modifier.height(12.dp))
-            Text(
-                if (path.isEmpty()) "项目根目录" else path,
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(12.dp))
-            OutlinedButton(
-                onClick = onDownloadProject,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(40.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("下载整个 LaTeX 项目（ZIP）")
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(21.dp))
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        repository.fullName,
+                        modifier = Modifier.weight(1f, fill = false),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    PrivacyPill(repository.isPrivate)
+                }
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "${if (path.isEmpty()) "项目根目录" else path} · ${repository.defaultBranch}",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = onDownloadProject, shape = RoundedCornerShape(11.dp)) {
+                Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("ZIP")
             }
         }
     }
 }
 
 @Composable
-private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() -> Unit)?) {
+private fun FileRow(
+    item: GitHubContent,
+    isFirst: Boolean,
+    isLast: Boolean,
+    onClick: () -> Unit,
+    onDownload: (() -> Unit)?
+) {
     val isFolder = item.kind == GitHubContentKind.DIRECTORY
     val isText = item.kind == GitHubContentKind.FILE && isLikelyText(item.name)
     val isPdf = item.kind == GitHubContentKind.FILE && ViewerViewModel.isPdfFile(item.name)
-    Card(
+    val rowShape = when {
+        isFirst && isLast -> RoundedCornerShape(14.dp)
+        isFirst -> RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)
+        isLast -> RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp)
+        else -> RoundedCornerShape(0.dp)
+    }
+    Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        shape = rowShape,
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 15.dp, vertical = 14.dp),
+            modifier = Modifier
+                .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), rowShape)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier = Modifier.size(40.dp),
-                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.size(36.dp),
+                shape = RoundedCornerShape(10.dp),
                 color = if (isFolder) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -839,13 +869,19 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() ->
                         },
                         contentDescription = null,
                         tint = if (isFolder) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(21.dp)
+                        modifier = Modifier.size(19.dp)
                     )
                 }
             }
-            Spacer(Modifier.width(13.dp))
+            Spacer(Modifier.width(11.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(item.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    item.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Text(
                     when {
                         isFolder -> "文件夹"
@@ -866,12 +902,14 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() ->
                     )
                 }
             }
-            Icon(
-                if (isFolder || isText || isPdf) Icons.Outlined.ChevronRight else Icons.Outlined.OpenInNew,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(19.dp)
-            )
+            if (!isFolder && !isText && !isPdf) {
+                Icon(
+                    Icons.Outlined.OpenInNew,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
     }
 }
@@ -1228,7 +1266,16 @@ private fun TransferCard(transfer: TransferUiState, modifier: Modifier = Modifie
         shadowElevation = 8.dp
     ) {
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-            Text(transfer.label, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    transfer.label,
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (determinate) Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
+            }
             Spacer(Modifier.height(8.dp))
             if (determinate) {
                 LinearProgressIndicator(
@@ -1244,7 +1291,10 @@ private fun TransferCard(transfer: TransferUiState, modifier: Modifier = Modifie
             } else {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.secondary)
                 Spacer(Modifier.height(6.dp))
-                Text(formatBytes(transfer.downloaded), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (transfer.downloaded <= 0) "正在连接 GitHub…" else "已接收 ${formatBytes(transfer.downloaded)}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
         }
     }

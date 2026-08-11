@@ -7085,6 +7085,208 @@ input[type="checkbox"] {
   }
 }
 
+/* GitHub onboarding and automatic repository setup */
+.github-account-card,
+.github-create-card {
+  padding-bottom: 18px;
+}
+
+.github-account-card.account-ready {
+  border-color: color-mix(in srgb, var(--green) 24%, var(--border));
+}
+
+.github-account-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+}
+
+.github-account-copy {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 3px;
+}
+
+.github-account-copy strong {
+  font-size: 14px;
+}
+
+.github-account-copy span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-create-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, .7fr);
+  gap: 14px;
+  padding: 0 18px 14px;
+}
+
+.resource-field select,
+.import-sync-options select {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.resource-field select:focus,
+.import-sync-options select:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 14%, transparent);
+}
+
+.compact-sync-toggles {
+  margin: 0 18px 14px;
+}
+
+.github-create-card > .button.full,
+.github-connect-card > .button.full {
+  width: calc(100% - 36px);
+  margin: 0 18px;
+}
+
+.github-connect-card > .button.full + .button.full {
+  margin-top: 9px;
+}
+
+.visibility-field {
+  margin: 14px 18px 0;
+}
+
+.github-settings-account {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  margin: 18px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-muted);
+}
+
+.github-settings-account > span {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--green);
+}
+
+.github-settings-account > div {
+  min-width: 0;
+}
+
+.github-settings-account strong {
+  font-size: 14px;
+}
+
+.github-settings-account p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.product-repository-address {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0 18px 18px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+
+.product-repository-address > div {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.product-repository-address code {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-sync-choice {
+  margin: 0 20px 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-muted);
+}
+
+.import-sync-choice .sync-toggle {
+  border: 0;
+  background: transparent;
+}
+
+.import-sync-options {
+  display: grid;
+  grid-template-columns: minmax(220px, .55fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 14px;
+  padding: 0 14px 14px;
+}
+
+.import-sync-options label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.import-sync-options p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 760px) {
+  .github-account-row,
+  .github-settings-account {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .github-account-row {
+    display: grid;
+  }
+
+  .github-account-row .button,
+  .github-settings-account .button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .github-create-fields,
+  .import-sync-options {
+    grid-template-columns: 1fr;
+  }
+
+  .product-repository-address {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
 /* Project storage and GitHub state */
 
 .project-sync-badge {

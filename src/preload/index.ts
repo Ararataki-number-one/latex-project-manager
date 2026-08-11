@@ -25,7 +25,14 @@ const api: WorkbenchApi = {
     configure: (projectId, settings) => ipcRenderer.invoke(IPC.githubConfigure, projectId, settings),
     syncNow: (projectId) => ipcRenderer.invoke(IPC.githubSyncNow, projectId),
     setAutoSync: (projectId, enabled) => ipcRenderer.invoke(IPC.githubSetAutoSync, projectId, enabled),
-    setIdentity: (projectId, identity) => ipcRenderer.invoke(IPC.githubSetIdentity, projectId, identity)
+    setIdentity: (projectId, identity) => ipcRenderer.invoke(IPC.githubSetIdentity, projectId, identity),
+    authStatus: () => ipcRenderer.invoke(IPC.githubAuthStatus),
+    beginLogin: () => ipcRenderer.invoke(IPC.githubBeginLogin),
+    createRepository: (projectId, options) => ipcRenderer.invoke(IPC.githubCreateRepository, projectId, options),
+    setVisibility: (projectId, visibility) => ipcRenderer.invoke(IPC.githubSetVisibility, projectId, visibility),
+    openRemote: (projectId) => ipcRenderer.invoke(IPC.githubOpenRemote, projectId),
+    openProductPage: () => ipcRenderer.invoke(IPC.githubOpenProductPage),
+    openCliDownload: () => ipcRenderer.invoke(IPC.githubOpenCliDownload)
   },
   updates: {
     status: () => ipcRenderer.invoke(IPC.updatesStatus),

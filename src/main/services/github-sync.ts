@@ -8,8 +8,11 @@ import { watch, type FSWatcher } from "chokidar";
 
 import type {
   GitHubChangedFile,
+  GitHubAccountStatus,
+  GitHubCreateRepositoryOptions,
   GitIdentity,
   GitHubLargeFile,
+  GitHubRepositoryVisibility,
   GitHubSyncSettings,
   GitHubSyncState,
   GitHubSyncStatus
@@ -47,6 +50,8 @@ interface StoredSyncConfig extends GitHubSyncSettings {
   projectId: string;
   lastSyncAt?: string;
   lastError?: string;
+  repositoryFullName?: string;
+  visibility?: GitHubRepositoryVisibility;
 }
 
 export interface GitCommandResult {
@@ -68,11 +73,13 @@ interface WatcherLike {
 
 export interface GitHubSyncServiceOptions {
   gitExecutable?: string;
+  githubCliExecutable?: string;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   runner?: GitCommandRunner;
   debounceMs?: number;
   watcherFactory?: (root: string, onChange: () => void) => WatcherLike;
+  loginLauncher?: (executable: string, cwd: string, args: string[]) => Promise<void>;
 }
 
 interface LiveStatus {
@@ -104,6 +111,21 @@ function isInside(root: string, candidate: string): boolean {
 function conciseError(result: GitCommandResult): string {
   const value = (result.stderr || result.stdout || `Git exited with code ${result.code}`).trim();
   return value.length > 800 ? `${value.slice(0, 800)}…` : value;
+}
+
+function repositoryCoordinates(remoteUrl: string): { owner: string; name: string; fullName: string } {
+  const normalized = normalizeGitHubRemoteUrl(remoteUrl);
+  const match = /github\.com(?::|\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(normalized);
+  if (!match) throw new Error("无法从仓库地址识别 owner/repository。");
+  return { owner: match[1], name: match[2], fullName: `${match[1]}/${match[2]}` };
+}
+
+function validatedRepositoryName(value: string): string {
+  const name = value.trim();
+  if (!name || name.length > 100 || name === "." || name === ".." || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+    throw new Error("仓库名只能包含字母、数字、点、短横线和下划线，且不能超过 100 个字符。");
+  }
+  return name;
 }
 
 function emptyGitIdentity(): GitIdentity {
@@ -157,6 +179,23 @@ function defaultRunner(
       settled = true;
       clearTimeout(timer);
       resolveRun({ code: code ?? -1, stdout, stderr });
+    });
+  });
+}
+
+function defaultLoginLauncher(executable: string, cwd: string, args: string[]): Promise<void> {
+  return new Promise((resolveLaunch, rejectLaunch) => {
+    const child = spawn(executable, args, {
+      cwd,
+      shell: false,
+      detached: true,
+      windowsHide: false,
+      stdio: "ignore"
+    });
+    child.once("error", rejectLaunch);
+    child.once("spawn", () => {
+      child.unref();
+      resolveLaunch();
     });
   });
 }
@@ -251,13 +290,16 @@ export class GitHubSyncService {
   private readonly runner: GitCommandRunner;
   private readonly debounceMs: number;
   private readonly watcherFactory: (root: string, onChange: () => void) => WatcherLike;
+  private readonly loginLauncher: (executable: string, cwd: string, args: string[]) => Promise<void>;
   private readonly roots = new Map<string, string>();
   private readonly watchers = new Map<string, WatcherLike>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly jobs = new Map<string, Promise<GitHubSyncStatus>>();
   private readonly live = new Map<string, LiveStatus>();
   private executable: string | null | undefined;
+  private githubCliExecutable: string | null | undefined;
   private gitVersion: string | undefined;
+  private githubCliVersion: string | undefined;
   private lfsAvailable: boolean | undefined;
 
   constructor(private readonly configDirectory: string, options: GitHubSyncServiceOptions = {}) {
@@ -266,7 +308,62 @@ export class GitHubSyncService {
     this.runner = options.runner ?? defaultRunner;
     this.debounceMs = Math.max(1_000, options.debounceMs ?? 10_000);
     this.watcherFactory = options.watcherFactory ?? defaultWatcherFactory;
+    this.loginLauncher = options.loginLauncher ?? defaultLoginLauncher;
     if (options.gitExecutable) this.executable = options.gitExecutable;
+    if (options.githubCliExecutable) this.githubCliExecutable = options.githubCliExecutable;
+  }
+
+  async authStatus(cwd = process.cwd()): Promise<GitHubAccountStatus> {
+    const executable = await this.resolveGitHubCli(cwd);
+    if (!executable) {
+      return {
+        cliAvailable: false,
+        authenticated: false,
+        message: "未检测到 GitHub CLI。安装后可在客户端中使用浏览器登录。"
+      };
+    }
+    const authentication = await this.runGitHubCli(cwd, ["auth", "status", "--hostname", "github.com"], [0, 1], true);
+    if (authentication.code !== 0) {
+      return {
+        cliAvailable: true,
+        cliVersion: this.githubCliVersion,
+        authenticated: false,
+        message: "GitHub CLI 已安装，但尚未登录。"
+      };
+    }
+    const profile = await this.runGitHubCli(cwd, ["api", "user"], [0], true);
+    let value: { login?: string; name?: string | null; email?: string | null; id?: number } = {};
+    try {
+      value = JSON.parse(profile.stdout) as typeof value;
+    } catch {
+      throw new Error("GitHub 已登录，但无法读取账号信息。");
+    }
+    const login = value.login?.trim();
+    if (!login) throw new Error("GitHub 已登录，但账号名称为空。");
+    const email = value.email?.trim() || (Number.isFinite(value.id) ? `${value.id}+${login}@users.noreply.github.com` : `${login}@users.noreply.github.com`);
+    return {
+      cliAvailable: true,
+      cliVersion: this.githubCliVersion,
+      authenticated: true,
+      login,
+      name: value.name?.trim() || login,
+      email,
+      message: `已登录 GitHub：${login}`
+    };
+  }
+
+  async beginLogin(cwd = process.cwd()): Promise<GitHubAccountStatus> {
+    const current = await this.authStatus(cwd);
+    if (current.authenticated) return current;
+    const executable = await this.resolveGitHubCli(cwd);
+    if (!executable) throw new Error("请先安装 GitHub CLI，再返回客户端登录。");
+    await this.loginLauncher(executable, cwd, ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"]);
+    return {
+      cliAvailable: true,
+      cliVersion: this.githubCliVersion,
+      authenticated: false,
+      message: "已打开 GitHub 官方登录窗口；完成网页登录后回到客户端点击“刷新登录状态”。"
+    };
   }
 
   async attachProject(projectId: string, root: string): Promise<void> {
@@ -323,13 +420,16 @@ export class GitHubSyncService {
       await this.run(root, ["lfs", "track", "*.pdf", "*.epub", "*.djvu"]);
     }
     const previous = await this.readConfig(projectId);
+    const coordinates = repositoryCoordinates(remoteUrl);
     await this.writeConfig({
       schemaVersion: CONFIG_VERSION,
       projectId,
       remoteUrl,
       autoSync: settings.autoSync,
       useLfsForDocuments: settings.useLfsForDocuments,
-      lastSyncAt: previous?.lastSyncAt
+      lastSyncAt: previous?.lastSyncAt,
+      repositoryFullName: coordinates.fullName,
+      visibility: previous?.repositoryFullName === coordinates.fullName ? previous.visibility : undefined
     });
     this.live.set(projectId, { state: "ready", message: `已连接 ${remoteUrl}，当前分支 ${branch}。` });
     if (settings.autoSync) await this.startWatcher(projectId);
@@ -373,6 +473,92 @@ export class GitHubSyncService {
     await this.run(root, ["config", "--local", "user.email", email]);
     this.live.set(projectId, { state: "ready", message: "已为当前项目保存 Git 提交身份。" });
     return this.status(projectId, root);
+  }
+
+  async createRepository(
+    projectId: string,
+    root: string,
+    options: GitHubCreateRepositoryOptions
+  ): Promise<GitHubSyncStatus> {
+    if (!options || typeof options !== "object" || Array.isArray(options)) throw new Error("GitHub 建仓设置无效。");
+    const repositoryName = validatedRepositoryName(options.repositoryName);
+    if (!new Set<GitHubRepositoryVisibility>(["public", "private"]).has(options.visibility)) {
+      throw new Error("仓库可见性设置无效。");
+    }
+    if (typeof options.autoSync !== "boolean" || typeof options.useLfsForDocuments !== "boolean") {
+      throw new Error("GitHub 同步设置无效。");
+    }
+    this.roots.set(projectId, resolve(root));
+    const account = await this.authStatus(root);
+    if (!account.authenticated || !account.login) throw new Error("请先在客户端设置中登录 GitHub。");
+    await this.runGitHubCli(root, ["auth", "setup-git", "--hostname", "github.com"], [0], false);
+    await this.requireGit(root);
+    await this.ensureRepository(root);
+    await this.ensureBranch(root);
+    const existingRemote = await this.run(root, ["remote", "get-url", "origin"], [0, 2, 128]);
+    if (existingRemote.code === 0 && existingRemote.stdout.trim()) {
+      throw new Error("当前项目已经存在 origin 远端；请在 GitHub 同步页确认或修改现有连接。");
+    }
+    const fullName = `${account.login}/${repositoryName}`;
+    const existingRepository = await this.runGitHubCli(root, ["repo", "view", fullName, "--json", "nameWithOwner"], [0, 1], true);
+    if (existingRepository.code === 0) throw new Error(`GitHub 仓库 ${fullName} 已存在，请换一个仓库名。`);
+    await this.runGitHubCli(
+      root,
+      ["repo", "create", fullName, `--${options.visibility}`, "--source", ".", "--remote", "origin"],
+      [0],
+      false
+    );
+    const identity = await this.gitIdentity(root);
+    if (!identity.configured) {
+      await this.run(root, ["config", "--local", "user.name", account.name || account.login]);
+      await this.run(root, ["config", "--local", "user.email", account.email || `${account.login}@users.noreply.github.com`]);
+    }
+    const remoteUrl = `https://github.com/${fullName}.git`;
+    await this.configure(projectId, root, {
+      remoteUrl,
+      autoSync: options.autoSync,
+      useLfsForDocuments: options.useLfsForDocuments
+    });
+    const config = await this.readConfig(projectId);
+    if (!config) throw new Error("仓库已创建，但本机同步配置保存失败。");
+    await this.writeConfig({ ...config, repositoryFullName: fullName, visibility: options.visibility });
+    return this.syncNow(projectId, root, false);
+  }
+
+  async setVisibility(
+    projectId: string,
+    root: string,
+    visibility: GitHubRepositoryVisibility
+  ): Promise<GitHubSyncStatus> {
+    if (!new Set<GitHubRepositoryVisibility>(["public", "private"]).has(visibility)) {
+      throw new Error("仓库可见性设置无效。");
+    }
+    const config = await this.readConfig(projectId);
+    if (!config) throw new Error("请先连接 GitHub 仓库。");
+    const account = await this.authStatus(root);
+    if (!account.authenticated) throw new Error("请先在客户端设置中登录 GitHub。");
+    const coordinates = repositoryCoordinates(config.remoteUrl);
+    await this.runGitHubCli(
+      root,
+      ["repo", "edit", coordinates.fullName, "--visibility", visibility, "--accept-visibility-change-consequences"],
+      [0],
+      false
+    );
+    await this.writeConfig({ ...config, repositoryFullName: coordinates.fullName, visibility });
+    this.live.set(projectId, { state: "ready", message: `仓库已切换为${visibility === "public" ? "公开" : "私有"}。` });
+    return this.status(projectId, root);
+  }
+
+  async remoteWebUrl(projectId: string, root: string): Promise<string> {
+    const config = await this.readConfig(projectId);
+    let remoteUrl = config?.remoteUrl;
+    if (!remoteUrl) {
+      const detected = await this.run(root, ["remote", "get-url", "origin"], [0, 2, 128]);
+      if (detected.code === 0) remoteUrl = detected.stdout.trim();
+    }
+    if (!remoteUrl) throw new Error("当前项目尚未连接 GitHub 仓库。");
+    const coordinates = repositoryCoordinates(remoteUrl);
+    return `https://github.com/${coordinates.fullName}`;
   }
 
   async syncNow(projectId: string, root: string, background = false): Promise<GitHubSyncStatus> {
@@ -450,6 +636,7 @@ export class GitHubSyncService {
       }
     }
     const remoteUrl = config?.remoteUrl || detectedRemote;
+    const coordinates = remoteUrl ? repositoryCoordinates(remoteUrl) : undefined;
     const changedFiles = parseChangedFiles(changesResult.stdout);
     const largeFiles = await this.largeChangedFiles(root, changedFiles);
     const { ahead, behind } = branch ? await this.aheadBehind(root, branch) : { ahead: 0, behind: 0 };
@@ -483,6 +670,8 @@ export class GitHubSyncService {
       autoSync: config?.autoSync ?? false,
       useLfsForDocuments: config?.useLfsForDocuments ?? false,
       branch,
+      repositoryFullName: config?.repositoryFullName ?? coordinates?.fullName,
+      visibility: config?.visibility,
       state,
       changedFiles,
       largeFiles,
@@ -569,6 +758,35 @@ export class GitHubSyncService {
     return null;
   }
 
+  private async resolveGitHubCli(cwd: string): Promise<string | null> {
+    if (this.githubCliExecutable !== undefined) return this.githubCliExecutable;
+    const programFiles = this.env.ProgramFiles;
+    const programW6432 = this.env.ProgramW6432;
+    const localAppData = this.env.LOCALAPPDATA;
+    const candidates = [
+      this.env.GITHUB_CLI_EXECUTABLE,
+      programFiles ? join(programFiles, "GitHub CLI", "gh.exe") : undefined,
+      programW6432 ? join(programW6432, "GitHub CLI", "gh.exe") : undefined,
+      localAppData ? join(localAppData, "Programs", "GitHub CLI", "gh.exe") : undefined,
+      "gh"
+    ].filter((item): item is string => Boolean(item));
+    for (const candidate of candidates) {
+      if (isAbsolute(candidate) && !existsSync(candidate)) continue;
+      try {
+        const result = await this.runner(candidate, cwd, ["--version"], { background: true });
+        if (result.code === 0 && /^gh version /i.test(result.stdout.trim())) {
+          this.githubCliExecutable = candidate;
+          this.githubCliVersion = result.stdout.trim().split(/\r?\n/, 1)[0].replace(/^gh version\s+/i, "");
+          return candidate;
+        }
+      } catch {
+        // Try the next known installation.
+      }
+    }
+    this.githubCliExecutable = null;
+    return null;
+  }
+
   private async requireGit(cwd: string): Promise<string> {
     const executable = await this.resolveGit(cwd);
     if (!executable) throw new Error("未检测到 Git。请安装 Git for Windows 或 GitHub Desktop。");
@@ -592,6 +810,19 @@ export class GitHubSyncService {
   private async run(cwd: string, args: string[], allowedCodes = [0], background = true): Promise<GitCommandResult> {
     const executable = await this.requireGit(cwd);
     const result = await this.runner(executable, cwd, this.safeArgs(cwd, args), { background });
+    if (!allowedCodes.includes(result.code)) throw new Error(conciseError(result));
+    return result;
+  }
+
+  private async runGitHubCli(
+    cwd: string,
+    args: string[],
+    allowedCodes = [0],
+    background = true
+  ): Promise<GitCommandResult> {
+    const executable = await this.resolveGitHubCli(cwd);
+    if (!executable) throw new Error("未检测到 GitHub CLI。请先安装后再登录 GitHub。");
+    const result = await this.runner(executable, cwd, args, { background });
     if (!allowedCodes.includes(result.code)) throw new Error(conciseError(result));
     return result;
   }
@@ -696,6 +927,8 @@ export class GitHubSyncService {
       const value = JSON.parse(await readFile(this.configPath(projectId), "utf8")) as Partial<StoredSyncConfig>;
       if (value.schemaVersion !== CONFIG_VERSION || value.projectId !== projectId || typeof value.remoteUrl !== "string"
         || typeof value.autoSync !== "boolean" || typeof value.useLfsForDocuments !== "boolean") return null;
+      if (value.visibility !== undefined && value.visibility !== "public" && value.visibility !== "private") return null;
+      if (value.repositoryFullName !== undefined && (typeof value.repositoryFullName !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repositoryFullName))) return null;
       return value as StoredSyncConfig;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return null;

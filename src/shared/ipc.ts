@@ -3,6 +3,9 @@ import type {
   AppUpdateStatus,
   ExportResult,
   GitIdentity,
+  GitHubAccountStatus,
+  GitHubCreateRepositoryOptions,
+  GitHubRepositoryVisibility,
   GitHubSyncSettings,
   GitHubSyncStatus,
   MigrationPreview,
@@ -41,6 +44,13 @@ export const IPC = {
   githubSyncNow: "github:sync-now",
   githubSetAutoSync: "github:set-auto-sync",
   githubSetIdentity: "github:set-identity",
+  githubAuthStatus: "github:auth-status",
+  githubBeginLogin: "github:begin-login",
+  githubCreateRepository: "github:create-repository",
+  githubSetVisibility: "github:set-visibility",
+  githubOpenRemote: "github:open-remote",
+  githubOpenProductPage: "github:open-product-page",
+  githubOpenCliDownload: "github:open-cli-download",
   updatesStatus: "updates:status",
   updatesSetSettings: "updates:set-settings",
   updatesCheck: "updates:check",
@@ -106,6 +116,13 @@ export interface WorkbenchApi {
     syncNow(projectId: string): Promise<GitHubSyncStatus>;
     setAutoSync(projectId: string, enabled: boolean): Promise<GitHubSyncStatus>;
     setIdentity(projectId: string, identity: Pick<GitIdentity, "name" | "email">): Promise<GitHubSyncStatus>;
+    authStatus(): Promise<GitHubAccountStatus>;
+    beginLogin(): Promise<GitHubAccountStatus>;
+    createRepository(projectId: string, options: GitHubCreateRepositoryOptions): Promise<GitHubSyncStatus>;
+    setVisibility(projectId: string, visibility: GitHubRepositoryVisibility): Promise<GitHubSyncStatus>;
+    openRemote(projectId: string): Promise<void>;
+    openProductPage(): Promise<void>;
+    openCliDownload(): Promise<void>;
   };
   updates: {
     status(): Promise<AppUpdateStatus>;

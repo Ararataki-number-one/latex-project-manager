@@ -367,6 +367,8 @@ export function createWorkbench(): DemoWorkbench {
     autoSync: true,
     useLfsForDocuments: true,
     branch: "main",
+    repositoryFullName: "zqy/probability-notes",
+    visibility: "private",
     state: "changes",
     changedFiles: [
       { path: "chapters/03-alteration.tex", status: " M" },
@@ -535,7 +537,32 @@ export function createWorkbench(): DemoWorkbench {
       setIdentity: async (_projectId, identity) => {
         githubStatus = { ...githubStatus, identity: { ...identity, configured: true, source: "local" }, state: "changes", message: "演示模式：已保存提交身份。" };
         return structuredClone(githubStatus);
-      }
+      },
+      authStatus: async () => ({ cliAvailable: true, cliVersion: "2.76.2", authenticated: true, login: "Ararataki-number-one", name: "Ararataki-number-one", email: "demo@users.noreply.github.com", message: "演示模式：GitHub 已登录" }),
+      beginLogin: async () => ({ cliAvailable: true, cliVersion: "2.76.2", authenticated: false, message: "演示模式：已模拟打开 GitHub 登录窗口" }),
+      createRepository: async (_projectId, options) => {
+        githubStatus = {
+          ...githubStatus,
+          configured: true,
+          repository: true,
+          repositoryFullName: `Ararataki-number-one/${options.repositoryName}`,
+          remoteUrl: `https://github.com/Ararataki-number-one/${options.repositoryName}.git`,
+          visibility: options.visibility,
+          autoSync: options.autoSync,
+          useLfsForDocuments: options.useLfsForDocuments,
+          state: "synced",
+          changedFiles: [],
+          message: "演示模式：已模拟创建并同步仓库。"
+        };
+        return structuredClone(githubStatus);
+      },
+      setVisibility: async (_projectId, visibility) => {
+        githubStatus = { ...githubStatus, visibility, message: `演示模式：仓库已设为${visibility === "public" ? "公开" : "私有"}。` };
+        return structuredClone(githubStatus);
+      },
+      openRemote: async () => undefined,
+      openProductPage: async () => undefined,
+      openCliDownload: async () => undefined
     },
     updates: {
       status: async () => structuredClone(updateStatus),

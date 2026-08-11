@@ -175,6 +175,25 @@ export interface GitHubSyncSettings {
   useLfsForDocuments: boolean;
 }
 
+export type GitHubRepositoryVisibility = "public" | "private";
+
+export interface GitHubAccountStatus {
+  cliAvailable: boolean;
+  cliVersion?: string;
+  authenticated: boolean;
+  login?: string;
+  name?: string;
+  email?: string;
+  message: string;
+}
+
+export interface GitHubCreateRepositoryOptions {
+  repositoryName: string;
+  visibility: GitHubRepositoryVisibility;
+  autoSync: boolean;
+  useLfsForDocuments: boolean;
+}
+
 export interface GitIdentity {
   name: string;
   email: string;
@@ -189,6 +208,8 @@ export interface GitHubSyncStatus extends GitHubSyncSettings {
   repository: boolean;
   lfsAvailable: boolean;
   branch?: string;
+  repositoryFullName?: string;
+  visibility?: GitHubRepositoryVisibility;
   state: GitHubSyncState;
   changedFiles: GitHubChangedFile[];
   largeFiles: GitHubLargeFile[];

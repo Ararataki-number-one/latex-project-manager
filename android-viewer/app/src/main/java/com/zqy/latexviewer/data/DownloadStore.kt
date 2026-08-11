@@ -41,6 +41,14 @@ class DownloadStore(private val context: Context) {
             .let { if (it.endsWith(".pdf", ignoreCase = true)) it else "$it.pdf" }
         val destination = File(directory, fileName)
         val temporary = File(directory, "$fileName.part")
+        if (destination.isFile) {
+            val cached = runCatching { validatePdf(destination) }.isSuccess
+            if (cached) {
+                destination.setLastModified(System.currentTimeMillis())
+                return@withContext destination
+            }
+            destination.delete()
+        }
         temporary.delete()
         try {
             FileOutputStream(temporary).use { writer(it) }
@@ -52,7 +60,9 @@ class DownloadStore(private val context: Context) {
                 throw IllegalStateException("无法建立 PDF 预览缓存")
             }
             directory.listFiles()
-                ?.filter { it != destination }
+                ?.filter { it != destination && !it.name.endsWith(".part") }
+                ?.sortedByDescending { it.lastModified() }
+                ?.drop((MAX_PDF_CACHE_FILES - 1).coerceAtLeast(0))
                 ?.forEach { it.delete() }
             destination
         } catch (failure: Throwable) {
@@ -259,5 +269,6 @@ class DownloadStore(private val context: Context) {
 
     private companion object {
         const val DOWNLOAD_FOLDER = "LaTeX项目"
+        const val MAX_PDF_CACHE_FILES = 8
     }
 }

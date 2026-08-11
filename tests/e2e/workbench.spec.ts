@@ -129,8 +129,21 @@ test("Overleaf 风格项目库支持搜索、标签、复制、归档、回收�
   await expect(page.getByRole("checkbox", { name: /自动检查更新/ })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: /发现新版本后自动下载/ })).toBeChecked();
   await expect(page.getByRole("button", { name: "立即检查" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "GitHub 连接" })).toBeVisible();
+  await expect(page.getByText("github.com/Ararataki-number-one/latex-project-manager", { exact: true })).toBeVisible();
   await expect(page.getByText("0.3.6", { exact: true }).first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
+});
+
+test("导入项目会询问是否自动创建 GitHub 仓库", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "导入项目" }).click();
+  const dialog = page.getByRole("dialog", { name: "导入 LaTeX 项目" });
+  const sync = dialog.getByRole("checkbox", { name: /导入后启用 GitHub 自动同步/ });
+  await expect(sync).not.toBeChecked();
+  await sync.check();
+  await expect(dialog.getByText("新仓库可见性", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("combobox")).toHaveValue("private");
 });
 
 test("批量归档会同时更新所有选中项目", async ({ page }) => {

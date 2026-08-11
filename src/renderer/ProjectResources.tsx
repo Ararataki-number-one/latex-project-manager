@@ -13,6 +13,7 @@ import {
   GitFork,
   HardDrive,
   LoaderCircle,
+  LogIn,
   Mail,
   Plus,
   RefreshCw,
@@ -23,7 +24,7 @@ import {
 } from "lucide-react";
 
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { GitHubSyncState, GitHubSyncStatus, ProjectSummary, ReferenceDocumentInfo } from "@/shared/types";
+import type { GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncState, GitHubSyncStatus, ProjectSummary, ReferenceDocumentInfo } from "@/shared/types";
 
 interface SharedProps {
   api: WorkbenchApi;
@@ -42,6 +43,16 @@ function formatBytes(bytes: number): string {
 function formatTime(value?: string): string {
   if (!value) return "尚未同步";
   return new Date(value).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function suggestedRepositoryName(project: ProjectSummary): string {
+  const normalized = project.name
+    .normalize("NFKD")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 80);
+  return normalized || `latex-project-${project.id.slice(0, 8).toLocaleLowerCase("en-US")}`;
 }
 
 const syncStateLabel: Record<GitHubSyncState, string> = {
@@ -65,13 +76,16 @@ function SyncStateIcon({ state }: { state: GitHubSyncState }) {
 
 export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
   const [status, setStatus] = useState<GitHubSyncStatus | null>(null);
+  const [account, setAccount] = useState<GitHubAccountStatus | null>(null);
   const [remoteUrl, setRemoteUrl] = useState("");
   const [autoSync, setAutoSync] = useState(true);
   const [useLfs, setUseLfs] = useState(true);
   const [identityName, setIdentityName] = useState("");
   const [identityEmail, setIdentityEmail] = useState("");
+  const [repositoryName, setRepositoryName] = useState(() => suggestedRepositoryName(project));
+  const [visibility, setVisibility] = useState<GitHubRepositoryVisibility>("private");
   const [initialized, setInitialized] = useState(false);
-  const [busy, setBusy] = useState<"configure" | "sync" | "toggle" | "identity" | null>(null);
+  const [busy, setBusy] = useState<"configure" | "create" | "sync" | "toggle" | "identity" | "login" | "visibility" | null>(null);
 
   const refresh = useCallback(async (initializeDraft = false) => {
     try {
@@ -81,6 +95,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         setRemoteUrl(next.remoteUrl);
         setAutoSync(next.configured ? next.autoSync : true);
         setUseLfs(next.configured ? next.useLfsForDocuments : next.lfsAvailable);
+        setVisibility(next.visibility ?? "private");
         setIdentityName(next.identity.name);
         setIdentityEmail(next.identity.email);
         setInitialized(true);
@@ -90,11 +105,99 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
     }
   }, [api, initialized, onNotify, project.id]);
 
+  const refreshAccount = useCallback(async () => {
+    try {
+      setAccount(await api.github.authStatus());
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法读取 GitHub 登录状态");
+    }
+  }, [api, onNotify]);
+
   useEffect(() => {
     void refresh(true);
     const timer = setInterval(() => { void refresh(false); }, 6_000);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => { void refreshAccount(); }, [refreshAccount]);
+
+  useEffect(() => {
+    if (!account?.cliAvailable || account.authenticated) return;
+    const timer = setInterval(() => { void refreshAccount(); }, 5_000);
+    return () => clearInterval(timer);
+  }, [account?.authenticated, account?.cliAvailable, refreshAccount]);
+
+  async function beginGitHubLogin() {
+    setBusy("login");
+    try {
+      if (account?.cliAvailable === false) {
+        await api.github.openCliDownload();
+        onNotify("已打开 GitHub CLI 下载页；安装完成后重启客户端");
+      } else {
+        const next = await api.github.beginLogin();
+        setAccount(next);
+        onNotify(next.message);
+      }
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法启动 GitHub 登录");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function createAndSync() {
+    if (!account?.authenticated) {
+      onNotify("请先登录 GitHub，再自动创建仓库");
+      return;
+    }
+    if (!repositoryName.trim()) {
+      onNotify("请输入仓库名称");
+      return;
+    }
+    setBusy("create");
+    try {
+      const next = await api.github.createRepository(project.id, {
+        repositoryName: repositoryName.trim(),
+        visibility,
+        autoSync,
+        useLfsForDocuments: useLfs
+      });
+      setStatus(next);
+      setRemoteUrl(next.remoteUrl);
+      setIdentityName(next.identity.name);
+      setIdentityEmail(next.identity.email);
+      onNotify(next.state === "synced" ? "GitHub 仓库已创建，项目已完成首次同步" : (next.message ?? "GitHub 仓库已创建"));
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法创建 GitHub 仓库");
+      await refresh(false);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function changeVisibility(nextVisibility: GitHubRepositoryVisibility) {
+    if (nextVisibility === status?.visibility) return;
+    if (nextVisibility === "public" && !window.confirm("设为公开后，任何人都能看到并下载仓库中的 LaTeX 源码和原始文稿。确定继续吗？")) return;
+    setBusy("visibility");
+    try {
+      const next = await api.github.setVisibility(project.id, nextVisibility);
+      setStatus(next);
+      setVisibility(nextVisibility);
+      onNotify(`仓库已切换为${nextVisibility === "public" ? "公开" : "私有"}`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法修改仓库可见性");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function openRemote() {
+    try {
+      await api.github.openRemote(project.id);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法打开 GitHub 仓库");
+    }
+  }
 
   async function configureAndSync() {
     if (!remoteUrl.trim()) {
@@ -199,6 +302,36 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         <span className="sync-status-time">上次成功：{formatTime(status.lastSyncAt)}</span>
       </div>
 
+      <section className={`resource-card github-account-card ${account?.authenticated ? "account-ready" : "account-required"}`}>
+        <header>
+          <div><h3>GitHub 账号</h3><p>通过官方浏览器登录；密码和令牌不会保存到本软件。</p></div>
+          {account?.authenticated ? <CheckCircle2 size={19} /> : <LogIn size={19} />}
+        </header>
+        <div className="github-account-row">
+          <div className="github-account-copy">
+            <strong>{account?.authenticated ? account.login : account?.message ?? "正在检查登录状态…"}</strong>
+            <span>{account?.authenticated ? `${account.name ?? account.login} · ${account.email ?? "GitHub noreply 邮箱"}` : account?.cliAvailable ? "点击登录后会打开 GitHub 官方网页" : "需要先安装 GitHub CLI"}</span>
+          </div>
+          <button className="button secondary" onClick={() => void refreshAccount()} disabled={busy !== null}><RefreshCw size={16} />刷新状态</button>
+          {!account?.authenticated && <button className="button primary" onClick={() => void beginGitHubLogin()} disabled={busy !== null}>{busy === "login" ? <LoaderCircle size={16} className="spin" /> : <LogIn size={16} />}{account?.cliAvailable === false ? "安装 GitHub CLI" : "登录 GitHub"}</button>}
+        </div>
+      </section>
+
+      {!status.configured && (
+        <section className="resource-card github-create-card">
+          <header><div><h3>一键创建同步仓库</h3><p>无需先去 GitHub 建仓库；客户端会创建、连接并完成首次同步。</p></div><Cloud size={19} /></header>
+          <div className="github-create-fields">
+            <label className="resource-field"><span>仓库名称</span><input value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)} placeholder="latex-notes" maxLength={100} spellCheck={false} /></label>
+            <label className="resource-field"><span>仓库可见性</span><select value={visibility} onChange={(event) => setVisibility(event.target.value as GitHubRepositoryVisibility)}><option value="private">私有 · 仅你和受邀成员可见</option><option value="public">公开 · 任何人都能查看和下载</option></select></label>
+          </div>
+          <div className="sync-toggle-list compact-sync-toggles">
+            <label className="sync-toggle"><span><strong>创建后自动同步</strong><small>新增、删除和内容修改停止约 10 秒后自动上传</small></span><input type="checkbox" checked={autoSync} disabled={busy !== null} onChange={(event) => setAutoSync(event.target.checked)} /></label>
+            <label className="sync-toggle"><span><strong>PDF 等大文稿使用 Git LFS</strong><small>适合项目中的原始英文文稿和中文 PDF</small></span><input type="checkbox" checked={useLfs} disabled={!status.lfsAvailable || busy !== null} onChange={(event) => setUseLfs(event.target.checked)} /></label>
+          </div>
+          <button className="button primary full" onClick={() => void createAndSync()} disabled={busy !== null || !account?.authenticated || !repositoryName.trim()}>{busy === "create" ? <LoaderCircle size={16} className="spin" /> : <Cloud size={16} />}创建{visibility === "public" ? "公开" : "私有"}仓库并首次同步</button>
+        </section>
+      )}
+
       <section className={`resource-card git-identity-card ${status.identity.configured ? "identity-ready" : "identity-required"}`}>
         <header><div><h3>提交身份</h3><p>只保存到当前项目，用来标记 GitHub 上的提交作者。</p></div><UserRound size={18} /></header>
         <div className="git-identity-fields">
@@ -211,7 +344,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
 
       <div className="resource-columns">
         <section className="resource-card github-connect-card">
-          <header><div><h3>仓库连接</h3><p>使用 GitHub HTTPS 或 SSH 仓库地址。</p></div><GitFork size={18} /></header>
+          <header><div><h3>{status.configured ? "仓库连接" : "连接已有仓库"}</h3><p>{status.configured ? "这里显示当前项目的 GitHub 地址。" : "高级方式：连接你已经在 GitHub 创建的仓库。"}</p></div><GitFork size={18} /></header>
           <label className="resource-field"><span>GitHub 仓库地址</span><input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="https://github.com/用户名/仓库名.git" spellCheck={false} /></label>
           <div className="sync-toggle-list">
             <label className="sync-toggle"><span><strong>自动同步</strong><small>文件停止变化约 10 秒后，自动提交并推送</small></span><input type="checkbox" checked={autoSync} disabled={busy !== null} onChange={(event) => void toggleAutoSync(event.target.checked)} /></label>
@@ -219,6 +352,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
           </div>
           {!status.lfsAvailable && <p className="inline-warning"><AlertCircle size={14} />未检测到 Git LFS；超过 100 MiB 的文件无法上传到普通 Git 仓库。</p>}
           <button className="button primary full" onClick={() => void configureAndSync()} disabled={busy !== null || !status.available || !remoteUrl.trim()}>{busy === "configure" ? <LoaderCircle size={16} className="spin" /> : <Cloud size={16} />}{status.configured ? (hasDraftChanges ? "保存设置并同步" : "重新连接并同步") : "连接并首次同步"}</button>
+          {status.configured && <button className="button secondary full" onClick={() => void openRemote()}><ExternalLink size={16} />在 GitHub 中打开仓库</button>}
           {isDemo && <p className="demo-note compact-note">演示模式只展示同步流程，不会访问真实 GitHub 仓库。</p>}
         </section>
 
@@ -229,7 +363,10 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
             <div><span>当前分支</span><strong>{status.branch ?? "—"}</strong></div>
             <div><span>待推送提交</span><strong>{status.ahead}</strong></div>
             <div><span>远端领先提交</span><strong>{status.behind}</strong></div>
+            <div><span>仓库</span><strong>{status.repositoryFullName ?? "—"}</strong></div>
+            <div><span>可见性</span><strong>{status.visibility === "public" ? "公开" : status.visibility === "private" ? "私有" : "未读取"}</strong></div>
           </div>
+          {status.configured && <label className="resource-field visibility-field"><span>更改仓库可见性</span><select value={status.visibility ?? ""} disabled={busy !== null || !account?.authenticated} onChange={(event) => void changeVisibility(event.target.value as GitHubRepositoryVisibility)}><option value="" disabled>请选择当前可见性</option><option value="private">私有仓库</option><option value="public">公开仓库</option></select></label>}
           {status.lastCommit && <div className="last-commit"><span>最近提交</span><strong><code>{status.lastCommit.hash}</code>{status.lastCommit.message}</strong><small>{formatTime(status.lastCommit.committedAt)}</small></div>}
           <div className="sync-safety-note"><ShieldCheck size={17} /><div><strong>安全同步策略</strong><p>删除操作会正常进入 Git 历史；远端领先或分叉时停止推送，由你在 VS Code 或 GitHub Desktop 中处理。</p></div></div>
         </section>

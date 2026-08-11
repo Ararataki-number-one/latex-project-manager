@@ -40,6 +40,14 @@ await projectRow(desktop, probability).getByRole("button", { name: `管理项目
 await desktop.getByRole("heading", { name: "项目介绍" }).waitFor();
 await assertNoOverflow(desktop, "desktopIntroduction");
 await desktop.screenshot({ path: "test-results/ui-introduction-desktop.png", fullPage: true });
+await desktop.getByRole("tab", { name: /GitHub 同步/ }).click();
+await desktop.getByRole("heading", { name: "GitHub 同步" }).waitFor();
+await assertNoOverflow(desktop, "desktopGitHubSync");
+await desktop.screenshot({ path: "test-results/ui-github-sync-desktop.png", fullPage: true });
+await desktop.getByRole("navigation", { name: "应用导航" }).getByRole("button", { name: "设置" }).click();
+await desktop.getByRole("heading", { name: "设置" }).waitFor();
+await assertNoOverflow(desktop, "desktopSettings");
+await desktop.screenshot({ path: "test-results/ui-settings-desktop.png", fullPage: true });
 
 const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
 await mobile.goto(previewUrl, { waitUntil: "networkidle" });

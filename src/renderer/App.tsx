@@ -13,15 +13,18 @@ import {
   CopyPlus,
   Download,
   Eraser,
+  ExternalLink,
   FileDown,
   FolderInput,
   FolderKanban,
   FolderOpen,
   HardDrive,
   Heart,
+  GitFork,
   Import,
   Menu,
   MoreHorizontal,
+  LogIn,
   PanelLeftClose,
   Plus,
   RefreshCw,
@@ -34,7 +37,7 @@ import {
   X
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { AppUpdateStatus, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
+import type { AppUpdateStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
 import { createWorkbench } from "./demo";
 import { ProjectView } from "./ProjectView";
 
@@ -95,6 +98,16 @@ function formatBytes(value: number): string {
   return `${(value / 1024 / 1024).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
+function suggestedGitHubRepositoryName(name: string, fallbackId: string): string {
+  const normalized = name
+    .normalize("NFKD")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 80);
+  return normalized || `latex-project-${fallbackId.slice(0, 8).toLocaleLowerCase("en-US")}`;
+}
+
 interface LibraryViewProps {
   api: WorkbenchApi;
   projects: ProjectSummary[];
@@ -128,6 +141,9 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [cleanupProject, setCleanupProject] = useState<ProjectSummary | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<TemporaryCleanupPreview | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [syncOnImport, setSyncOnImport] = useState(false);
+  const [importVisibility, setImportVisibility] = useState<GitHubRepositoryVisibility>("private");
+  const [importingPath, setImportingPath] = useState<string | null>(null);
 
   const visible = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -416,6 +432,36 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
     }
   }
 
+  async function importCandidate(candidate: ScanCandidate) {
+    setImportingPath(candidate.rootPath);
+    try {
+      const imported = await api.library.import(candidate);
+      onProjectsChange([...projects.filter((item) => item.id !== imported.id), imported]);
+      if (syncOnImport) {
+        try {
+          const result = await api.github.createRepository(imported.id, {
+            repositoryName: suggestedGitHubRepositoryName(imported.name, imported.id),
+            visibility: importVisibility,
+            autoSync: true,
+            useLfsForDocuments: true
+          });
+          setImportOpen(false);
+          onNotify(result.state === "synced" ? `已导入 ${candidate.name}，并创建 GitHub ${importVisibility === "public" ? "公开" : "私有"}仓库` : (result.message ?? `已导入 ${candidate.name}`));
+        } catch (error) {
+          setImportOpen(false);
+          onNotify(`项目已导入，但 GitHub 自动建仓失败：${error instanceof Error ? error.message : "未知错误"}`);
+        }
+      } else {
+        setImportOpen(false);
+        onNotify(`已导入 ${candidate.name}`);
+      }
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "导入失败");
+    } finally {
+      setImportingPath(null);
+    }
+  }
+
   async function openTemplates() {
     try {
       const items = await api.templates.list();
@@ -664,22 +710,17 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
               <div><strong>选择资料库或项目目录</strong><p>默认递归 3 层，只识别入口，不修改任何 `.tex` 文件。</p></div>
               <button className="button primary" onClick={() => void scanLibrary()} disabled={scanning}>{scanning ? "正在扫描…" : "选择目录"}</button>
             </div>
+            <div className="import-sync-choice">
+              <label className="sync-toggle"><span><strong>导入后启用 GitHub 自动同步</strong><small>自动创建新仓库，并同步新增、删除和文件内容修改</small></span><input type="checkbox" checked={syncOnImport} onChange={(event) => setSyncOnImport(event.target.checked)} /></label>
+              {syncOnImport && <div className="import-sync-options"><label><span>新仓库可见性</span><select value={importVisibility} onChange={(event) => setImportVisibility(event.target.value as GitHubRepositoryVisibility)}><option value="private">私有（推荐）</option><option value="public">公开</option></select></label><p>仓库名会根据项目名称自动生成。请先在“设置 → GitHub 连接”登录账号。</p></div>}
+            </div>
             <div className="candidate-list">
               {candidates.length === 0 && <p className="empty-inline">扫描结果会显示在这里。浏览器演示模式可返回两组模拟项目。</p>}
               {candidates.map((candidate) => (
                 <div className="candidate" key={candidate.rootPath}>
                   <BookOpenText size={20} />
                   <div><strong>{candidate.name}</strong><p>{candidate.rootPath}</p><span>{candidate.entries.length} 个入口：{candidate.entries.map((entry) => `${entry.relativePath} (${entry.className})`).join("、")}</span></div>
-                  <button className="button secondary" onClick={() => void (async () => {
-                    try {
-                      const imported = await api.library.import(candidate);
-                      onProjectsChange([...projects.filter((item) => item.id !== imported.id), imported]);
-                      setImportOpen(false);
-                      onNotify(`已导入 ${candidate.name}，打开项目后可查看迁移预览。`);
-                    } catch (error) {
-                      onNotify(error instanceof Error ? error.message : "导入失败");
-                    }
-                  })()}>选择</button>
+                  <button className="button secondary" disabled={importingPath !== null} onClick={() => void importCandidate(candidate)}>{importingPath === candidate.rootPath ? "正在导入…" : syncOnImport ? "导入并同步" : "选择"}</button>
                 </div>
               ))}
             </div>
@@ -707,7 +748,8 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
 
 function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: boolean; onNotify: (message: string) => void }) {
   const [status, setStatus] = useState<AppUpdateStatus | null>(null);
-  const [busy, setBusy] = useState<"settings" | "check" | "download" | "install" | null>(null);
+  const [account, setAccount] = useState<GitHubAccountStatus | null>(null);
+  const [busy, setBusy] = useState<"settings" | "check" | "download" | "install" | "github" | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -723,6 +765,46 @@ function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: bo
     const timer = setInterval(() => { void refresh(); }, 8_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [api, onNotify]);
+
+  async function refreshGitHubAccount() {
+    try {
+      setAccount(await api.github.authStatus());
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法读取 GitHub 登录状态");
+    }
+  }
+
+  useEffect(() => {
+    void refreshGitHubAccount();
+    const timer = setInterval(() => { if (!account?.authenticated) void refreshGitHubAccount(); }, 6_000);
+    return () => clearInterval(timer);
+  }, [account?.authenticated]);
+
+  async function beginGitHubLogin() {
+    setBusy("github");
+    try {
+      if (account?.cliAvailable === false) {
+        await api.github.openCliDownload();
+        onNotify("已打开 GitHub CLI 下载页；安装完成后重启客户端");
+      } else {
+        const next = await api.github.beginLogin();
+        setAccount(next);
+        onNotify(next.message);
+      }
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法启动 GitHub 登录");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function openProductPage() {
+    try {
+      await api.github.openProductPage();
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法打开软件项目地址");
+    }
+  }
 
   async function saveSettings(next: { autoCheck: boolean; autoDownload: boolean }) {
     setBusy("settings");
@@ -797,6 +879,16 @@ function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: bo
   return (
     <section className="app-settings-page">
       <header className="settings-page-heading"><span><Settings2 size={22} /></span><div><p className="eyebrow">客户端偏好</p><h1>设置</h1><p>更新设置只保存在这台电脑，不会写入任何 LaTeX 项目。</p></div></header>
+      <section className="settings-card github-login-settings-card">
+        <header><div><h2>GitHub 连接</h2><p>登录一次后，即可在导入项目时自动创建仓库和开启同步。</p></div><GitFork size={20} /></header>
+        <div className={`github-settings-account ${account?.authenticated ? "account-ready" : "account-required"}`}>
+          <span>{account?.authenticated ? <CheckCircle2 size={21} /> : <LogIn size={21} />}</span>
+          <div><strong>{account?.authenticated ? `已登录：${account.login}` : account?.message ?? "正在检查 GitHub CLI…"}</strong><p>{account?.authenticated ? `${account.name ?? account.login} · 凭据由 GitHub CLI 安全管理` : "登录会打开 GitHub 官方网页，本软件不会保存密码或访问令牌。"}</p></div>
+          <button className="button secondary" onClick={() => void refreshGitHubAccount()} disabled={busy !== null}><RefreshCw size={16} />刷新</button>
+          {!account?.authenticated && <button className="button primary" onClick={() => void beginGitHubLogin()} disabled={busy !== null}>{busy === "github" ? <RefreshCw size={16} className="spin" /> : <LogIn size={16} />}{account?.cliAvailable === false ? "安装 GitHub CLI" : "登录 GitHub"}</button>}
+        </div>
+        <div className="product-repository-address"><GitFork size={17} /><div><strong>本软件项目地址</strong><code>github.com/Ararataki-number-one/latex-project-manager</code></div><button className="button ghost" onClick={() => void openProductPage()}><ExternalLink size={15} />打开</button></div>
+      </section>
       <section className="settings-card update-settings-card">
         <header><div><h2>客户端更新</h2><p>通过私有 GitHub Release 获取经过校验的 Windows 安装包。</p></div><Download size={20} /></header>
         <div className={`app-update-summary update-${status.state}`}>
@@ -814,7 +906,7 @@ function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: bo
           {status.state === "downloaded" && <button className="button primary" onClick={() => void installUpdate()} disabled={busy !== null}>{busy === "install" ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}安装并退出客户端</button>}
           <button className="button ghost" onClick={() => void openReleasePage()}>打开 Release 页面</button>
         </div>
-        <div className="private-update-note"><ShieldCheck size={17} /><div><strong>私有仓库更新</strong><p>{status.githubCliAvailable ? "使用本机 GitHub CLI 已登录的账号访问私有 Release；客户端不会读取或保存你的访问令牌。" : "这台电脑未检测到 GitHub CLI，因此只能在浏览器登录 GitHub 后手动下载。"}</p></div></div>
+        <div className="private-update-note"><ShieldCheck size={17} /><div><strong>安全更新</strong><p>{status.githubCliAvailable ? "使用本机 GitHub CLI 获取 GitHub Release；客户端不会读取或保存你的访问令牌。" : "这台电脑未检测到 GitHub CLI，因此只能在浏览器中手动下载。"}</p></div></div>
         {isDemo && <p className="demo-note">浏览器演示模式不会访问 GitHub 或下载程序。</p>}
       </section>
     </section>

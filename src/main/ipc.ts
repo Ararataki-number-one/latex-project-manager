@@ -18,6 +18,8 @@ import type {
   BuildRequest,
   ExportResult,
   FileWriteRequest,
+  GitHubCreateRepositoryOptions,
+  GitHubRepositoryVisibility,
   GitHubSyncSettings,
   GitIdentity,
   MigrationPreview,
@@ -390,6 +392,22 @@ export function registerIpcHandlers(
     const { root } = await requireCatalogProjectRoot(projectId);
     return github.setIdentity(projectId, root, identity);
   });
+  register(IPC.githubAuthStatus, () => github.authStatus(userData));
+  register(IPC.githubBeginLogin, () => github.beginLogin(userData));
+  register(IPC.githubCreateRepository, async (projectId: string, options: GitHubCreateRepositoryOptions) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return github.createRepository(projectId, root, options);
+  });
+  register(IPC.githubSetVisibility, async (projectId: string, visibility: GitHubRepositoryVisibility) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return github.setVisibility(projectId, root, visibility);
+  });
+  register(IPC.githubOpenRemote, async (projectId: string) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    await shell.openExternal(await github.remoteWebUrl(projectId, root));
+  });
+  register(IPC.githubOpenProductPage, () => shell.openExternal("https://github.com/Ararataki-number-one/latex-project-manager"));
+  register(IPC.githubOpenCliDownload, () => shell.openExternal("https://cli.github.com/"));
 
   register(IPC.updatesStatus, () => updates.status());
   register(IPC.updatesSetSettings, async (settings: AppUpdateSettings) => {
