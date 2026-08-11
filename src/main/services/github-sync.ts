@@ -8,6 +8,7 @@ import { watch, type FSWatcher } from "chokidar";
 
 import type {
   GitHubChangedFile,
+  GitIdentity,
   GitHubLargeFile,
   GitHubSyncSettings,
   GitHubSyncState,
@@ -103,6 +104,10 @@ function isInside(root: string, candidate: string): boolean {
 function conciseError(result: GitCommandResult): string {
   const value = (result.stderr || result.stdout || `Git exited with code ${result.code}`).trim();
   return value.length > 800 ? `${value.slice(0, 800)}…` : value;
+}
+
+function emptyGitIdentity(): GitIdentity {
+  return { name: "", email: "", configured: false, source: "none" };
 }
 
 function defaultRunner(
@@ -348,6 +353,28 @@ export class GitHubSyncService {
     return this.status(projectId, root);
   }
 
+  async setIdentity(
+    projectId: string,
+    root: string,
+    identity: Pick<GitIdentity, "name" | "email">
+  ): Promise<GitHubSyncStatus> {
+    const name = identity?.name?.trim();
+    const email = identity?.email?.trim();
+    if (!name || name.length > 100 || /[\r\n\0]/.test(name)) {
+      throw new Error("请输入 1–100 个字符的 Git 提交姓名。");
+    }
+    if (!email || email.length > 254 || /[\r\n\0\s]/.test(email) || !/^[^@]+@[^@]+$/.test(email)) {
+      throw new Error("请输入有效的 Git 提交邮箱；也可以使用 GitHub 的 noreply 邮箱。");
+    }
+    this.roots.set(projectId, resolve(root));
+    await this.requireGit(root);
+    await this.ensureRepository(root);
+    await this.run(root, ["config", "--local", "user.name", name]);
+    await this.run(root, ["config", "--local", "user.email", email]);
+    this.live.set(projectId, { state: "ready", message: "已为当前项目保存 Git 提交身份。" });
+    return this.status(projectId, root);
+  }
+
   async syncNow(projectId: string, root: string, background = false): Promise<GitHubSyncStatus> {
     const existing = this.jobs.get(projectId);
     if (existing) return existing;
@@ -377,6 +404,7 @@ export class GitHubSyncService {
         ahead: 0,
         behind: 0,
         lastSyncAt: config?.lastSyncAt,
+        identity: emptyGitIdentity(),
         message: "未检测到 Git。请安装 Git for Windows 或 GitHub Desktop。"
       };
     }
@@ -398,15 +426,17 @@ export class GitHubSyncService {
         ahead: 0,
         behind: 0,
         lastSyncAt: config?.lastSyncAt,
+        identity: await this.gitIdentity(root),
         message: config ? "项目中的 Git 仓库不可用，请重新连接。" : "尚未连接 GitHub 仓库。"
       };
     }
 
-    const [branchResult, remoteResult, changesResult, lastCommitResult] = await Promise.all([
+    const [branchResult, remoteResult, changesResult, lastCommitResult, identity] = await Promise.all([
       this.run(root, ["symbolic-ref", "--short", "HEAD"], [0, 128]),
       this.run(root, ["remote", "get-url", "origin"], [0, 2, 128]),
       this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-      this.run(root, ["log", "-1", "--format=%h%x00%s%x00%cI"], [0, 128])
+      this.run(root, ["log", "-1", "--format=%h%x00%s%x00%cI"], [0, 128]),
+      this.gitIdentity(root)
     ]);
     const branch = branchResult.code === 0 ? branchResult.stdout.trim() : undefined;
     const detectedRemoteRaw = remoteResult.code === 0 ? remoteResult.stdout.trim() : "";
@@ -459,6 +489,7 @@ export class GitHubSyncService {
       ahead,
       behind,
       lastSyncAt: config?.lastSyncAt,
+      identity,
       lastCommit: commitParts.length >= 3 ? { hash: commitParts[0], message: commitParts[1], committedAt: commitParts[2] } : undefined,
       message
     };
@@ -482,12 +513,9 @@ export class GitHubSyncService {
       await this.run(root, ["add", "-A", "--", "."]);
       const staged = await this.run(root, ["diff", "--cached", "--quiet"], [0, 1]);
       if (staged.code === 1) {
-        const [name, email] = await Promise.all([
-          this.run(root, ["config", "user.name"], [0, 1]),
-          this.run(root, ["config", "user.email"], [0, 1])
-        ]);
-        if (!name.stdout.trim() || !email.stdout.trim()) {
-          throw new Error("Git 尚未设置提交姓名或邮箱，请先在 Git/GitHub Desktop 中完成身份设置。");
+        const identity = await this.gitIdentity(root);
+        if (!identity.configured) {
+          throw new Error("Git 尚未设置提交姓名或邮箱；请在本页的“提交身份”中填写并保存。");
         }
         const timestamp = new Date().toLocaleString("zh-CN", { hour12: false });
         await this.run(root, ["commit", "-m", `自动同步：${timestamp}`], [0]);
@@ -612,6 +640,24 @@ export class GitHubSyncService {
     return {
       ahead: Number.isFinite(ahead) ? ahead : 0,
       behind: Number.isFinite(behind) ? behind : 0
+    };
+  }
+
+  private async gitIdentity(root: string): Promise<GitIdentity> {
+    const [localName, localEmail, effectiveName, effectiveEmail] = await Promise.all([
+      this.run(root, ["config", "--local", "--get", "user.name"], [0, 1, 128]),
+      this.run(root, ["config", "--local", "--get", "user.email"], [0, 1, 128]),
+      this.run(root, ["config", "--get", "user.name"], [0, 1, 128]),
+      this.run(root, ["config", "--get", "user.email"], [0, 1, 128])
+    ]);
+    const name = effectiveName.code === 0 ? effectiveName.stdout.trim() : "";
+    const email = effectiveEmail.code === 0 ? effectiveEmail.stdout.trim() : "";
+    const hasLocalValue = localName.code === 0 || localEmail.code === 0;
+    return {
+      name,
+      email,
+      configured: Boolean(name && email),
+      source: name || email ? (hasLocalValue ? "local" : "global") : "none"
     };
   }
 

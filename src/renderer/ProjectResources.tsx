@@ -13,10 +13,12 @@ import {
   GitFork,
   HardDrive,
   LoaderCircle,
+  Mail,
   Plus,
   RefreshCw,
   ShieldCheck,
   Trash2,
+  UserRound,
   X
 } from "lucide-react";
 
@@ -66,8 +68,10 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
   const [remoteUrl, setRemoteUrl] = useState("");
   const [autoSync, setAutoSync] = useState(true);
   const [useLfs, setUseLfs] = useState(true);
+  const [identityName, setIdentityName] = useState("");
+  const [identityEmail, setIdentityEmail] = useState("");
   const [initialized, setInitialized] = useState(false);
-  const [busy, setBusy] = useState<"configure" | "sync" | "toggle" | null>(null);
+  const [busy, setBusy] = useState<"configure" | "sync" | "toggle" | "identity" | null>(null);
 
   const refresh = useCallback(async (initializeDraft = false) => {
     try {
@@ -77,6 +81,8 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         setRemoteUrl(next.remoteUrl);
         setAutoSync(next.configured ? next.autoSync : true);
         setUseLfs(next.configured ? next.useLfsForDocuments : next.lfsAvailable);
+        setIdentityName(next.identity.name);
+        setIdentityEmail(next.identity.email);
         setInitialized(true);
       }
     } catch (error) {
@@ -95,8 +101,15 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
       onNotify("请粘贴 GitHub 仓库地址");
       return;
     }
+    if (!status?.identity.configured && (!identityName.trim() || !identityEmail.trim())) {
+      onNotify("请先填写下方的 Git 提交姓名和邮箱");
+      return;
+    }
     setBusy("configure");
     try {
+      if (!status?.identity.configured) {
+        await api.github.setIdentity(project.id, { name: identityName.trim(), email: identityEmail.trim() });
+      }
       const configured = await api.github.configure(project.id, {
         remoteUrl: remoteUrl.trim(),
         autoSync,
@@ -110,6 +123,30 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法连接 GitHub 仓库");
       await refresh(false);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveIdentityAndContinue() {
+    if (!identityName.trim() || !identityEmail.trim()) {
+      onNotify("请填写 Git 提交姓名和邮箱");
+      return;
+    }
+    setBusy("identity");
+    try {
+      const next = await api.github.setIdentity(project.id, { name: identityName.trim(), email: identityEmail.trim() });
+      setStatus(next);
+      if (next.configured) {
+        setBusy("sync");
+        const synced = await api.github.syncNow(project.id);
+        setStatus(synced);
+        onNotify(synced.state === "synced" ? "提交身份已保存，项目已同步" : (synced.message ?? "提交身份已保存"));
+      } else {
+        onNotify("已为当前项目保存 Git 提交身份");
+      }
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存 Git 提交身份");
     } finally {
       setBusy(null);
     }
@@ -153,7 +190,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
     <section className="resource-page github-sync-page">
       <header className="resource-heading">
         <div className="resource-heading-copy"><span className="resource-heading-icon"><GitFork size={22} /></span><div><p className="eyebrow">版本备份与多设备同步</p><h2>GitHub 同步</h2><p>项目中的新增、修改和删除会作为 Git 提交上传；不会执行强制推送。</p></div></div>
-        {status.configured && <button className="button primary" onClick={() => void syncNow()} disabled={busy !== null || status.state === "unavailable"}>{busy === "sync" ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}立即同步</button>}
+        {status.configured && <button className="button primary" onClick={() => void syncNow()} disabled={busy !== null || status.state === "unavailable" || !status.identity.configured}>{busy === "sync" ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}立即同步</button>}
       </header>
 
       <div className={`sync-status-card state-${stateClass}`}>
@@ -161,6 +198,16 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         <div><strong>{syncStateLabel[status.state]}</strong><p>{status.message}</p></div>
         <span className="sync-status-time">上次成功：{formatTime(status.lastSyncAt)}</span>
       </div>
+
+      <section className={`resource-card git-identity-card ${status.identity.configured ? "identity-ready" : "identity-required"}`}>
+        <header><div><h3>提交身份</h3><p>只保存到当前项目，用来标记 GitHub 上的提交作者。</p></div><UserRound size={18} /></header>
+        <div className="git-identity-fields">
+          <label className="resource-field"><span>提交姓名</span><div className="input-with-icon"><UserRound size={16} /><input value={identityName} onChange={(event) => setIdentityName(event.target.value)} placeholder="例如：Ararataki-number-one" maxLength={100} /></div></label>
+          <label className="resource-field"><span>提交邮箱</span><div className="input-with-icon"><Mail size={16} /><input type="email" value={identityEmail} onChange={(event) => setIdentityEmail(event.target.value)} placeholder="你的 GitHub 邮箱或 noreply 邮箱" maxLength={254} /></div></label>
+          <button className="button secondary identity-save-button" onClick={() => void saveIdentityAndContinue()} disabled={busy !== null || !identityName.trim() || !identityEmail.trim()}>{busy === "identity" ? <LoaderCircle size={16} className="spin" /> : <CheckCircle2 size={16} />}{status.configured ? "保存并继续同步" : "保存到当前项目"}</button>
+        </div>
+        <p className={`identity-status ${status.identity.configured ? "ready" : "required"}`}>{status.identity.configured ? `已配置（${status.identity.source === "local" ? "当前项目" : "全局 Git 设置"}）` : "尚未配置；完成此项后即可提交并同步。"}</p>
+      </section>
 
       <div className="resource-columns">
         <section className="resource-card github-connect-card">

@@ -175,6 +175,13 @@ export interface GitHubSyncSettings {
   useLfsForDocuments: boolean;
 }
 
+export interface GitIdentity {
+  name: string;
+  email: string;
+  configured: boolean;
+  source: "local" | "global" | "none";
+}
+
 export interface GitHubSyncStatus extends GitHubSyncSettings {
   available: boolean;
   gitVersion?: string;
@@ -188,11 +195,40 @@ export interface GitHubSyncStatus extends GitHubSyncSettings {
   ahead: number;
   behind: number;
   lastSyncAt?: string;
+  identity: GitIdentity;
   lastCommit?: {
     hash: string;
     message: string;
     committedAt: string;
   };
+  message?: string;
+}
+
+export type AppUpdateState =
+  | "idle"
+  | "checking"
+  | "upToDate"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "unavailable"
+  | "error";
+
+export interface AppUpdateSettings {
+  autoCheck: boolean;
+  autoDownload: boolean;
+}
+
+export interface AppUpdateStatus extends AppUpdateSettings {
+  currentVersion: string;
+  latestVersion?: string;
+  state: AppUpdateState;
+  githubCliAvailable: boolean;
+  releaseUrl: string;
+  releaseName?: string;
+  publishedAt?: string;
+  downloadedPath?: string;
+  checkedAt?: string;
   message?: string;
 }
 

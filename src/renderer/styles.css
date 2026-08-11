@@ -7127,3 +7127,348 @@ input[type="checkbox"] {
     font-size: 9px;
   }
 }
+
+/* Git identity and application updates */
+
+.git-identity-card {
+  margin-bottom: 14px;
+}
+
+.git-identity-card.identity-required {
+  border-color: color-mix(in srgb, var(--yellow) 42%, var(--border));
+}
+
+.git-identity-fields {
+  display: grid;
+  padding: 14px 16px 8px;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.git-identity-fields .resource-field {
+  padding: 0;
+}
+
+.git-identity-fields .resource-field input {
+  padding-left: 38px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.input-with-icon {
+  position: relative;
+}
+
+.input-with-icon > svg {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  z-index: 1;
+  color: var(--text-tertiary);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.identity-save-button {
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.identity-status {
+  margin: 0 16px 14px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.identity-status.ready {
+  color: var(--green);
+}
+
+.identity-status.required {
+  color: var(--yellow);
+}
+
+.sidebar-settings-nav {
+  display: grid;
+  margin-bottom: 8px;
+  gap: 2px;
+}
+
+.sidebar-settings-nav button {
+  display: flex;
+  width: 100%;
+  height: 40px;
+  padding: 0 11px;
+  align-items: center;
+  gap: 11px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--sidebar-muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-settings-nav button:hover,
+.sidebar-settings-nav button.active {
+  background: var(--sidebar-active);
+  color: var(--sidebar-text);
+}
+
+.sidebar-settings-nav button.active {
+  font-weight: 600;
+}
+
+.app-settings-page {
+  height: calc(100vh - 52px);
+  padding: 32px clamp(20px, 4vw, 56px) 64px;
+  overflow: auto;
+}
+
+.settings-page-heading,
+.settings-card {
+  width: min(100%, 920px);
+  margin-inline: auto;
+}
+
+.settings-page-heading {
+  display: flex;
+  margin-bottom: 20px;
+  align-items: center;
+  gap: 14px;
+}
+
+.settings-page-heading > span {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.settings-page-heading h1 {
+  font-size: 24px;
+}
+
+.settings-page-heading p:last-child {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.settings-card {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.settings-card > header {
+  display: flex;
+  min-height: 72px;
+  padding: 16px 20px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.settings-card > header h2 {
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 17px;
+}
+
+.settings-card > header p {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.app-update-summary {
+  display: grid;
+  margin: 18px 20px 14px;
+  padding: 16px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface-subtle);
+}
+
+.app-update-summary.update-downloaded,
+.app-update-summary.update-upToDate {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--border));
+  background: var(--green-soft);
+}
+
+.app-update-summary.update-available {
+  border-color: color-mix(in srgb, var(--cyan) 28%, var(--border));
+  background: var(--cyan-soft);
+}
+
+.app-update-summary.update-error,
+.app-update-summary.update-unavailable {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+  background: var(--danger-soft);
+}
+
+.update-summary-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--cyan);
+}
+
+.app-update-summary > div:nth-child(2) {
+  min-width: 0;
+}
+
+.app-update-summary > div:nth-child(2) strong {
+  font-size: 14px;
+}
+
+.app-update-summary > div:nth-child(2) p {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-version {
+  display: grid;
+  justify-items: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.update-version span,
+.update-version small {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.update-version strong {
+  font-size: 17px;
+}
+
+.settings-toggle-list {
+  margin: 0 20px 14px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  overflow: hidden;
+}
+
+.settings-toggle-list .sync-toggle {
+  min-height: 68px;
+  padding-inline: 15px;
+}
+
+.settings-toggle-list .sync-toggle strong {
+  font-size: 13px;
+}
+
+.settings-toggle-list .sync-toggle small {
+  font-size: 11px;
+}
+
+.update-actions {
+  display: flex;
+  padding: 0 20px 16px;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.private-update-note {
+  display: flex;
+  margin: 0 20px 20px;
+  padding: 12px 14px;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: 12px;
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.private-update-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.private-update-note strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.private-update-note p {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+@media (max-width: 840px) {
+  .git-identity-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .identity-save-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 620px) {
+  .git-identity-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .identity-save-button {
+    width: 100%;
+    grid-column: auto;
+  }
+
+  .app-settings-page {
+    height: calc(100vh - 48px);
+    padding: 20px 14px 48px;
+  }
+
+  .settings-page-heading {
+    align-items: flex-start;
+  }
+
+  .app-update-summary {
+    margin-inline: 14px;
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .update-version {
+    grid-column: 2;
+    justify-items: start;
+  }
+
+  .settings-toggle-list,
+  .private-update-note {
+    margin-inline: 14px;
+  }
+
+  .update-actions {
+    padding-inline: 14px;
+  }
+
+  .update-actions .button {
+    min-height: 42px;
+  }
+}

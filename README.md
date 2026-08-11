@@ -50,8 +50,17 @@
 - 每个项目单独连接远端仓库，自动同步默认开启。
 - 项目停止变化约 10 秒后，将新增、修改和删除合并成一次提交并推送。
 - 认证交给本机 Git Credential Manager、GitHub Desktop 或 SSH；客户端不保存 GitHub 密码和访问令牌。
+- 若 Git 尚未配置作者信息，可直接在同步页填写“提交姓名/提交邮箱”；信息只写入当前项目的本地 Git 配置。
 - 不会强制推送。远端领先、历史分叉、认证失败或网络失败时进入“同步失败”，等待用户处理。
 - `references` 中的原始文稿也会同步；大文件请按需使用 Git LFS。
+
+### 客户端自动更新
+
+- “设置”页可以分别控制启动时自动检查、发现版本后自动下载。
+- 源码仓库为私有仓库，更新检查复用本机 GitHub CLI 已登录的账号，不保存访问令牌。
+- 安装包下载后校验 GitHub Release 提供的文件大小与 SHA-256，再由用户确认安装。
+- Windows 安装版按当前用户安装，不要求管理员权限；这是推荐版本。
+- 便携版继续提供，但 Electron 官方不支持便携版安全地自行覆盖，因此便携版只能打开已下载的安装包完成迁移。
 
 ## Android 只读客户端
 
@@ -92,7 +101,7 @@ pnpm install
 pnpm dev
 ```
 
-质量检查和 Windows 便携版：
+质量检查和 Windows 安装版/便携版：
 
 ```powershell
 pnpm typecheck
@@ -100,6 +109,7 @@ pnpm test
 pnpm test:e2e
 pnpm build
 pnpm package:portable
+pnpm package:windows
 ```
 
-便携版包含 Electron 运行时，不捆绑 TeX Live，也不会把项目文件复制到应用目录。
+Windows 安装版和便携版都包含 Electron 运行时，不捆绑 TeX Live，也不会把项目文件复制到应用目录。带 `Setup` 的文件是支持后续自动更新的推荐安装包。

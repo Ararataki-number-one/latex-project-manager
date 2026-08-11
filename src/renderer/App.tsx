@@ -34,7 +34,7 @@ import {
   X
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
+import type { AppUpdateStatus, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
 import { createWorkbench } from "./demo";
 import { ProjectView } from "./ProjectView";
 
@@ -705,6 +705,122 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   );
 }
 
+function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: boolean; onNotify: (message: string) => void }) {
+  const [status, setStatus] = useState<AppUpdateStatus | null>(null);
+  const [busy, setBusy] = useState<"settings" | "check" | "download" | "install" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const next = await api.updates.status();
+        if (!cancelled) setStatus(next);
+      } catch (error) {
+        if (!cancelled) onNotify(error instanceof Error ? error.message : "无法读取更新状态");
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 8_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [api, onNotify]);
+
+  async function saveSettings(next: { autoCheck: boolean; autoDownload: boolean }) {
+    setBusy("settings");
+    try {
+      const value = await api.updates.setSettings(next);
+      setStatus(value);
+      onNotify(next.autoCheck ? "已开启客户端自动检查更新" : "已关闭客户端自动检查更新");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存更新设置");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function checkNow() {
+    setBusy("check");
+    try {
+      const next = await api.updates.check();
+      setStatus(next);
+      onNotify(next.message ?? "更新检查完成");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "检查更新失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function downloadUpdate() {
+    setBusy("download");
+    try {
+      const next = await api.updates.download();
+      setStatus(next);
+      onNotify(next.message ?? "更新下载完成");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "下载更新失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function installUpdate() {
+    setBusy("install");
+    try {
+      await api.updates.install();
+      onNotify("已打开更新安装包，客户端即将退出");
+    } catch (error) {
+      setBusy(null);
+      onNotify(error instanceof Error ? error.message : "无法安装更新");
+    }
+  }
+
+  async function openReleasePage() {
+    try {
+      await api.updates.openRelease();
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法打开 Release 页面");
+    }
+  }
+
+  if (!status) return <div className="resource-loading"><RefreshCw size={19} className="spin" />正在读取客户端设置…</div>;
+  const checking = busy === "check" || status.state === "checking";
+  const downloading = busy === "download" || status.state === "downloading";
+  const stateLabel = status.state === "upToDate" ? "已是最新版本"
+    : status.state === "available" ? "发现新版本"
+      : status.state === "downloading" ? "正在下载"
+        : status.state === "downloaded" ? "更新已下载"
+          : status.state === "unavailable" ? "自动更新不可用"
+            : status.state === "error" ? "更新检查失败"
+              : status.state === "checking" ? "正在检查"
+                : "等待检查";
+
+  return (
+    <section className="app-settings-page">
+      <header className="settings-page-heading"><span><Settings2 size={22} /></span><div><p className="eyebrow">客户端偏好</p><h1>设置</h1><p>更新设置只保存在这台电脑，不会写入任何 LaTeX 项目。</p></div></header>
+      <section className="settings-card update-settings-card">
+        <header><div><h2>客户端更新</h2><p>通过私有 GitHub Release 获取经过校验的 Windows 安装包。</p></div><Download size={20} /></header>
+        <div className={`app-update-summary update-${status.state}`}>
+          <span className="update-summary-icon">{checking || downloading ? <RefreshCw size={20} className="spin" /> : status.state === "downloaded" || status.state === "upToDate" ? <CheckCircle2 size={20} /> : <Download size={20} />}</span>
+          <div><strong>{stateLabel}</strong><p>{status.message}</p></div>
+          <div className="update-version"><span>当前版本</span><strong>{status.currentVersion}</strong>{status.latestVersion && status.latestVersion !== status.currentVersion && <small>最新 {status.latestVersion}</small>}</div>
+        </div>
+        <div className="settings-toggle-list">
+          <label className="sync-toggle"><span><strong>自动检查更新</strong><small>启动客户端后自动检查最新正式版本</small></span><input type="checkbox" checked={status.autoCheck} disabled={busy !== null} onChange={(event) => void saveSettings({ autoCheck: event.target.checked, autoDownload: status.autoDownload })} /></label>
+          <label className="sync-toggle"><span><strong>发现新版本后自动下载</strong><small>下载完成后由你确认安装，不会在工作中突然重启</small></span><input type="checkbox" checked={status.autoDownload} disabled={busy !== null || !status.autoCheck} onChange={(event) => void saveSettings({ autoCheck: status.autoCheck, autoDownload: event.target.checked })} /></label>
+        </div>
+        <div className="update-actions">
+          <button className="button secondary" onClick={() => void checkNow()} disabled={busy !== null || !status.githubCliAvailable}>{checking ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}立即检查</button>
+          {status.state === "available" && <button className="button primary" onClick={() => void downloadUpdate()} disabled={busy !== null}>{downloading ? <RefreshCw size={16} className="spin" /> : <Download size={16} />}下载 {status.latestVersion}</button>}
+          {status.state === "downloaded" && <button className="button primary" onClick={() => void installUpdate()} disabled={busy !== null}>{busy === "install" ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}安装并退出客户端</button>}
+          <button className="button ghost" onClick={() => void openReleasePage()}>打开 Release 页面</button>
+        </div>
+        <div className="private-update-note"><ShieldCheck size={17} /><div><strong>私有仓库更新</strong><p>{status.githubCliAvailable ? "使用本机 GitHub CLI 已登录的账号访问私有 Release；客户端不会读取或保存你的访问令牌。" : "这台电脑未检测到 GitHub CLI，因此只能在浏览器登录 GitHub 后手动下载。"}</p></div></div>
+        {isDemo && <p className="demo-note">浏览器演示模式不会访问 GitHub 或下载程序。</p>}
+      </section>
+    </section>
+  );
+}
+
 export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selected, setSelected] = useState<ProjectSummary | null>(null);
@@ -713,6 +829,7 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(() => window.innerWidth > 780);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   async function refreshProjects() {
     const items = await runtime.api.library.list();
@@ -744,6 +861,7 @@ export default function App() {
     setFilter(nextFilter);
     setActiveTag(null);
     setSelected(null);
+    setSettingsOpen(false);
     void refreshProjects().catch((error) => {
       setToast(error instanceof Error ? error.message : "无法刷新项目库");
     });
@@ -766,7 +884,7 @@ export default function App() {
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={!selected && filter === item.id ? "active" : ""} aria-current={!selected && filter === item.id ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}>
+              <button key={item.id} className={!selected && !settingsOpen && filter === item.id ? "active" : ""} aria-current={!selected && !settingsOpen && filter === item.id ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}>
                 <Icon size={18} /><span>{item.label}</span>{item.count !== undefined && <small>{item.count}</small>}
               </button>
             );
@@ -775,14 +893,14 @@ export default function App() {
         <section className="sidebar-tags">
           <header><Tags size={15} /><strong>项目标签</strong></header>
           <nav aria-label="标签筛选">
-            <button className={!selected && filter === "all" && activeTag === null ? "active" : ""} aria-label="显示全部标签" aria-pressed={!selected && filter === "all" && activeTag === null} onClick={() => goLibrary("all")}>
+            <button className={!selected && !settingsOpen && filter === "all" && activeTag === null ? "active" : ""} aria-label="显示全部标签" aria-pressed={!selected && !settingsOpen && filter === "all" && activeTag === null} onClick={() => goLibrary("all")}>
               <span className="tag-color all-tags" /><span>全部标签</span><small>{projects.filter((project) => !project.archived && !project.trashed).length}</small>
             </button>
             {tags.map((tag, index) => (
               <button
-                className={!selected && activeTag === tag ? "active" : ""}
+                className={!selected && !settingsOpen && activeTag === tag ? "active" : ""}
                 aria-label={`筛选标签：${tag}`}
-                aria-pressed={!selected && activeTag === tag}
+                aria-pressed={!selected && !settingsOpen && activeTag === tag}
                 key={tag}
                 onClick={() => { setActiveTag(tag); setFilter("all"); setSelected(null); }}
               >
@@ -792,6 +910,7 @@ export default function App() {
           </nav>
         </section>
         <div className="sidebar-spacer" />
+        <nav className="sidebar-settings-nav" aria-label="应用导航"><button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(true); }}><Settings2 size={18} /><span>设置</span></button></nav>
         <div className="toolchain-card">
           <span className="toolchain-indicator ready" />
           <div><strong>本地项目索引</strong><span>GitHub 为可选同步</span></div>
@@ -804,7 +923,7 @@ export default function App() {
       <main className="app-main">
         <div className="window-strip">
           {!navOpen && <IconButton label="打开侧栏" onClick={() => setNavOpen(true)}><Menu size={19} /></IconButton>}
-          {!selected && <span className="window-title">LaTeX 项目管理器</span>}
+          {!selected && <span className="window-title">{settingsOpen ? "设置" : "LaTeX 项目管理器"}</span>}
           {selected && <button className="breadcrumb-home" onClick={() => goLibrary()}><BookOpenText size={15} />项目库</button>}
           {selected && <><span className="breadcrumb-separator">/</span><span className="breadcrumb-current">{selected.name}</span></>}
           <span className="window-drag-space" />
@@ -812,8 +931,10 @@ export default function App() {
         </div>
         {selected ? (
           <ProjectView api={runtime.api} project={selected} isDemo={runtime.isDemo} onBack={() => goLibrary()} onNotify={setToast} />
+        ) : settingsOpen ? (
+          <SettingsView api={runtime.api} isDemo={runtime.isDemo} onNotify={setToast} />
         ) : (
-          <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={setSelected} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} />
+          <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={(project) => { setSettingsOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} />
         )}
       </main>
       {toast && <div className="toast" role="status">{toast}<IconButton label="关闭通知" onClick={() => setToast(null)}><X size={15} /></IconButton></div>}

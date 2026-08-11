@@ -13,11 +13,13 @@ import {
 } from "electron";
 import { IPC } from "../shared/ipc";
 import type {
+  AppUpdateSettings,
   BuildEvent,
   BuildRequest,
   ExportResult,
   FileWriteRequest,
   GitHubSyncSettings,
+  GitIdentity,
   MigrationPreview,
   ProjectManifest,
   ProjectPdfInfo,
@@ -31,6 +33,7 @@ import { TemporaryCleanupService } from "./services/cleanup";
 import { ProjectAccessController, ProjectAccessError } from "./services/access-control";
 import { ProjectFileService } from "./services/files";
 import { GitHubSyncService } from "./services/github-sync";
+import { AppUpdateService } from "./services/app-updates";
 import {
   getManifestPath,
   readProjectManifest,
@@ -161,6 +164,7 @@ export function registerIpcHandlers(
   const syncTex = new SyncTexService();
   const files = new ProjectFileService();
   const github = new GitHubSyncService(join(userData, "github-sync"));
+  const updates = new AppUpdateService(join(userData, "updates"), { currentVersion: app.getVersion() });
   const references = new ReferenceService({
     openPath: (path) => shell.openPath(path),
     trashItem: (path) => shell.trashItem(path)
@@ -173,6 +177,8 @@ export function registerIpcHandlers(
   for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable)) {
     void github.attachProject(project.id, project.rootPath);
   }
+  const updateTimer = setTimeout(() => { void updates.checkAutomatically(); }, 2_500);
+  updateTimer.unref();
   const showSaveDialog = async (options: SaveDialogOptions): Promise<string | null> => {
     const owner = getWindow();
     const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
@@ -378,6 +384,34 @@ export function registerIpcHandlers(
   register(IPC.githubSetAutoSync, async (projectId: string, enabled: boolean) => {
     const { root } = await requireCatalogProjectRoot(projectId);
     return github.setAutoSync(projectId, root, enabled);
+  });
+  register(IPC.githubSetIdentity, async (projectId: string, identity: Pick<GitIdentity, "name" | "email">) => {
+    if (!identity || typeof identity !== "object" || Array.isArray(identity)) throw new Error("Git 提交身份无效。");
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return github.setIdentity(projectId, root, identity);
+  });
+
+  register(IPC.updatesStatus, () => updates.status());
+  register(IPC.updatesSetSettings, async (settings: AppUpdateSettings) => {
+    const status = await updates.setSettings(settings);
+    if (settings.autoCheck) return updates.check(settings.autoDownload);
+    return status;
+  });
+  register(IPC.updatesCheck, () => updates.check(false));
+  register(IPC.updatesDownload, () => updates.download());
+  register(IPC.updatesInstall, async () => {
+    const installer = await updates.downloadedInstaller();
+    const error = await shell.openPath(installer);
+    if (error) throw new Error(error);
+    const timer = setTimeout(() => app.quit(), 1_000);
+    timer.unref();
+  });
+  register(IPC.updatesOpenRelease, async () => {
+    const url = new URL((await updates.status()).releaseUrl);
+    if (url.protocol !== "https:" || url.hostname.toLocaleLowerCase("en-US") !== "github.com") {
+      throw new Error("更新页面地址无效。");
+    }
+    await shell.openExternal(url.href);
   });
 
   register(IPC.referencesList, async (projectId: string) => {

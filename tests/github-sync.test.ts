@@ -40,6 +40,8 @@ describe("GitHub synchronization", () => {
     let remote = false;
     let staged = false;
     let committed = false;
+    let identityName = "";
+    let identityEmail = "";
     const commands: string[][] = [];
     const result = (code = 0, stdout = "", stderr = ""): GitCommandResult => ({ code, stdout, stderr });
     const runner: GitCommandRunner = async (_executable, cwd, args) => {
@@ -63,8 +65,12 @@ describe("GitHub synchronization", () => {
       if (command[0] === "show-ref") return result(1);
       if (command[0] === "add") { staged = true; return result(); }
       if (command[0] === "diff" && command.includes("--cached")) return result(staged ? 1 : 0);
-      if (command[0] === "config" && command[1] === "user.name") return result(0, "Reader\n");
-      if (command[0] === "config" && command[1] === "user.email") return result(0, "reader@example.test\n");
+      if (command[0] === "config" && command[1] === "--local" && command[2] === "user.name") { identityName = command[3]; return result(); }
+      if (command[0] === "config" && command[1] === "--local" && command[2] === "user.email") { identityEmail = command[3]; return result(); }
+      if (command[0] === "config" && command[1] === "--local" && command[2] === "--get" && command[3] === "user.name") return identityName ? result(0, `${identityName}\n`) : result(1);
+      if (command[0] === "config" && command[1] === "--local" && command[2] === "--get" && command[3] === "user.email") return identityEmail ? result(0, `${identityEmail}\n`) : result(1);
+      if (command[0] === "config" && command[1] === "--get" && command[2] === "user.name") return identityName ? result(0, `${identityName}\n`) : result(1);
+      if (command[0] === "config" && command[1] === "--get" && command[2] === "user.email") return identityEmail ? result(0, `${identityEmail}\n`) : result(1);
       if (command[0] === "commit") { committed = true; staged = false; return result(); }
       if (command[0] === "ls-remote") return result(2);
       if (command[0] === "push") return result();
@@ -82,8 +88,10 @@ describe("GitHub synchronization", () => {
       autoSync: false,
       useLfsForDocuments: true
     });
+    const identified = await service.setIdentity("project-1", root, { name: "Reader", email: "reader@example.test" });
     const synced = await service.syncNow("project-1", root);
 
+    expect(identified.identity).toEqual({ name: "Reader", email: "reader@example.test", configured: true, source: "local" });
     expect(synced.state).toBe("synced");
     expect(commands).toContainEqual(["add", "-A", "--", "."]);
     expect(commands.some((command) => command[0] === "commit")).toBe(true);

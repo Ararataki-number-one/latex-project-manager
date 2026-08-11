@@ -119,7 +119,17 @@ test("Overleaf 风格项目库支持搜索、标签、复制、归档、回收�
   await projectTabs.getByRole("tab", { name: /GitHub 同步/ }).click();
   await expect(page.getByRole("heading", { name: "GitHub 同步" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "GitHub 仓库地址" })).toHaveValue("https://github.com/zqy/probability-notes.git");
+  await expect(page.getByRole("textbox", { name: "提交姓名" })).toHaveValue("Ararataki-number-one");
+  await expect(page.getByRole("textbox", { name: "提交邮箱" })).toHaveValue("Ararataki-number-one@users.noreply.github.com");
+  await expect(page.getByRole("button", { name: "保存并继续同步" })).toBeVisible();
   await expect(page.getByText(/新增、修改和删除/).first()).toBeVisible();
+
+  await page.getByRole("navigation", { name: "应用导航" }).getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /自动检查更新/ })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /发现新版本后自动下载/ })).toBeChecked();
+  await expect(page.getByRole("button", { name: "立即检查" })).toBeVisible();
+  await expect(page.getByText("0.3.0", { exact: true }).first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

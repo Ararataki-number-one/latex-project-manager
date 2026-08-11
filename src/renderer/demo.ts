@@ -1,5 +1,6 @@
 import type { WorkbenchApi } from "@/shared/ipc";
 import type {
+  AppUpdateStatus,
   GitHubSyncStatus,
   MigrationPreview,
   ProjectManifest,
@@ -375,6 +376,7 @@ export function createWorkbench(): DemoWorkbench {
     ahead: 0,
     behind: 0,
     lastSyncAt: "2026-08-03T12:36:00.000Z",
+    identity: { name: "Ararataki-number-one", email: "Ararataki-number-one@users.noreply.github.com", configured: true, source: "local" },
     lastCommit: { hash: "4ec2f9a", message: "自动同步：2026/8/3 20:36:00", committedAt: "2026-08-03T12:36:00.000Z" },
     message: "2 个文件等待自动同步。"
   };
@@ -382,6 +384,17 @@ export function createWorkbench(): DemoWorkbench {
     { name: "Alon-Spencer-The-Probabilistic-Method.pdf", relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf", size: 18_724_811, modifiedAt: "2026-08-02T08:20:00.000Z", kind: "pdf", lfsRecommended: false },
     { name: "随机图中文讲义.pdf", relativePath: "references/随机图中文讲义.pdf", size: 62_104_322, modifiedAt: "2026-07-28T13:15:00.000Z", kind: "pdf", lfsRecommended: true }
   ];
+  let updateStatus: AppUpdateStatus = {
+    currentVersion: "0.3.0",
+    latestVersion: "0.3.0",
+    autoCheck: true,
+    autoDownload: true,
+    state: "upToDate",
+    githubCliAvailable: true,
+    releaseUrl: "https://github.com/Ararataki-number-one/latex-project-manager/releases",
+    checkedAt: new Date().toISOString(),
+    message: "当前已是最新版本 0.3.0。"
+  };
 
   const api: WorkbenchApi = {
     library: {
@@ -518,7 +531,28 @@ export function createWorkbench(): DemoWorkbench {
       setAutoSync: async (_projectId, enabled) => {
         githubStatus = { ...githubStatus, autoSync: enabled, state: "ready", message: enabled ? "演示模式：已开启自动同步。" : "演示模式：已暂停自动同步。" };
         return structuredClone(githubStatus);
+      },
+      setIdentity: async (_projectId, identity) => {
+        githubStatus = { ...githubStatus, identity: { ...identity, configured: true, source: "local" }, state: "changes", message: "演示模式：已保存提交身份。" };
+        return structuredClone(githubStatus);
       }
+    },
+    updates: {
+      status: async () => structuredClone(updateStatus),
+      setSettings: async (settings) => {
+        updateStatus = { ...updateStatus, ...settings };
+        return structuredClone(updateStatus);
+      },
+      check: async () => {
+        updateStatus = { ...updateStatus, state: "upToDate", checkedAt: new Date().toISOString(), message: `当前已是最新版本 ${updateStatus.currentVersion}。` };
+        return structuredClone(updateStatus);
+      },
+      download: async () => {
+        updateStatus = { ...updateStatus, state: "downloaded", downloadedPath: "D:\\Downloads\\LaTeX-Project-Manager-Setup.exe", message: "演示模式：更新已下载。" };
+        return structuredClone(updateStatus);
+      },
+      install: async () => undefined,
+      openRelease: async () => undefined
     },
     references: {
       list: async () => structuredClone(referenceDocuments),

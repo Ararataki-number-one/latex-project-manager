@@ -1,5 +1,8 @@
 import type {
+  AppUpdateSettings,
+  AppUpdateStatus,
   ExportResult,
+  GitIdentity,
   GitHubSyncSettings,
   GitHubSyncStatus,
   MigrationPreview,
@@ -37,6 +40,13 @@ export const IPC = {
   githubConfigure: "github:configure",
   githubSyncNow: "github:sync-now",
   githubSetAutoSync: "github:set-auto-sync",
+  githubSetIdentity: "github:set-identity",
+  updatesStatus: "updates:status",
+  updatesSetSettings: "updates:set-settings",
+  updatesCheck: "updates:check",
+  updatesDownload: "updates:download",
+  updatesInstall: "updates:install",
+  updatesOpenRelease: "updates:open-release",
   referencesList: "references:list",
   referencesImport: "references:import",
   referencesOpen: "references:open",
@@ -95,6 +105,15 @@ export interface WorkbenchApi {
     configure(projectId: string, settings: GitHubSyncSettings): Promise<GitHubSyncStatus>;
     syncNow(projectId: string): Promise<GitHubSyncStatus>;
     setAutoSync(projectId: string, enabled: boolean): Promise<GitHubSyncStatus>;
+    setIdentity(projectId: string, identity: Pick<GitIdentity, "name" | "email">): Promise<GitHubSyncStatus>;
+  };
+  updates: {
+    status(): Promise<AppUpdateStatus>;
+    setSettings(settings: AppUpdateSettings): Promise<AppUpdateStatus>;
+    check(): Promise<AppUpdateStatus>;
+    download(): Promise<AppUpdateStatus>;
+    install(): Promise<void>;
+    openRelease(): Promise<void>;
   };
   references: {
     list(projectId: string): Promise<ReferenceDocumentInfo[]>;
