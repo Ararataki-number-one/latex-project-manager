@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -62,7 +62,7 @@ describe("build profile runtime", () => {
   });
 
   it("generates isolated files and preserves the original include command", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-profile-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-profile-")));
     temporaryDirectories.push(root);
     const { target, profile } = fixture();
     const source = [
@@ -100,7 +100,7 @@ describe("build profile runtime", () => {
   });
 
   it("adds nested entry, project, and build roots to the VS Code latexmk environment", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-profile-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-profile-")));
     temporaryDirectories.push(root);
     const entryDirectory = join(root, "docs");
     const buildDirectory = join(root, ".latex-workbench", "build", "book", "draft");

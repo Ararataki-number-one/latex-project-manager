@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { inflateRawSync } from "node:zlib";
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 async function temporaryDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), "latex-workbench-project-operations-"));
+  const path = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-project-operations-")));
   temporaryDirectories.push(path);
   return path;
 }

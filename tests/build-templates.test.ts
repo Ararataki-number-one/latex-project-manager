@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ afterEach(async () => {
 
 describe("local template pins", () => {
   it("pins copied assets and omits generated build files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-templates-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-templates-")));
     temporaryDirectories.push(root);
     const source = join(root, "source");
     const store = join(root, "store");
@@ -34,7 +34,7 @@ describe("local template pins", () => {
   });
 
   it("instantiates a verified template atomically with a fresh manifest identity", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-templates-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-templates-")));
     temporaryDirectories.push(root);
     const source = join(root, "source");
     const store = join(root, "store");
@@ -77,7 +77,7 @@ describe("local template pins", () => {
   });
 
   it("rejects unpinned files added to a stored template", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-templates-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-templates-")));
     temporaryDirectories.push(root);
     const source = join(root, "source");
     const store = join(root, "store");
@@ -94,7 +94,7 @@ describe("local template pins", () => {
   });
 
   it("ignores malformed template metadata", async () => {
-    const root = await mkdtemp(join(tmpdir(), "latex-workbench-templates-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-templates-")));
     temporaryDirectories.push(root);
     const source = join(root, "source");
     const store = join(root, "store");

@@ -131,7 +131,9 @@ export async function verifyTemplateAssets(template: TemplateInfo): Promise<Arra
     return template.assetPins.map((pin) => ({ path: pin.path, expected: pin.hash }));
   }
   for (const pin of template.assetPins) {
-    const absolutePath = resolve(template.rootPath, pin.path);
+    // Resolve pinned files from the canonical root so Windows 8.3 aliases
+    // (for example RUNNER~1 vs runneradmin) cannot look like path traversal.
+    const absolutePath = resolve(templateRoot, pin.path);
     const relation = relative(templateRoot, absolutePath);
     if (relation.startsWith(`..${sep}`) || relation === "..") {
       mismatches.push({ path: pin.path, expected: pin.hash });
