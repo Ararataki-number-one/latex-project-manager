@@ -313,7 +313,8 @@ export class GitHubSyncService {
     const hasLfs = await this.probeLfs(root);
     if (settings.useLfsForDocuments) {
       if (!hasLfs) throw new Error("未检测到 Git LFS；请安装 Git for Windows/Git LFS，或关闭“大型文稿使用 Git LFS”。");
-      await this.run(root, ["lfs", "install", "--local"]);
+      await mkdir(this.managedHooksDirectory(root), { recursive: true });
+      await this.run(root, ["lfs", "install", "--local", "--force"]);
       await this.run(root, ["lfs", "track", "*.pdf", "*.epub", "*.djvu"]);
     }
     const previous = await this.readConfig(projectId);
@@ -526,7 +527,7 @@ export class GitHubSyncService {
     for (const candidate of candidates) {
       if (isAbsolute(candidate) && !existsSync(candidate)) continue;
       try {
-        const result = await this.runner(candidate, cwd, this.safeArgs(["--version"]), { background: true });
+        const result = await this.runner(candidate, cwd, this.safeArgs(cwd, ["--version"]), { background: true });
         if (result.code === 0 && /^git version /i.test(result.stdout.trim())) {
           this.executable = candidate;
           this.gitVersion = result.stdout.trim().replace(/^git version\s+/i, "");
@@ -546,14 +547,23 @@ export class GitHubSyncService {
     return executable;
   }
 
-  private safeArgs(args: string[]): string[] {
-    const nullHooks = this.platform === "win32" ? "NUL" : "/dev/null";
-    return ["-c", `core.hooksPath=${nullHooks}`, ...args];
+  private managedHooksDirectory(root: string): string {
+    const key = createHash("sha256").update(foldedPath(root, this.platform)).digest("hex");
+    return join(this.configDirectory, "git-hooks", key);
+  }
+
+  private safeArgs(root: string, args: string[]): string[] {
+    // A real isolated directory keeps project-provided hooks disabled while still
+    // allowing Git LFS to install and run its required pre-push hook. Windows'
+    // NUL device cannot be used here because Git LFS treats core.hooksPath as a
+    // directory and attempts to create it.
+    const hooksDirectory = portablePath(this.managedHooksDirectory(root));
+    return ["-c", `core.hooksPath=${hooksDirectory}`, ...args];
   }
 
   private async run(cwd: string, args: string[], allowedCodes = [0], background = true): Promise<GitCommandResult> {
     const executable = await this.requireGit(cwd);
-    const result = await this.runner(executable, cwd, this.safeArgs(args), { background });
+    const result = await this.runner(executable, cwd, this.safeArgs(cwd, args), { background });
     if (!allowedCodes.includes(result.code)) throw new Error(conciseError(result));
     return result;
   }

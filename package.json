@@ -1,6 +1,6 @@
 {
   "name": "latex-workbench",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Windows-first local LaTeX project manager",
   "main": "out/main/index.js",

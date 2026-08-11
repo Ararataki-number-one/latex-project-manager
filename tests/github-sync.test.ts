@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,7 +44,9 @@ describe("GitHub synchronization", () => {
     const result = (code = 0, stdout = "", stderr = ""): GitCommandResult => ({ code, stdout, stderr });
     const runner: GitCommandRunner = async (_executable, cwd, args) => {
       expect(cwd).toBe(root);
-      expect(args.slice(0, 2)).toEqual(["-c", "core.hooksPath=NUL"]);
+      expect(args[0]).toBe("-c");
+      expect(args[1]).toMatch(/^core\.hooksPath=.*\/git-hooks\/[a-f0-9]{64}$/);
+      expect(args[1]).not.toContain("NUL");
       const command = args.slice(2);
       commands.push(command);
       if (command[0] === "--version") return result(0, "git version 2.50.0.windows.1\n");
@@ -54,6 +56,8 @@ describe("GitHub synchronization", () => {
       if (command[0] === "remote" && command[1] === "get-url") return remote ? result(0, "https://github.com/example/notes.git\n") : result(2);
       if (command[0] === "remote" && (command[1] === "add" || command[1] === "set-url")) { remote = true; return result(); }
       if (command[0] === "lfs" && command[1] === "version") return result(0, "git-lfs/3.7.0\n");
+      if (command[0] === "lfs" && command[1] === "install") return result();
+      if (command[0] === "lfs" && command[1] === "track") return result();
       if (command[0] === "status") return committed ? result() : result(0, "D  removed.tex\0?? main.tex\0");
       if (command[0] === "log") return committed ? result(0, `abc123\0自动同步\0${"2026-08-10T12:00:00+08:00"}\n`) : result(128);
       if (command[0] === "show-ref") return result(1);
@@ -76,7 +80,7 @@ describe("GitHub synchronization", () => {
     await service.configure("project-1", root, {
       remoteUrl: "https://github.com/example/notes",
       autoSync: false,
-      useLfsForDocuments: false
+      useLfsForDocuments: true
     });
     const synced = await service.syncNow("project-1", root);
 
@@ -84,7 +88,10 @@ describe("GitHub synchronization", () => {
     expect(commands).toContainEqual(["add", "-A", "--", "."]);
     expect(commands.some((command) => command[0] === "commit")).toBe(true);
     expect(commands).toContainEqual(["push", "-u", "origin", "main"]);
-    expect(commands.flat()).not.toContain("--force");
+    expect(commands).toContainEqual(["lfs", "install", "--local", "--force"]);
+    expect(commands).toContainEqual(["lfs", "track", "*.pdf", "*.epub", "*.djvu"]);
+    expect(commands.filter((command) => command[0] === "push").flat()).not.toContain("--force");
+    expect(await readdir(join(configDirectory, "git-hooks"))).toHaveLength(1);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/build/");
     expect(await readFile(join(root, ".gitignore"), "utf8")).not.toContain("references/");
     await service.dispose();
