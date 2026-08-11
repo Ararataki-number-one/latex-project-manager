@@ -36,3 +36,14 @@ data class TextDocument(
     val content: String,
     val htmlUrl: String?
 )
+
+data class AndroidReleaseAsset(
+    val version: String,
+    val releaseTag: String,
+    val releaseUrl: String,
+    val name: String,
+    val apiUrl: String,
+    val downloadUrl: String,
+    val size: Long,
+    val sha256: String?
+)

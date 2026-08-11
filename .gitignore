@@ -16,4 +16,5 @@ coverage/
 local.properties
 *.jks
 *.keystore
+.signing/
 *.hprof

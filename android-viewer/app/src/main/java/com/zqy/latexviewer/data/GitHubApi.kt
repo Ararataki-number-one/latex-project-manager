@@ -1,6 +1,7 @@
 package com.zqy.latexviewer.data
 
 import android.net.Uri
+import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
@@ -10,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -71,6 +73,68 @@ class GitHubApi {
             throw GitHubApiException("该文件不是可直接阅读的文本，或文件过大")
         }
         bytes.toString(Charsets.UTF_8)
+    }
+
+    suspend fun downloadFile(
+        repository: GitHubRepository,
+        item: GitHubContent,
+        token: String?,
+        output: OutputStream,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        require(item.kind == GitHubContentKind.FILE) { "只能下载文件" }
+        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(item.path)}?ref=${encode(repository.defaultBranch)}"
+        streamRequest(url, token, RAW_ACCEPT, output, onProgress)
+    }
+
+    suspend fun downloadRepositoryArchive(
+        repository: GitHubRepository,
+        token: String?,
+        output: OutputStream,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/zipball/${encode(repository.defaultBranch)}"
+        streamRequest(url, token, ARCHIVE_ACCEPT, output, onProgress)
+    }
+
+    suspend fun latestAndroidRelease(): AndroidReleaseAsset = withContext(Dispatchers.IO) {
+        val payload = request(
+            "$API_ROOT/repos/$UPDATE_REPOSITORY/releases/latest",
+            null,
+            JSON_ACCEPT,
+            MAX_JSON_BYTES
+        )
+        val release = JSONObject(payload)
+        val assets = release.optJSONArray("assets") ?: JSONArray()
+        val asset = (0 until assets.length())
+            .map { assets.getJSONObject(it) }
+            .firstOrNull {
+                it.optString("name").endsWith(".apk", ignoreCase = true) &&
+                    it.optString("name").contains("android", ignoreCase = true)
+            }
+            ?: throw GitHubApiException("最新 Release 中没有 Android APK")
+        val name = asset.getString("name")
+        val releaseTag = release.optString("tag_name")
+        val version = ANDROID_VERSION.find(name)?.groupValues?.get(1)
+            ?: releaseTag.removePrefix("v")
+        AndroidReleaseAsset(
+            version = version,
+            releaseTag = releaseTag,
+            releaseUrl = release.optString("html_url", "https://github.com/$UPDATE_REPOSITORY/releases/latest"),
+            name = name,
+            apiUrl = asset.getString("url"),
+            downloadUrl = asset.getString("browser_download_url"),
+            size = asset.optLong("size"),
+            sha256 = asset.optString("digest").takeIf { it.isNotBlank() && it != "null" }
+        )
+    }
+
+    suspend fun downloadAndroidUpdate(
+        asset: AndroidReleaseAsset,
+        output: OutputStream,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        streamRequest(asset.apiUrl, null, BINARY_ACCEPT, output, onProgress)
     }
 
     fun isInlineText(fileName: String): Boolean {
@@ -143,6 +207,57 @@ class GitHubApi {
         }
     }
 
+    private fun streamRequest(
+        url: String,
+        token: String?,
+        accept: String,
+        output: OutputStream,
+        onProgress: (downloaded: Long, total: Long) -> Unit
+    ) {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            instanceFollowRedirects = true
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+            setRequestProperty("Accept", accept)
+            setRequestProperty("X-GitHub-Api-Version", API_VERSION)
+            setRequestProperty("User-Agent", "LaTeX-Project-Viewer-Android")
+            token?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                setRequestProperty("Authorization", "Bearer $it")
+            }
+        }
+        try {
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                val body = connection.errorStream
+                    ?.use { readLimited(it, MAX_ERROR_BYTES) }
+                    ?.toString(Charsets.UTF_8)
+                    .orEmpty()
+                throw GitHubApiException(errorMessage(status, body))
+            }
+            val total = connection.contentLengthLong.coerceAtLeast(-1L)
+            if (total > MAX_DOWNLOAD_BYTES) throw GitHubApiException("下载内容超过 4 GB，无法保存")
+            connection.inputStream.use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var downloaded = 0L
+                onProgress(0, total)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    downloaded += read
+                    if (downloaded > MAX_DOWNLOAD_BYTES) {
+                        throw GitHubApiException("下载内容超过 4 GB，无法保存")
+                    }
+                    output.write(buffer, 0, read)
+                    onProgress(downloaded, total)
+                }
+                output.flush()
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
         val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
         val buffer = ByteArray(16 * 1024)
@@ -192,11 +307,18 @@ class GitHubApi {
         const val API_VERSION = "2026-03-10"
         const val JSON_ACCEPT = "application/vnd.github+json"
         const val RAW_ACCEPT = "application/vnd.github.raw+json"
+        const val ARCHIVE_ACCEPT = "application/vnd.github+json"
+        const val BINARY_ACCEPT = "application/octet-stream"
         const val CONNECT_TIMEOUT_MS = 15_000
         const val READ_TIMEOUT_MS = 30_000
+        const val DOWNLOAD_READ_TIMEOUT_MS = 120_000
         const val MAX_JSON_BYTES = 5 * 1024 * 1024
+        const val MAX_ERROR_BYTES = 128 * 1024
         const val MAX_INLINE_FILE_BYTES = 1_500_000
         const val MAX_REPOSITORY_PAGES = 10
+        const val MAX_DOWNLOAD_BYTES = 4L * 1024 * 1024 * 1024
+        const val UPDATE_REPOSITORY = "Ararataki-number-one/latex-project-manager"
+        val ANDROID_VERSION = Regex("(?i)([0-9]+\\.[0-9]+\\.[0-9]+)(?=\\.apk$)")
         val REPOSITORY_PART = Regex("[A-Za-z0-9_.-]+")
         val PLAIN_TEXT_NAMES = setOf("readme", "license", "makefile", "latexmkrc", ".gitignore", ".gitattributes")
         val TEXT_EXTENSIONS = setOf(

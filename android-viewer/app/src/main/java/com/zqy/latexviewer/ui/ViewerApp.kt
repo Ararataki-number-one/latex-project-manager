@@ -1,6 +1,8 @@
 package com.zqy.latexviewer.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.outlined.Clear
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Key
@@ -44,6 +47,8 @@ import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -61,6 +66,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -76,6 +82,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -95,6 +102,45 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+    val apkInstaller = remember(context) { ApkInstaller(context.applicationContext) }
+    var pendingFile by remember { mutableStateOf<GitHubContent?>(null) }
+    var pendingRepository by remember { mutableStateOf<GitHubRepository?>(null) }
+    val fileDownloadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { destination ->
+        val item = pendingFile
+        pendingFile = null
+        if (destination != null && item != null) viewModel.downloadFile(item, destination)
+    }
+    val projectDownloadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { destination ->
+        val repository = pendingRepository
+        pendingRepository = null
+        if (destination != null && repository != null) viewModel.downloadRepository(repository, destination)
+    }
+
+    fun requestFileDownload(item: GitHubContent) {
+        pendingFile = item
+        fileDownloadLauncher.launch(item.name)
+    }
+
+    fun requestProjectDownload(repository: GitHubRepository) {
+        pendingRepository = repository
+        projectDownloadLauncher.launch("${repository.name}-${repository.defaultBranch}.zip")
+    }
+
+    fun installDownloadedUpdate() {
+        val path = state.downloadedApkPath ?: return
+        if (!apkInstaller.canRequestInstall()) {
+            apkInstaller.openInstallPermission()
+            viewModel.showNotice("请允许此应用安装更新，返回后再次点击“安装更新”")
+            return
+        }
+        runCatching { apkInstaller.install(path) }
+            .onFailure { viewModel.showError(it.message ?: "无法打开 Android 安装界面") }
+    }
 
     BackHandler(enabled = state.screen != ViewerScreen.CONNECT) { viewModel.goBack() }
 
@@ -112,6 +158,13 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
         }
     }
 
+    LaunchedEffect(state.notice) {
+        state.notice?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearNotice()
+        }
+    }
+
     LaTeXViewerTheme {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
@@ -124,6 +177,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onBack = viewModel::goBack,
                         onRefresh = viewModel::refresh,
                         onOpenGitHub = viewModel::openCurrentOnGitHub,
+                        onSettings = viewModel::openSettings,
                         onDisconnect = viewModel::disconnect
                     )
                 }
@@ -139,19 +193,36 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         tokenStored = state.tokenStored,
                         loading = state.loading,
                         onConnect = viewModel::connect,
+                        onSettings = viewModel::openSettings,
                         onTokenHelp = { uriHandler.openUri("https://github.com/settings/personal-access-tokens/new") }
                     )
                     ViewerScreen.REPOSITORIES -> RepositoryListScreen(
                         state = state,
                         onQueryChange = viewModel::updateRepositoryQuery,
-                        onOpen = viewModel::openRepository
+                        onOpen = viewModel::openRepository,
+                        onDownload = ::requestProjectDownload,
+                        onOpenSettings = viewModel::openSettings
                     )
                     ViewerScreen.FILES -> FileListScreen(
                         state = state,
                         onQueryChange = viewModel::updateFileQuery,
-                        onOpen = viewModel::openContent
+                        onOpen = viewModel::openContent,
+                        onDownloadFile = ::requestFileDownload,
+                        onDownloadProject = ::requestProjectDownload
                     )
-                    ViewerScreen.TEXT -> TextPreviewScreen(state)
+                    ViewerScreen.TEXT -> TextPreviewScreen(
+                        state,
+                        onDownload = { item -> requestFileDownload(item) }
+                    )
+                    ViewerScreen.SETTINGS -> SettingsScreen(
+                        state = state,
+                        onAutoCheckChange = viewModel::setAutoCheckUpdates,
+                        onAutoDownloadChange = viewModel::setAutoDownloadUpdates,
+                        onCheck = { viewModel.checkForUpdates() },
+                        onDownloadUpdate = viewModel::downloadUpdate,
+                        onInstallUpdate = ::installDownloadedUpdate,
+                        onOpenRelease = viewModel::openReleasePage
+                    )
                 }
                 if (state.loading) {
                     LinearProgressIndicator(
@@ -160,6 +231,14 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                             .align(Alignment.TopCenter),
                         color = MaterialTheme.colorScheme.secondary,
                         trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                }
+                state.transfer?.let { transfer ->
+                    TransferCard(
+                        transfer,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(16.dp)
                     )
                 }
             }
@@ -174,12 +253,14 @@ private fun ViewerTopBar(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onOpenGitHub: () -> Unit,
+    onSettings: () -> Unit,
     onDisconnect: () -> Unit
 ) {
     val title = when (state.screen) {
         ViewerScreen.REPOSITORIES -> "项目"
         ViewerScreen.FILES -> state.currentRepository?.name ?: "项目文件"
         ViewerScreen.TEXT -> state.document?.name ?: "文件"
+        ViewerScreen.SETTINGS -> "设置与更新"
         ViewerScreen.CONNECT -> "LaTeX 项目"
     }
     TopAppBar(
@@ -208,8 +289,13 @@ private fun ViewerTopBar(
                     Icon(Icons.Outlined.OpenInNew, contentDescription = "在 GitHub 中打开")
                 }
             }
-            IconButton(onClick = onRefresh, enabled = !state.loading) {
-                Icon(Icons.Outlined.Refresh, contentDescription = "刷新")
+            if (state.screen != ViewerScreen.SETTINGS) {
+                IconButton(onClick = onRefresh, enabled = !state.loading) {
+                    Icon(Icons.Outlined.Refresh, contentDescription = "刷新")
+                }
+                IconButton(onClick = onSettings) {
+                    Icon(Icons.Outlined.Settings, contentDescription = "设置与更新")
+                }
             }
             if (state.tokenStored) {
                 IconButton(onClick = onDisconnect) {
@@ -229,6 +315,7 @@ private fun ConnectScreen(
     tokenStored: Boolean,
     loading: Boolean,
     onConnect: (String, String) -> Unit,
+    onSettings: () -> Unit,
     onTokenHelp: () -> Unit
 ) {
     var repository by rememberSaveable { mutableStateOf("") }
@@ -314,6 +401,18 @@ private fun ConnectScreen(
                     Text(if (tokenStored && token.isBlank() && repository.isBlank()) "打开我的项目" else "继续")
                 }
             }
+            OutlinedButton(
+                onClick = onSettings,
+                enabled = !loading,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(Icons.Outlined.SystemUpdateAlt, contentDescription = null, modifier = Modifier.size(19.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("设置与应用更新")
+            }
         }
 
         Spacer(Modifier.height(24.dp))
@@ -353,7 +452,9 @@ private fun ConnectScreen(
 private fun RepositoryListScreen(
     state: ViewerUiState,
     onQueryChange: (String) -> Unit,
-    onOpen: (GitHubRepository) -> Unit
+    onOpen: (GitHubRepository) -> Unit,
+    onDownload: (GitHubRepository) -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     val query = state.repositoryQuery.trim()
     val filtered = remember(state.repositories, query) {
@@ -388,11 +489,42 @@ private fun RepositoryListScreen(
                 placeholder = "搜索项目"
             )
         }
+        if (state.updateAvailable) {
+            item {
+                Surface(
+                    onClick = onOpenSettings,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Outlined.SystemUpdateAlt, contentDescription = null)
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Android ${state.updateInfo?.version.orEmpty()} 可用", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (state.downloadedApkPath != null) "更新包已下载，点击安装" else "点击查看并下载更新",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        Icon(Icons.Outlined.ChevronRight, contentDescription = null)
+                    }
+                }
+            }
+        }
         if (filtered.isEmpty()) {
             item { EmptyState("没有匹配的项目", "可以更换关键词，或检查令牌的仓库权限。") }
         } else {
             items(filtered, key = { it.fullName }) { repository ->
-                RepositoryCard(repository, onClick = { onOpen(repository) })
+                RepositoryCard(
+                    repository,
+                    onClick = { onOpen(repository) },
+                    onDownload = { onDownload(repository) }
+                )
             }
         }
         item { ReadOnlyFooter() }
@@ -400,7 +532,11 @@ private fun RepositoryListScreen(
 }
 
 @Composable
-private fun RepositoryCard(repository: GitHubRepository, onClick: () -> Unit) {
+private fun RepositoryCard(
+    repository: GitHubRepository,
+    onClick: () -> Unit,
+    onDownload: () -> Unit
+) {
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -458,6 +594,13 @@ private fun RepositoryCard(repository: GitHubRepository, onClick: () -> Unit) {
                 )
             }
             Spacer(Modifier.width(8.dp))
+            IconButton(onClick = onDownload) {
+                Icon(
+                    Icons.Outlined.Download,
+                    contentDescription = "下载 ${repository.name} 整个项目 ZIP",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -467,7 +610,9 @@ private fun RepositoryCard(repository: GitHubRepository, onClick: () -> Unit) {
 private fun FileListScreen(
     state: ViewerUiState,
     onQueryChange: (String) -> Unit,
-    onOpen: (GitHubContent) -> Unit
+    onOpen: (GitHubContent) -> Unit,
+    onDownloadFile: (GitHubContent) -> Unit,
+    onDownloadProject: (GitHubRepository) -> Unit
 ) {
     val repository = state.currentRepository ?: return
     val query = state.fileQuery.trim()
@@ -479,7 +624,13 @@ private fun FileListScreen(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item { RepositorySummary(repository, state.currentPath) }
+        item {
+            RepositorySummary(
+                repository,
+                state.currentPath,
+                onDownloadProject = { onDownloadProject(repository) }
+            )
+        }
         item {
             SearchField(value = state.fileQuery, onValueChange = onQueryChange, placeholder = "搜索当前文件夹")
         }
@@ -487,7 +638,13 @@ private fun FileListScreen(
             item { EmptyState("这里没有文件", if (query.isEmpty()) "这个目录为空。" else "没有匹配的文件。") }
         } else {
             items(filtered, key = { it.path }) { item ->
-                FileRow(item, onClick = { onOpen(item) })
+                FileRow(
+                    item,
+                    onClick = { onOpen(item) },
+                    onDownload = if (item.kind == GitHubContentKind.FILE) {
+                        { onDownloadFile(item) }
+                    } else null
+                )
             }
         }
         item { ReadOnlyFooter() }
@@ -495,7 +652,11 @@ private fun FileListScreen(
 }
 
 @Composable
-private fun RepositorySummary(repository: GitHubRepository, path: String) {
+private fun RepositorySummary(
+    repository: GitHubRepository,
+    path: String,
+    onDownloadProject: () -> Unit
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.primaryContainer,
@@ -522,12 +683,22 @@ private fun RepositorySummary(repository: GitHubRepository, path: String) {
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onDownloadProject,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("下载整个 LaTeX 项目（ZIP）")
+            }
         }
     }
 }
 
 @Composable
-private fun FileRow(item: GitHubContent, onClick: () -> Unit) {
+private fun FileRow(item: GitHubContent, onClick: () -> Unit, onDownload: (() -> Unit)?) {
     val isFolder = item.kind == GitHubContentKind.DIRECTORY
     val isText = item.kind == GitHubContentKind.FILE && isLikelyText(item.name)
     Card(
@@ -573,6 +744,15 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            if (onDownload != null) {
+                IconButton(onClick = onDownload) {
+                    Icon(
+                        Icons.Outlined.Download,
+                        contentDescription = "下载 ${item.name}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             Icon(
                 if (isFolder || isText) Icons.Outlined.ChevronRight else Icons.Outlined.OpenInNew,
                 contentDescription = null,
@@ -584,8 +764,9 @@ private fun FileRow(item: GitHubContent, onClick: () -> Unit) {
 }
 
 @Composable
-private fun TextPreviewScreen(state: ViewerUiState) {
+private fun TextPreviewScreen(state: ViewerUiState, onDownload: (GitHubContent) -> Unit) {
     val document = state.document ?: return
+    val sourceItem = state.contents.firstOrNull { it.path == document.path }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -623,6 +804,12 @@ private fun TextPreviewScreen(state: ViewerUiState) {
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
+                if (sourceItem != null) {
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(onClick = { onDownload(sourceItem) }) {
+                        Icon(Icons.Outlined.Download, contentDescription = "下载 ${document.name}")
+                    }
+                }
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -650,6 +837,224 @@ private fun TextPreviewScreen(state: ViewerUiState) {
                     color = MaterialTheme.colorScheme.onSurface,
                     softWrap = false
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    state: ViewerUiState,
+    onAutoCheckChange: (Boolean) -> Unit,
+    onAutoDownloadChange: (Boolean) -> Unit,
+    onCheck: () -> Unit,
+    onDownloadUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
+    onOpenRelease: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
+                Text("设置与更新", style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "自动从公开的 GitHub Release 检查 Android 新版本。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                SettingSwitchRow(
+                    title = "自动检查更新",
+                    detail = "每次打开应用时检查 GitHub Release",
+                    checked = state.autoCheckUpdates,
+                    onCheckedChange = onAutoCheckChange
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingSwitchRow(
+                    title = "发现新版后自动下载",
+                    detail = "下载完成后仍需你确认 Android 安装界面",
+                    checked = state.autoDownloadUpdates,
+                    onCheckedChange = onAutoDownloadChange
+                )
+            }
+        }
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            modifier = Modifier.size(46.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Outlined.SystemUpdateAlt,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Android 客户端", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "当前 ${state.currentVersion}" +
+                                    (state.updateInfo?.let { " · 最新 ${it.version}" } ?: ""),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Text(
+                        state.updateMessage,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (state.updateAvailable) MaterialTheme.colorScheme.secondary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    state.updateInfo?.takeIf { state.updateAvailable }?.let { release ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Text(release.name, fontWeight = FontWeight.Medium)
+                                Text(
+                                    "${formatBytes(release.size)} · ${release.releaseTag}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                    if (state.updateAvailable) {
+                        Button(
+                            onClick = if (state.downloadedApkPath == null) onDownloadUpdate else onInstallUpdate,
+                            enabled = state.transfer == null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp),
+                            shape = RoundedCornerShape(13.dp)
+                        ) {
+                            Icon(
+                                if (state.downloadedApkPath == null) Icons.Outlined.Download else Icons.Outlined.SystemUpdateAlt,
+                                contentDescription = null,
+                                modifier = Modifier.size(19.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (state.downloadedApkPath == null) "下载更新" else "安装更新")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onCheck,
+                            enabled = !state.updateChecking && state.transfer == null,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (state.updateChecking) {
+                                CircularProgressIndicator(modifier = Modifier.size(17.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text("立即检查")
+                        }
+                        OutlinedButton(onClick = onOpenRelease, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Release")
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Text(
+                "APK 下载后会进行文件大小和 SHA-256 校验。Android 系统仍会要求你确认安装；应用不能绕过系统安全提示。",
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(
+    title: String,
+    detail: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.padding(horizontal = 18.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(2.dp))
+            Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(14.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun TransferCard(transfer: TransferUiState, modifier: Modifier = Modifier) {
+    val determinate = transfer.total > 0
+    val progress = if (determinate) {
+        (transfer.downloaded.toFloat() / transfer.total.toFloat()).coerceIn(0f, 1f)
+    } else 0f
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.inverseSurface,
+        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+        shadowElevation = 8.dp
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Text(transfer.label, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(8.dp))
+            if (determinate) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.secondary
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "${formatBytes(transfer.downloaded)} / ${formatBytes(transfer.total)}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.secondary)
+                Spacer(Modifier.height(6.dp))
+                Text(formatBytes(transfer.downloaded), style = MaterialTheme.typography.bodyMedium)
             }
         }
     }
