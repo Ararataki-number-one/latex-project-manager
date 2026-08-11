@@ -9,71 +9,71 @@ importers:
   .:
     dependencies:
       chokidar:
-        specifier: latest
+        specifier: 5.0.0
         version: 5.0.0
       diff:
-        specifier: latest
+        specifier: 9.0.0
         version: 9.0.0
       latex-utensils:
-        specifier: latest
+        specifier: 7.0.0
         version: 7.0.0
       lucide-react:
-        specifier: latest
+        specifier: 1.25.0
         version: 1.25.0(react@19.2.7)
       react:
-        specifier: latest
+        specifier: 19.2.7
         version: 19.2.7
       react-dom:
-        specifier: latest
+        specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
       zod:
-        specifier: latest
+        specifier: 4.4.3
         version: 4.4.3
       zustand:
-        specifier: latest
+        specifier: 5.0.14
         version: 5.0.14(@types/react@19.2.17)(react@19.2.7)
     devDependencies:
       '@electron-toolkit/preload':
-        specifier: latest
+        specifier: 3.0.2
         version: 3.0.2(electron@43.1.1)
       '@electron-toolkit/utils':
-        specifier: latest
+        specifier: 4.0.0
         version: 4.0.0(electron@43.1.1)
       '@playwright/test':
-        specifier: latest
+        specifier: 1.61.1
         version: 1.61.1
       '@types/diff':
-        specifier: latest
+        specifier: 8.0.0
         version: 8.0.0
       '@types/node':
-        specifier: 24.x
+        specifier: 24.13.3
         version: 24.13.3
       '@types/react':
-        specifier: latest
+        specifier: 19.2.17
         version: 19.2.17
       '@types/react-dom':
-        specifier: latest
+        specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react':
-        specifier: latest
+        specifier: 6.0.3
         version: 6.0.3(vite@8.1.5(@types/node@24.13.3)(jiti@2.7.0))
       electron:
         specifier: 43.1.1
         version: 43.1.1
       electron-builder:
-        specifier: latest
+        specifier: 26.15.3
         version: 26.15.3(electron-builder-squirrel-windows@26.15.3)
       electron-vite:
-        specifier: latest
+        specifier: 5.0.0
         version: 5.0.0(vite@8.1.5(@types/node@24.13.3)(jiti@2.7.0))
       typescript:
-        specifier: latest
+        specifier: 7.0.2
         version: 7.0.2
       vite:
-        specifier: latest
+        specifier: 8.1.5
         version: 8.1.5(@types/node@24.13.3)(jiti@2.7.0)
       vitest:
-        specifier: latest
+        specifier: 4.1.10
         version: 4.1.10(@types/node@24.13.3)(vite@8.1.5(@types/node@24.13.3)(jiti@2.7.0))
 
 packages:

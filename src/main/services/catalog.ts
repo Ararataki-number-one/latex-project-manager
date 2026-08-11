@@ -2,7 +2,13 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { BuildStatus, ProjectManifest, ProjectSummary } from "../../shared/types";
+import type {
+  AppRuntimeSettings,
+  BuildStatus,
+  GitHubSyncEvent,
+  ProjectManifest,
+  ProjectSummary
+} from "../../shared/types";
 
 interface CatalogRow {
   id: string;
@@ -30,6 +36,12 @@ const BUILD_STATUSES = new Set<BuildStatus>([
   "failed",
   "cancelled"
 ]);
+
+const DEFAULT_RUNTIME_SETTINGS: AppRuntimeSettings = {
+  closeToTray: true,
+  onboardingCompleted: false,
+  syncPaused: false
+};
 
 function parseStringArray(value: string): string[] {
   try {
@@ -92,6 +104,8 @@ export function projectSummaryFromManifest(
 
 export class ProjectCatalog {
   private readonly memory = new Map<string, ProjectSummary>();
+  private readonly memorySyncEvents = new Map<string, GitHubSyncEvent[]>();
+  private memoryRuntimeSettings: AppRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS };
   private database: DatabaseSync | null = null;
   readonly fallbackReason?: string;
 
@@ -122,6 +136,20 @@ export class ProjectCatalog {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS projects_root_path ON projects(root_path);
         CREATE INDEX IF NOT EXISTS projects_last_opened ON projects(last_opened_at DESC);
+        CREATE TABLE IF NOT EXISTS sync_events (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          occurred_at TEXT NOT NULL,
+          state TEXT NOT NULL,
+          level TEXT NOT NULL,
+          message TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sync_events_project_time ON sync_events(project_id, occurred_at DESC);
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
       `);
       const columns = new Set(
         (this.database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((column) => column.name)
@@ -132,6 +160,7 @@ export class ProjectCatalog {
       if (!columns.has("trashed_at")) {
         this.database.exec("ALTER TABLE projects ADD COLUMN trashed_at TEXT");
       }
+      this.database.exec("PRAGMA user_version = 2");
     } catch (error) {
       fallbackReason = error instanceof Error ? error.message : String(error);
       try {
@@ -269,6 +298,78 @@ export class ProjectCatalog {
 
   markBuild(projectId: string, status: BuildStatus, at = new Date().toISOString()): ProjectSummary {
     return this.upsert({ ...this.require(projectId), lastBuildAt: at, lastBuildStatus: status });
+  }
+
+  appendSyncEvent(event: GitHubSyncEvent): void {
+    if (!this.database) {
+      const events = [event, ...(this.memorySyncEvents.get(event.projectId) ?? [])]
+        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+        .slice(0, 100);
+      this.memorySyncEvents.set(event.projectId, events);
+      return;
+    }
+    this.database.prepare(
+      "INSERT OR REPLACE INTO sync_events (id, project_id, occurred_at, state, level, message) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(event.id, event.projectId, event.occurredAt, event.state, event.level, event.message);
+    this.database.prepare(`
+      DELETE FROM sync_events
+       WHERE project_id = ?
+         AND id NOT IN (
+           SELECT id FROM sync_events WHERE project_id = ? ORDER BY occurred_at DESC LIMIT 100
+         )
+    `).run(event.projectId, event.projectId);
+  }
+
+  syncHistory(projectId: string, limit = 100): GitHubSyncEvent[] {
+    const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    if (!this.database) return (this.memorySyncEvents.get(projectId) ?? []).slice(0, safeLimit).map((event) => ({ ...event }));
+    return this.database.prepare(`
+      SELECT id, project_id, occurred_at, state, level, message
+        FROM sync_events
+       WHERE project_id = ?
+       ORDER BY occurred_at DESC
+       LIMIT ?
+    `).all(projectId, safeLimit).map((row: any) => ({
+      id: String(row.id),
+      projectId: String(row.project_id),
+      occurredAt: String(row.occurred_at),
+      state: row.state as GitHubSyncEvent["state"],
+      level: row.level as GitHubSyncEvent["level"],
+      message: String(row.message)
+    }));
+  }
+
+  runtimeSettings(): AppRuntimeSettings {
+    if (!this.database) return { ...this.memoryRuntimeSettings };
+    const row = this.database.prepare("SELECT value FROM app_settings WHERE key = ?").get("runtime") as { value?: string } | undefined;
+    if (!row?.value) return { ...DEFAULT_RUNTIME_SETTINGS };
+    try {
+      const parsed = JSON.parse(row.value) as Partial<AppRuntimeSettings>;
+      return {
+        closeToTray: typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : true,
+        onboardingCompleted: typeof parsed.onboardingCompleted === "boolean" ? parsed.onboardingCompleted : false,
+        syncPaused: typeof parsed.syncPaused === "boolean" ? parsed.syncPaused : false
+      };
+    } catch {
+      return { ...DEFAULT_RUNTIME_SETTINGS };
+    }
+  }
+
+  setRuntimeSettings(settings: AppRuntimeSettings): AppRuntimeSettings {
+    const normalized: AppRuntimeSettings = {
+      closeToTray: Boolean(settings.closeToTray),
+      onboardingCompleted: Boolean(settings.onboardingCompleted),
+      syncPaused: Boolean(settings.syncPaused)
+    };
+    if (!this.database) {
+      this.memoryRuntimeSettings = normalized;
+      return { ...normalized };
+    }
+    this.database.prepare(`
+      INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run("runtime", JSON.stringify(normalized), new Date().toISOString());
+    return normalized;
   }
 
   close(): void {

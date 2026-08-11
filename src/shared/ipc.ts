@@ -1,14 +1,19 @@
 import type {
   AppUpdateSettings,
   AppUpdateStatus,
+  AppRuntimeSettings,
+  DesktopEnvironmentStatus,
   ExportResult,
   GitIdentity,
   GitHubAccountStatus,
   GitHubCreateRepositoryOptions,
   GitHubRepositoryVisibility,
+  GitHubSyncEvent,
   GitHubSyncSettings,
   GitHubSyncStatus,
   MigrationPreview,
+  MobilePdfCandidate,
+  MobileProjectIndex,
   ProjectManifest,
   ProjectPdfInfo,
   ProjectStorageInfo,
@@ -20,7 +25,8 @@ import type {
   TemporaryCleanupPreview,
   TemporaryCleanupResult,
   ToolchainInfo,
-  VsCodeStatus
+  VsCodeStatus,
+  SyncSecurityFinding
 } from "./types";
 
 export const IPC = {
@@ -39,6 +45,9 @@ export const IPC = {
   libraryCleanupPreview: "library:cleanup-preview",
   libraryCleanupApply: "library:cleanup-apply",
   libraryStorageInfo: "library:storage-info",
+  mobileIndexRead: "mobile-index:read",
+  mobileIndexCandidates: "mobile-index:candidates",
+  mobileIndexWrite: "mobile-index:write",
   githubStatus: "github:status",
   githubConfigure: "github:configure",
   githubSyncNow: "github:sync-now",
@@ -51,6 +60,16 @@ export const IPC = {
   githubOpenRemote: "github:open-remote",
   githubOpenProductPage: "github:open-product-page",
   githubOpenCliDownload: "github:open-cli-download",
+  githubSecurityPreflight: "github:security-preflight",
+  githubAcknowledgeWarnings: "github:acknowledge-warnings",
+  githubHistory: "github:history",
+  githubSyncAll: "github:sync-all",
+  githubPauseAll: "github:pause-all",
+  githubResumeAll: "github:resume-all",
+  githubEvent: "github:event",
+  runtimeSettings: "runtime:settings",
+  runtimeSetSettings: "runtime:set-settings",
+  runtimeEnvironmentStatus: "runtime:environment-status",
   updatesStatus: "updates:status",
   updatesSetSettings: "updates:set-settings",
   updatesCheck: "updates:check",
@@ -110,6 +129,11 @@ export interface WorkbenchApi {
     applyTemporaryCleanup(projectId: string, planId: string): Promise<TemporaryCleanupResult>;
     storageInfo(projectId: string): Promise<ProjectStorageInfo>;
   };
+  mobileIndex: {
+    read(projectId: string): Promise<MobileProjectIndex | null>;
+    candidates(projectId: string): Promise<MobilePdfCandidate[]>;
+    write(projectId: string, index: MobileProjectIndex): Promise<MobileProjectIndex>;
+  };
   github: {
     status(projectId: string): Promise<GitHubSyncStatus>;
     configure(projectId: string, settings: GitHubSyncSettings): Promise<GitHubSyncStatus>;
@@ -123,6 +147,18 @@ export interface WorkbenchApi {
     openRemote(projectId: string): Promise<void>;
     openProductPage(): Promise<void>;
     openCliDownload(): Promise<void>;
+    securityPreflight(projectId: string, includeTracked?: boolean): Promise<SyncSecurityFinding[]>;
+    acknowledgeWarnings(projectId: string, paths: string[]): Promise<GitHubSyncStatus>;
+    history(projectId: string, limit?: number): Promise<GitHubSyncEvent[]>;
+    syncAll(): Promise<GitHubSyncStatus[]>;
+    pauseAll(): Promise<void>;
+    resumeAll(): Promise<void>;
+    onEvent(listener: (event: GitHubSyncEvent) => void): () => void;
+  };
+  runtime: {
+    settings(): Promise<AppRuntimeSettings>;
+    setSettings(settings: AppRuntimeSettings): Promise<AppRuntimeSettings>;
+    environmentStatus(): Promise<DesktopEnvironmentStatus>;
   };
   updates: {
     status(): Promise<AppUpdateStatus>;

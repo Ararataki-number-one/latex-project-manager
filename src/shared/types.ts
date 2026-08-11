@@ -126,6 +126,31 @@ export interface ProjectPdfInfo {
   profileId?: string;
 }
 
+export interface MobilePdfOutput {
+  id: string;
+  name: string;
+  targetId: string;
+  entry: string;
+  profileId?: string;
+  pdfPath: string;
+}
+
+export interface MobileProjectIndex {
+  schemaVersion: 1;
+  projectId: string;
+  name: string;
+  updatedAt: string;
+  defaultOutputId: string;
+  outputs: MobilePdfOutput[];
+}
+
+export interface MobilePdfCandidate {
+  relativePath: string;
+  size: number;
+  modifiedAt: string;
+  suggestedTargetIds: string[];
+}
+
 export interface TemporaryCleanupPreview {
   planId: string;
   fileCount: number;
@@ -153,9 +178,12 @@ export type GitHubSyncState =
   | "notConfigured"
   | "ready"
   | "changes"
+  | "queued"
   | "syncing"
+  | "retrying"
   | "synced"
   | "needsPull"
+  | "blocked"
   | "error";
 
 export interface GitHubChangedFile {
@@ -167,6 +195,24 @@ export interface GitHubLargeFile {
   path: string;
   size: number;
   trackedByLfs: boolean;
+}
+
+export type SyncSecurityFindingKind = "secret" | "sensitiveFile" | "largeFile";
+
+export interface SyncSecurityFinding {
+  path: string;
+  kind: SyncSecurityFindingKind;
+  severity: "block" | "warning";
+  message: string;
+}
+
+export interface GitHubSyncEvent {
+  id: string;
+  projectId: string;
+  occurredAt: string;
+  state: GitHubSyncState;
+  level: "info" | "warning" | "error";
+  message: string;
 }
 
 export interface GitHubSyncSettings {
@@ -216,6 +262,9 @@ export interface GitHubSyncStatus extends GitHubSyncSettings {
   ahead: number;
   behind: number;
   lastSyncAt?: string;
+  nextRetryAt?: string;
+  paused?: boolean;
+  securityFindings?: SyncSecurityFinding[];
   identity: GitIdentity;
   lastCommit?: {
     hash: string;
@@ -223,6 +272,20 @@ export interface GitHubSyncStatus extends GitHubSyncSettings {
     committedAt: string;
   };
   message?: string;
+}
+
+export interface AppRuntimeSettings {
+  closeToTray: boolean;
+  onboardingCompleted: boolean;
+  syncPaused: boolean;
+}
+
+export interface DesktopEnvironmentStatus {
+  gitAvailable: boolean;
+  gitVersion?: string;
+  gitLfsAvailable: boolean;
+  githubCliAvailable: boolean;
+  githubCliVersion?: string;
 }
 
 export type AppUpdateState =

@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
@@ -35,9 +36,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -49,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zqy.latexviewer.model.GitHubContent
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -60,7 +64,8 @@ private data class PdfRendererHandle(
 @Composable
 internal fun PdfPreviewScreen(
     state: ViewerUiState,
-    onDownload: (GitHubContent) -> Unit
+    onDownload: (GitHubContent) -> Unit,
+    onPageChanged: (pageIndex: Int, pageCount: Int) -> Unit
 ) {
     val document = state.pdfDocument ?: return
     val sourceItem = state.contents.firstOrNull { it.path == document.path }
@@ -76,6 +81,17 @@ internal fun PdfPreviewScreen(
         }
     }
     val handle = handleResult.getOrNull()
+    val pageCount = handle?.renderer?.pageCount ?: 1
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = document.initialPage.coerceIn(0, pageCount - 1)
+    )
+
+    LaunchedEffect(document.sha, handle) {
+        if (handle == null) return@LaunchedEffect
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .collect { page -> onPageChanged(page.coerceIn(0, pageCount - 1), pageCount) }
+    }
 
     DisposableEffect(handle) {
         onDispose {
@@ -148,6 +164,7 @@ internal fun PdfPreviewScreen(
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {

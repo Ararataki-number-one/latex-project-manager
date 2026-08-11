@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { ProjectManifest } from "./types";
+import type { MobileProjectIndex, ProjectManifest } from "./types";
 
 const relativePathSchema = z
   .string()
@@ -167,12 +167,59 @@ export const projectManifestSchema = z
 
 export const ProjectManifestSchema = projectManifestSchema;
 
+export const mobilePdfOutputSchema = z
+  .object({
+    id: idSchema,
+    name: z.string().min(1).max(200),
+    targetId: idSchema,
+    entry: relativePathSchema,
+    profileId: idSchema.optional(),
+    pdfPath: relativePathSchema.refine((value) => value.toLocaleLowerCase("en-US").endsWith(".pdf"), "主文件必须是 PDF")
+  })
+  .strict();
+
+export const mobileProjectIndexSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    projectId: idSchema,
+    name: z.string().min(1).max(200),
+    updatedAt: z.string().datetime({ offset: true }),
+    defaultOutputId: idSchema,
+    outputs: z.array(mobilePdfOutputSchema).min(1)
+  })
+  .strict()
+  .superRefine((index, context) => {
+    const ids = new Set<string>();
+    const targetIds = new Set<string>();
+    for (const [outputIndex, output] of index.outputs.entries()) {
+      if (ids.has(output.id)) {
+        context.addIssue({ code: "custom", message: `移动输出 ID 重复: ${output.id}`, path: ["outputs", outputIndex, "id"] });
+      }
+      if (targetIds.has(output.targetId)) {
+        context.addIssue({ code: "custom", message: `每个文档目标只能指定一个移动输出: ${output.targetId}`, path: ["outputs", outputIndex, "targetId"] });
+      }
+      ids.add(output.id);
+      targetIds.add(output.targetId);
+    }
+    if (!ids.has(index.defaultOutputId)) {
+      context.addIssue({ code: "custom", message: "默认移动输出不存在", path: ["defaultOutputId"] });
+    }
+  });
+
 export function parseProjectManifest(value: unknown): ProjectManifest {
   return projectManifestSchema.parse(value) as ProjectManifest;
 }
 
 export function safeParseProjectManifest(value: unknown) {
   return projectManifestSchema.safeParse(value);
+}
+
+export function parseMobileProjectIndex(value: unknown): MobileProjectIndex {
+  return mobileProjectIndexSchema.parse(value) as MobileProjectIndex;
+}
+
+export function safeParseMobileProjectIndex(value: unknown) {
+  return mobileProjectIndexSchema.safeParse(value);
 }
 
 export { relativePathSchema };

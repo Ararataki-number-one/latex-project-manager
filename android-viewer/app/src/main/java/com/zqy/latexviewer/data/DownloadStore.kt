@@ -34,6 +34,7 @@ class DownloadStore(private val context: Context) {
 
     suspend fun savePdfPreview(
         cacheKey: String,
+        maxCacheBytes: Long = DEFAULT_PDF_CACHE_BYTES,
         writer: suspend (OutputStream) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val directory = File(context.cacheDir, "pdf-preview").apply { mkdirs() }
@@ -59,16 +60,29 @@ class DownloadStore(private val context: Context) {
             if (!temporary.renameTo(destination)) {
                 throw IllegalStateException("无法建立 PDF 预览缓存")
             }
-            directory.listFiles()
-                ?.filter { it != destination && !it.name.endsWith(".part") }
-                ?.sortedByDescending { it.lastModified() }
-                ?.drop((MAX_PDF_CACHE_FILES - 1).coerceAtLeast(0))
-                ?.forEach { it.delete() }
+            trimPdfCache(directory, destination, maxCacheBytes)
             destination
         } catch (failure: Throwable) {
             temporary.delete()
             throw failure
         }
+    }
+
+    suspend fun pdfCacheBytes(): Long = withContext(Dispatchers.IO) {
+        pdfCacheDirectory().listFiles()
+            ?.filter { it.isFile && !it.name.endsWith(".part") }
+            ?.sumOf(File::length)
+            ?: 0L
+    }
+
+    suspend fun clearPdfCache(): Long = withContext(Dispatchers.IO) {
+        val files = pdfCacheDirectory().listFiles().orEmpty()
+        var removed = 0L
+        files.forEach { file ->
+            val size = file.length()
+            if (file.isFile && file.delete()) removed += size
+        }
+        removed
     }
 
     suspend fun readDownloadedText(file: DownloadedFile, maxBytes: Int): String = withContext(Dispatchers.IO) {
@@ -134,6 +148,23 @@ class DownloadStore(private val context: Context) {
     private fun updateDirectory(): File {
         val root = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
         return File(root, "updates")
+    }
+
+    private fun pdfCacheDirectory(): File = File(context.cacheDir, "pdf-preview").apply { mkdirs() }
+
+    private fun trimPdfCache(directory: File, keep: File, maxCacheBytes: Long) {
+        val limit = maxCacheBytes.coerceAtLeast(64L * 1024 * 1024)
+        val files = directory.listFiles()
+            ?.filter { it.isFile && !it.name.endsWith(".part") }
+            ?.sortedBy { it.lastModified() }
+            .orEmpty()
+        var total = files.sumOf(File::length)
+        for (file in files) {
+            if (total <= limit) break
+            if (file == keep) continue
+            val size = file.length()
+            if (file.delete()) total -= size
+        }
     }
 
     private suspend fun saveWithMediaStore(
@@ -269,6 +300,6 @@ class DownloadStore(private val context: Context) {
 
     private companion object {
         const val DOWNLOAD_FOLDER = "LaTeX项目"
-        const val MAX_PDF_CACHE_FILES = 8
+        const val DEFAULT_PDF_CACHE_BYTES = 512L * 1024 * 1024
     }
 }

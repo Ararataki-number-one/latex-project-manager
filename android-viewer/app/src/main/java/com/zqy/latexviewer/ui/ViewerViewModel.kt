@@ -12,8 +12,14 @@ import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.MobilePdfOutput
+import com.zqy.latexviewer.model.MobileProjectIndex
 import com.zqy.latexviewer.model.PdfDocument
+import com.zqy.latexviewer.model.ReadingProgress
 import com.zqy.latexviewer.model.TextDocument
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,6 +45,8 @@ data class ViewerUiState(
     val screen: ViewerScreen = ViewerScreen.REPOSITORIES,
     val tokenStored: Boolean = false,
     val repositories: List<GitHubRepository> = emptyList(),
+    val mobileIndexes: Map<String, MobileProjectIndex> = emptyMap(),
+    val recentReading: ReadingProgress? = null,
     val repositoryQuery: String = "",
     val currentRepository: GitHubRepository? = null,
     val currentPath: String = "",
@@ -60,7 +68,9 @@ data class ViewerUiState(
     val updateAvailable: Boolean = false,
     val updateInfo: AndroidReleaseAsset? = null,
     val updateMessage: String = "尚未检查更新",
-    val downloadedApkPath: String? = null
+    val downloadedApkPath: String? = null,
+    val pdfCacheBytes: Long = 0,
+    val pdfCacheLimitBytes: Long = 512L * 1024 * 1024
 )
 
 class ViewerViewModel(
@@ -76,6 +86,7 @@ class ViewerViewModel(
 
     init {
         loadRepositories()
+        refreshCacheUsage()
         if (_state.value.autoCheckUpdates) checkForUpdates(silent = true)
     }
 
@@ -107,6 +118,7 @@ class ViewerViewModel(
                 it.copy(
                     screen = ViewerScreen.REPOSITORIES,
                     repositories = emptyList(),
+                    mobileIndexes = emptyMap(),
                     tokenStored = false,
                     loading = false,
                     currentRepository = null,
@@ -141,6 +153,7 @@ class ViewerViewModel(
                     pdfDocument = null
                 )
             }
+            refreshMobileIndexes(repositories)
             if (failed > 0) {
                 showNotice("$failed 个项目暂时无法访问，请检查仓库地址或令牌权限")
             }
@@ -160,6 +173,13 @@ class ViewerViewModel(
         launchRequest { openRepositoryContents(repository, "") }
     }
 
+    fun openMobilePdf(repository: GitHubRepository, output: MobilePdfOutput) {
+        launchTransfer("正在检查最新版 ${output.name}") {
+            val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
+            openPdfLatest(repository, latest, output.name)
+        }
+    }
+
     fun removeRepository(repository: GitHubRepository) {
         preferences.removeRepository(repository.fullName)
         _state.update { state ->
@@ -167,6 +187,7 @@ class ViewerViewModel(
                 repositories = state.repositories.filterNot {
                     it.fullName.equals(repository.fullName, ignoreCase = true)
                 },
+                mobileIndexes = state.mobileIndexes - repository.fullName.lowercase(),
                 currentRepository = state.currentRepository?.takeUnless {
                     it.fullName.equals(repository.fullName, ignoreCase = true)
                 }
@@ -276,6 +297,40 @@ class ViewerViewModel(
         if (enabled && _state.value.updateAvailable && _state.value.downloadedApkPath == null) {
             downloadUpdate()
         }
+    }
+
+    fun clearPdfCache() {
+        viewModelScope.launch {
+            runCatching { downloadStore.clearPdfCache() }
+                .onSuccess { removed ->
+                    _state.update { it.copy(pdfCacheBytes = 0) }
+                    showNotice("已清理 ${formatByteCount(removed)} PDF 缓存")
+                }
+                .onFailure { showError(it.message ?: "无法清理 PDF 缓存") }
+        }
+    }
+
+    fun recordPdfPage(pageIndex: Int, pageCount: Int) {
+        val document = _state.value.pdfDocument ?: return
+        val repositoryFullName = document.repositoryFullName ?: return
+        val sha = document.sha ?: return
+        val repository = _state.value.repositories.firstOrNull {
+            it.fullName.equals(repositoryFullName, ignoreCase = true)
+        }
+        val normalizedPageCount = pageCount.coerceAtLeast(1)
+        val progress = ReadingProgress(
+            repositoryFullName = repositoryFullName,
+            projectName = _state.value.mobileIndexes[repositoryFullName.lowercase()]?.name
+                ?: repository?.name.orEmpty().ifBlank { repositoryFullName.substringAfter('/') },
+            pdfPath = document.path,
+            pdfName = document.name,
+            sha = sha,
+            pageIndex = pageIndex.coerceIn(0, normalizedPageCount - 1),
+            pageCount = normalizedPageCount,
+            lastReadAt = System.currentTimeMillis()
+        )
+        preferences.saveReadingProgress(progress)
+        _state.update { it.copy(recentReading = progress) }
     }
 
     fun checkForUpdates(silent: Boolean = false) {
@@ -397,8 +452,17 @@ class ViewerViewModel(
             }
             ViewerScreen.PDF -> {
                 val document = current.pdfDocument ?: return
-                val item = current.contents.firstOrNull { it.path == document.path } ?: return
-                openContent(item)
+                val repository = current.repositories.firstOrNull {
+                    it.fullName.equals(document.repositoryFullName, ignoreCase = true)
+                } ?: current.currentRepository ?: return
+                openMobilePdf(repository, MobilePdfOutput(
+                    id = "refresh",
+                    targetId = "refresh",
+                    name = document.name,
+                    entry = "",
+                    profileId = null,
+                    pdfPath = document.path
+                ))
             }
             ViewerScreen.SETTINGS -> checkForUpdates()
             ViewerScreen.CONNECT -> Unit
@@ -451,9 +515,12 @@ class ViewerViewModel(
 
     private fun initialState() = ViewerUiState(
         tokenStored = tokenStore.hasToken(),
+        mobileIndexes = preferences.cachedMobileIndexes(),
+        recentReading = preferences.mostRecentReading(),
         currentVersion = currentVersion,
         autoCheckUpdates = preferences.autoCheckUpdates,
-        autoDownloadUpdates = preferences.autoDownloadUpdates
+        autoDownloadUpdates = preferences.autoDownloadUpdates,
+        pdfCacheLimitBytes = preferences.pdfCacheLimitBytes
     )
 
     private suspend fun openRepositoryContents(repository: GitHubRepository, path: String) {
@@ -474,22 +541,66 @@ class ViewerViewModel(
     private fun openPdf(repository: GitHubRepository, item: GitHubContent) {
         launchTransfer("正在检查最新版 ${item.name}") {
             val latest = api.getContent(repository, item.path, tokenStore.read())
-            val file = downloadStore.savePdfPreview("${repository.owner}-${repository.name}-${latest.sha}.pdf") { output ->
-                api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer)
-            }
-            _state.update {
-                it.copy(
-                    screen = ViewerScreen.PDF,
-                    document = null,
-                    pdfDocument = PdfDocument(
-                        name = latest.name,
-                        path = latest.path,
-                        htmlUrl = latest.htmlUrl,
-                        localPath = file.absolutePath
-                    )
+            openPdfLatest(repository, latest, latest.name)
+        }
+    }
+
+    private suspend fun openPdfLatest(repository: GitHubRepository, latest: GitHubContent, displayName: String) {
+        val previous = preferences.readingProgress(repository.fullName, latest.path)
+        val file = downloadStore.savePdfPreview(
+            "${repository.owner}-${repository.name}-${latest.sha}.pdf",
+            preferences.pdfCacheLimitBytes
+        ) { output -> api.downloadFile(repository, latest, tokenStore.read(), output, ::updateTransfer) }
+        if (previous != null && previous.sha != latest.sha) showNotice("发现新版本：${latest.name}")
+        val initialPage = previous?.pageIndex?.coerceAtLeast(0) ?: 0
+        _state.update {
+            it.copy(
+                screen = ViewerScreen.PDF,
+                document = null,
+                pdfDocument = PdfDocument(
+                    name = displayName.ifBlank { latest.name },
+                    path = latest.path,
+                    htmlUrl = latest.htmlUrl,
+                    localPath = file.absolutePath,
+                    repositoryFullName = repository.fullName,
+                    sha = latest.sha,
+                    initialPage = initialPage
                 )
+            )
+        }
+        refreshCacheUsage()
+    }
+
+    private suspend fun refreshMobileIndexes(repositories: List<GitHubRepository>) {
+        val token = tokenStore.read()
+        val discovered = mutableMapOf<String, MobileProjectIndex>()
+        repositories.chunked(4).forEach { batch ->
+            coroutineScope {
+                batch.map { repository ->
+                    async {
+                        val index = api.mobileProjectIndex(repository, token)
+                        repository.fullName.lowercase() to index
+                    }
+                }.awaitAll()
+            }.forEach { (repository, index) ->
+                preferences.saveMobileIndex(repository, index)
+                if (index != null) discovered[repository] = index
             }
         }
+        _state.update { it.copy(mobileIndexes = discovered) }
+    }
+
+    private fun refreshCacheUsage() {
+        viewModelScope.launch {
+            runCatching { downloadStore.pdfCacheBytes() }
+                .onSuccess { bytes -> _state.update { it.copy(pdfCacheBytes = bytes) } }
+        }
+    }
+
+    private fun formatByteCount(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+        else -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
     }
 
     private fun rememberRepository(repository: GitHubRepository) {

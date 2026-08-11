@@ -7,19 +7,22 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { watch, type FSWatcher } from "chokidar";
 
 import type {
+  DesktopEnvironmentStatus,
   GitHubChangedFile,
   GitHubAccountStatus,
   GitHubCreateRepositoryOptions,
   GitIdentity,
   GitHubLargeFile,
   GitHubRepositoryVisibility,
+  GitHubSyncEvent,
   GitHubSyncSettings,
   GitHubSyncState,
-  GitHubSyncStatus
+  GitHubSyncStatus,
+  SyncSecurityFinding
 } from "../../shared/types";
+import { scanSyncSecurity } from "./sync-security";
 
 const LARGE_FILE_WARNING = 50 * 1024 * 1024;
-const REGULAR_GIT_FILE_LIMIT = 100 * 1024 * 1024;
 const CONFIG_VERSION = 1;
 const MANAGED_IGNORE_BEGIN = "# >>> LaTeX Project Manager managed ignores";
 const MANAGED_IGNORE_END = "# <<< LaTeX Project Manager managed ignores";
@@ -52,6 +55,7 @@ interface StoredSyncConfig extends GitHubSyncSettings {
   lastError?: string;
   repositoryFullName?: string;
   visibility?: GitHubRepositoryVisibility;
+  acknowledgedWarnings?: string[];
 }
 
 export interface GitCommandResult {
@@ -80,11 +84,24 @@ export interface GitHubSyncServiceOptions {
   debounceMs?: number;
   watcherFactory?: (root: string, onChange: () => void) => WatcherLike;
   loginLauncher?: (executable: string, cwd: string, args: string[]) => Promise<void>;
+  maxConcurrent?: number;
+  retryDelaysMs?: number[];
+  onEvent?: (event: GitHubSyncEvent) => void;
+  onStatus?: (projectId: string, state: GitHubSyncState, message?: string) => void;
 }
 
 interface LiveStatus {
   state: GitHubSyncState;
   message?: string;
+  nextRetryAt?: string;
+  securityFindings?: SyncSecurityFinding[];
+}
+
+interface QueuedSync {
+  projectId: string;
+  root: string;
+  background: boolean;
+  resolve: (status: GitHubSyncStatus) => void;
 }
 
 class SyncNeedsPullError extends Error {
@@ -92,6 +109,24 @@ class SyncNeedsPullError extends Error {
     super(message);
     this.name = "SyncNeedsPullError";
   }
+}
+
+class SyncSecurityBlockedError extends Error {
+  constructor(message: string, readonly findings: SyncSecurityFinding[]) {
+    super(message);
+    this.name = "SyncSecurityBlockedError";
+  }
+}
+
+class SyncWarningApprovalError extends Error {
+  constructor(message: string, readonly findings: SyncSecurityFinding[]) {
+    super(message);
+    this.name = "SyncWarningApprovalError";
+  }
+}
+
+function retryableNetworkError(message: string): boolean {
+  return /(?:could not resolve|failed to connect|connection (?:timed out|reset)|network is unreachable|unable to access|tls|ssl|http 5\d\d|remote end hung up)/i.test(message);
 }
 
 function portablePath(value: string): string {
@@ -247,6 +282,13 @@ export function normalizeGitHubRemoteUrl(value: string): string {
     : `https://github.com/${match[1]}/${match[2]}.git`;
 }
 
+export type SafeRemoteAction = "none" | "fastForward" | "blocked";
+
+export function decideSafeRemoteAction(ahead: number, behind: number, localChanges: number): SafeRemoteAction {
+  if (behind <= 0) return "none";
+  return ahead === 0 && localChanges === 0 ? "fastForward" : "blocked";
+}
+
 function parseChangedFiles(output: string): GitHubChangedFile[] {
   const result: GitHubChangedFile[] = [];
   for (const record of output.split("\0")) {
@@ -289,13 +331,24 @@ export class GitHubSyncService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly runner: GitCommandRunner;
   private readonly debounceMs: number;
+  private readonly maxConcurrent: number;
+  private readonly retryDelaysMs: number[];
   private readonly watcherFactory: (root: string, onChange: () => void) => WatcherLike;
   private readonly loginLauncher: (executable: string, cwd: string, args: string[]) => Promise<void>;
+  private readonly onEvent?: (event: GitHubSyncEvent) => void;
+  private readonly onStatus?: (projectId: string, state: GitHubSyncState, message?: string) => void;
   private readonly roots = new Map<string, string>();
   private readonly watchers = new Map<string, WatcherLike>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly pollTimers = new Map<string, NodeJS.Timeout>();
+  private readonly retryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly retryAttempts = new Map<string, number>();
   private readonly jobs = new Map<string, Promise<GitHubSyncStatus>>();
+  private readonly queue: QueuedSync[] = [];
+  private readonly rerunAfter = new Set<string>();
   private readonly live = new Map<string, LiveStatus>();
+  private activeJobs = 0;
+  private paused = false;
   private executable: string | null | undefined;
   private githubCliExecutable: string | null | undefined;
   private gitVersion: string | undefined;
@@ -307,10 +360,98 @@ export class GitHubSyncService {
     this.env = options.env ?? process.env;
     this.runner = options.runner ?? defaultRunner;
     this.debounceMs = Math.max(1_000, options.debounceMs ?? 10_000);
+    this.maxConcurrent = Math.max(1, Math.min(8, options.maxConcurrent ?? 2));
+    this.retryDelaysMs = (options.retryDelaysMs?.length ? options.retryDelaysMs : [30_000, 120_000, 300_000])
+      .map((value) => Math.max(1_000, value));
     this.watcherFactory = options.watcherFactory ?? defaultWatcherFactory;
     this.loginLauncher = options.loginLauncher ?? defaultLoginLauncher;
+    this.onEvent = options.onEvent;
+    this.onStatus = options.onStatus;
     if (options.gitExecutable) this.executable = options.gitExecutable;
     if (options.githubCliExecutable) this.githubCliExecutable = options.githubCliExecutable;
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  async pauseAll(): Promise<void> {
+    this.paused = true;
+    for (const [projectId] of this.roots) this.setLive(projectId, "queued", "自动同步已暂停，变更仍保留在本机。", "info");
+  }
+
+  async resumeAll(): Promise<void> {
+    this.paused = false;
+    for (const [projectId, root] of this.roots) {
+      const config = await this.readConfig(projectId);
+      if (config?.autoSync) this.scheduleSync(projectId, 1_000);
+      else if (this.live.get(projectId)?.state === "queued") this.setLive(projectId, "ready", "自动同步未开启。", "info");
+      this.roots.set(projectId, root);
+    }
+    this.pumpQueue();
+  }
+
+  async syncAll(background = false): Promise<GitHubSyncStatus[]> {
+    const tasks: Array<Promise<GitHubSyncStatus>> = [];
+    for (const [projectId, root] of this.roots) {
+      const config = await this.readConfig(projectId);
+      if (config) tasks.push(this.syncNow(projectId, root, background));
+    }
+    return Promise.all(tasks);
+  }
+
+  async securityPreflight(projectId: string, root: string, includeTracked = false): Promise<SyncSecurityFinding[]> {
+    this.roots.set(projectId, resolve(root));
+    await this.requireGit(root);
+    await this.ensureRepository(root);
+    let changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
+    if (includeTracked) {
+      const listed = await this.run(root, ["ls-files", "-co", "--exclude-standard", "-z"]);
+      const known = new Set(changes.map((change) => change.path));
+      for (const path of listed.stdout.split("\0").filter(Boolean)) {
+        const portable = portablePath(path);
+        if (!known.has(portable)) changes.push({ path: portable, status: "  " });
+      }
+    }
+    const largeFiles = await this.largeChangedFiles(root, changes);
+    return scanSyncSecurity(root, changes, largeFiles);
+  }
+
+  async acknowledgeWarnings(projectId: string, root: string, paths: string[]): Promise<GitHubSyncStatus> {
+    const config = await this.readConfig(projectId);
+    if (!config) throw new Error("请先连接 GitHub 仓库。");
+    const safePaths = [...new Set(paths.map((path) => portablePath(path.trim())).filter(Boolean))];
+    const findings = await this.securityPreflight(projectId, root, false);
+    const allowed = new Set(findings.filter((finding) => finding.severity === "warning").map((finding) => finding.path));
+    if (!safePaths.length || safePaths.some((path) => !allowed.has(path))) throw new Error("需要确认的同步警告已经变化，请重新检查。");
+    await this.writeConfig({
+      ...config,
+      acknowledgedWarnings: [...new Set([...(config.acknowledgedWarnings ?? []), ...safePaths])]
+    });
+    this.setLive(projectId, "queued", "已确认普通同步警告，正在重新同步。", "info");
+    return this.syncNow(projectId, root, false);
+  }
+
+  private setLive(
+    projectId: string,
+    state: GitHubSyncState,
+    message: string,
+    level: GitHubSyncEvent["level"],
+    extra: Pick<LiveStatus, "nextRetryAt" | "securityFindings"> = {}
+  ): void {
+    const previous = this.live.get(projectId);
+    const next: LiveStatus = { state, message, ...extra };
+    this.live.set(projectId, next);
+    this.onStatus?.(projectId, state, message);
+    if (previous?.state === state && previous.message === message && previous.nextRetryAt === next.nextRetryAt) return;
+    this.onEvent?.({
+      id: randomBytes(12).toString("hex"),
+      projectId,
+      occurredAt: new Date().toISOString(),
+      state,
+      level,
+      message
+    });
   }
 
   async authStatus(cwd = process.cwd()): Promise<GitHubAccountStatus> {
@@ -352,6 +493,17 @@ export class GitHubSyncService {
     };
   }
 
+  async environmentStatus(cwd = process.cwd()): Promise<DesktopEnvironmentStatus> {
+    const [git, githubCli] = await Promise.all([this.resolveGit(cwd), this.resolveGitHubCli(cwd)]);
+    return {
+      gitAvailable: Boolean(git),
+      gitVersion: this.gitVersion,
+      gitLfsAvailable: git ? await this.probeLfs(cwd) : false,
+      githubCliAvailable: Boolean(githubCli),
+      githubCliVersion: this.githubCliVersion
+    };
+  }
+
   async beginLogin(cwd = process.cwd()): Promise<GitHubAccountStatus> {
     const current = await this.authStatus(cwd);
     if (current.authenticated) return current;
@@ -379,6 +531,17 @@ export class GitHubSyncService {
     const timer = this.timers.get(projectId);
     if (timer) clearTimeout(timer);
     this.timers.delete(projectId);
+    const pollTimer = this.pollTimers.get(projectId);
+    if (pollTimer) clearInterval(pollTimer);
+    this.pollTimers.delete(projectId);
+    const retryTimer = this.retryTimers.get(projectId);
+    if (retryTimer) clearTimeout(retryTimer);
+    this.retryTimers.delete(projectId);
+    this.retryAttempts.delete(projectId);
+    this.rerunAfter.delete(projectId);
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      if (this.queue[index].projectId === projectId) this.queue.splice(index, 1);
+    }
     const watcher = this.watchers.get(projectId);
     this.watchers.delete(projectId);
     if (watcher) await watcher.close();
@@ -389,8 +552,13 @@ export class GitHubSyncService {
   async dispose(): Promise<void> {
     await Promise.all([...this.watchers.values()].map((watcher) => watcher.close()));
     for (const timer of this.timers.values()) clearTimeout(timer);
+    for (const timer of this.pollTimers.values()) clearInterval(timer);
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.watchers.clear();
     this.timers.clear();
+    this.pollTimers.clear();
+    this.retryTimers.clear();
+    this.queue.splice(0);
   }
 
   async notifyProjectChanged(projectId: string, root: string): Promise<void> {
@@ -429,9 +597,10 @@ export class GitHubSyncService {
       useLfsForDocuments: settings.useLfsForDocuments,
       lastSyncAt: previous?.lastSyncAt,
       repositoryFullName: coordinates.fullName,
-      visibility: previous?.repositoryFullName === coordinates.fullName ? previous.visibility : undefined
+      visibility: previous?.repositoryFullName === coordinates.fullName ? previous.visibility : undefined,
+      acknowledgedWarnings: previous?.repositoryFullName === coordinates.fullName ? previous.acknowledgedWarnings : undefined
     });
-    this.live.set(projectId, { state: "ready", message: `已连接 ${remoteUrl}，当前分支 ${branch}。` });
+    this.setLive(projectId, "ready", `已连接 ${remoteUrl}，当前分支 ${branch}。`, "info");
     if (settings.autoSync) await this.startWatcher(projectId);
     else await this.stopWatcher(projectId);
     return this.status(projectId, root);
@@ -449,7 +618,7 @@ export class GitHubSyncService {
     } else {
       await this.stopWatcher(projectId);
     }
-    this.live.set(projectId, { state: "ready", message: enabled ? "已开启自动同步。" : "已暂停自动同步。" });
+    this.setLive(projectId, "ready", enabled ? "已开启自动同步。" : "已暂停自动同步。", "info");
     return this.status(projectId, root);
   }
 
@@ -471,7 +640,7 @@ export class GitHubSyncService {
     await this.ensureRepository(root);
     await this.run(root, ["config", "--local", "user.name", name]);
     await this.run(root, ["config", "--local", "user.email", email]);
-    this.live.set(projectId, { state: "ready", message: "已为当前项目保存 Git 提交身份。" });
+    this.setLive(projectId, "ready", "已为当前项目保存 Git 提交身份。", "info");
     return this.status(projectId, root);
   }
 
@@ -491,6 +660,12 @@ export class GitHubSyncService {
     this.roots.set(projectId, resolve(root));
     const account = await this.authStatus(root);
     if (!account.authenticated || !account.login) throw new Error("请先在客户端设置中登录 GitHub。");
+    const preflight = await this.securityPreflight(projectId, root, true);
+    const blocked = preflight.filter((finding) => finding.severity === "block");
+    if (blocked.length) {
+      this.setLive(projectId, "blocked", blocked[0].message, "error", { securityFindings: preflight });
+      throw new SyncSecurityBlockedError(blocked[0].message, preflight);
+    }
     await this.runGitHubCli(root, ["auth", "setup-git", "--hostname", "github.com"], [0], false);
     await this.requireGit(root);
     await this.ensureRepository(root);
@@ -521,7 +696,12 @@ export class GitHubSyncService {
     });
     const config = await this.readConfig(projectId);
     if (!config) throw new Error("仓库已创建，但本机同步配置保存失败。");
-    await this.writeConfig({ ...config, repositoryFullName: fullName, visibility: options.visibility });
+    await this.writeConfig({
+      ...config,
+      repositoryFullName: fullName,
+      visibility: options.visibility,
+      acknowledgedWarnings: preflight.filter((finding) => finding.severity === "warning").map((finding) => finding.path)
+    });
     return this.syncNow(projectId, root, false);
   }
 
@@ -537,6 +717,15 @@ export class GitHubSyncService {
     if (!config) throw new Error("请先连接 GitHub 仓库。");
     const account = await this.authStatus(root);
     if (!account.authenticated) throw new Error("请先在客户端设置中登录 GitHub。");
+    let publicPreflight: SyncSecurityFinding[] = [];
+    if (visibility === "public") {
+      publicPreflight = await this.securityPreflight(projectId, root, true);
+      const blocked = publicPreflight.filter((finding) => finding.severity === "block");
+      if (blocked.length) {
+        this.setLive(projectId, "blocked", blocked[0].message, "error", { securityFindings: publicPreflight });
+        throw new SyncSecurityBlockedError(blocked[0].message, publicPreflight);
+      }
+    }
     const coordinates = repositoryCoordinates(config.remoteUrl);
     await this.runGitHubCli(
       root,
@@ -544,8 +733,15 @@ export class GitHubSyncService {
       [0],
       false
     );
-    await this.writeConfig({ ...config, repositoryFullName: coordinates.fullName, visibility });
-    this.live.set(projectId, { state: "ready", message: `仓库已切换为${visibility === "public" ? "公开" : "私有"}。` });
+    await this.writeConfig({
+      ...config,
+      repositoryFullName: coordinates.fullName,
+      visibility,
+      acknowledgedWarnings: visibility === "public"
+        ? [...new Set([...(config.acknowledgedWarnings ?? []), ...publicPreflight.filter((finding) => finding.severity === "warning").map((finding) => finding.path)])]
+        : config.acknowledgedWarnings
+    });
+    this.setLive(projectId, "ready", `仓库已切换为${visibility === "public" ? "公开" : "私有"}。`, "info");
     return this.status(projectId, root);
   }
 
@@ -563,12 +759,34 @@ export class GitHubSyncService {
 
   async syncNow(projectId: string, root: string, background = false): Promise<GitHubSyncStatus> {
     const existing = this.jobs.get(projectId);
-    if (existing) return existing;
+    if (existing) {
+      if (background) this.rerunAfter.add(projectId);
+      return existing;
+    }
     this.roots.set(projectId, resolve(root));
-    const job = this.performSync(projectId, resolve(root), background)
-      .finally(() => this.jobs.delete(projectId));
+    const job = new Promise<GitHubSyncStatus>((resolveJob) => {
+      this.queue.push({ projectId, root: resolve(root), background, resolve: resolveJob });
+      this.setLive(projectId, "queued", this.paused ? "自动同步已暂停，任务保留在队列中。" : "同步任务已加入队列。", "info");
+      this.pumpQueue();
+    });
     this.jobs.set(projectId, job);
     return job;
+  }
+
+  private pumpQueue(): void {
+    if (this.paused) return;
+    while (this.activeJobs < this.maxConcurrent && this.queue.length) {
+      const queued = this.queue.shift()!;
+      this.activeJobs += 1;
+      void this.performSync(queued.projectId, queued.root, queued.background)
+        .then(queued.resolve)
+        .finally(() => {
+          this.activeJobs -= 1;
+          this.jobs.delete(queued.projectId);
+          if (this.rerunAfter.delete(queued.projectId)) this.scheduleSync(queued.projectId, 1_000);
+          this.pumpQueue();
+        });
+    }
   }
 
   async status(projectId: string, root: string): Promise<GitHubSyncStatus> {
@@ -644,7 +862,7 @@ export class GitHubSyncService {
     const live = this.live.get(projectId);
     let state: GitHubSyncState;
     let message: string | undefined;
-    if (live && new Set<GitHubSyncState>(["syncing", "error", "needsPull"]).has(live.state)) {
+    if (live && new Set<GitHubSyncState>(["queued", "syncing", "retrying", "error", "needsPull", "blocked"]).has(live.state)) {
       state = live.state;
       message = live.message;
     } else if (!config) {
@@ -678,6 +896,9 @@ export class GitHubSyncService {
       ahead,
       behind,
       lastSyncAt: config?.lastSyncAt,
+      nextRetryAt: live?.nextRetryAt,
+      paused: this.paused,
+      securityFindings: live?.securityFindings,
       identity,
       lastCommit: commitParts.length >= 3 ? { hash: commitParts[0], message: commitParts[1], committedAt: commitParts[2] } : undefined,
       message
@@ -685,18 +906,41 @@ export class GitHubSyncService {
   }
 
   private async performSync(projectId: string, root: string, background: boolean): Promise<GitHubSyncStatus> {
-    const config = await this.readConfig(projectId);
-    if (!config) throw new Error("请先连接 GitHub 仓库。");
-    this.live.set(projectId, { state: "syncing", message: "正在整理变更并同步到 GitHub…" });
+    let config: StoredSyncConfig | null = null;
     try {
+      config = await this.readConfig(projectId);
+      if (!config) throw new Error("请先连接 GitHub 仓库。");
+      this.setLive(projectId, "syncing", "正在检查本机变更与 GitHub 状态…", "info");
       await this.requireGit(root);
       await this.ensureRepository(root);
       const branch = await this.ensureBranch(root);
-      const changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
-      const largeFiles = await this.largeChangedFiles(root, changes);
-      const blocked = largeFiles.find((file) => file.size > REGULAR_GIT_FILE_LIMIT && !file.trackedByLfs);
-      if (blocked) {
-        throw new Error(`${blocked.path} 超过 100 MiB，必须先用 Git LFS 跟踪后才能上传。`);
+      let changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
+      let largeFiles = await this.largeChangedFiles(root, changes);
+      const findings = await scanSyncSecurity(root, changes, largeFiles);
+      const hardBlocks = findings.filter((finding) => finding.severity === "block");
+      if (hardBlocks.length) {
+        throw new SyncSecurityBlockedError(hardBlocks[0].message, findings);
+      }
+      const acknowledged = new Set(config.acknowledgedWarnings ?? []);
+      const warnings = findings.filter((finding) => finding.severity === "warning" && !acknowledged.has(finding.path));
+      if (warnings.length) {
+        throw new SyncWarningApprovalError("发现需要确认的敏感文件或大文件，确认前不会上传。", findings);
+      }
+
+      const remoteBranch = await this.run(root, ["ls-remote", "--exit-code", "--heads", "origin", branch], [0, 2], background);
+      if (remoteBranch.code === 0) {
+        await this.run(root, ["fetch", "--prune", "origin", branch], [0], background);
+        const relation = await this.aheadBehind(root, branch);
+        const remoteAction = decideSafeRemoteAction(relation.ahead, relation.behind, changes.length);
+        if (remoteAction === "blocked") {
+          throw new SyncNeedsPullError("GitHub 上存在较新的提交，同时本机也有变更；已暂停同步，请先处理两端差异。");
+        }
+        if (remoteAction === "fastForward") {
+          this.setLive(projectId, "syncing", "本机工作区干净，正在安全快进到 GitHub 最新版本…", "info");
+          await this.run(root, ["pull", "--ff-only", "origin", branch], [0], background);
+          changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
+          largeFiles = await this.largeChangedFiles(root, changes);
+        }
       }
 
       await this.run(root, ["add", "-A", "--", "."]);
@@ -710,25 +954,54 @@ export class GitHubSyncService {
         await this.run(root, ["commit", "-m", `自动同步：${timestamp}`], [0]);
       }
 
-      const remoteBranch = await this.run(root, ["ls-remote", "--exit-code", "--heads", "origin", branch], [0, 2], background);
-      if (remoteBranch.code === 0) {
-        await this.run(root, ["fetch", "--prune", "origin", branch], [0], background);
-        const relation = await this.aheadBehind(root, branch);
-        if (relation.behind > 0) {
-          throw new SyncNeedsPullError("GitHub 上存在较新的提交，自动同步已停止；请先在 GitHub Desktop 或 VS Code 中处理拉取/合并。");
-        }
-      }
       await this.run(root, ["push", "-u", "origin", branch], [0], background);
       const lastSyncAt = new Date().toISOString();
-      await this.writeConfig({ ...config, lastSyncAt, lastError: undefined });
-      this.live.set(projectId, { state: "synced", message: "新增、修改和删除内容均已同步到 GitHub。" });
+      await this.writeConfig({ ...config, lastSyncAt, lastError: undefined, acknowledgedWarnings: [] });
+      const retryTimer = this.retryTimers.get(projectId);
+      if (retryTimer) clearTimeout(retryTimer);
+      this.retryTimers.delete(projectId);
+      this.retryAttempts.delete(projectId);
+      this.setLive(projectId, "synced", "新增、修改和删除内容均已同步到 GitHub。", "info", {
+        securityFindings: findings.filter((finding) => finding.severity === "warning")
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "GitHub 同步失败。";
-      const state: GitHubSyncState = error instanceof SyncNeedsPullError ? "needsPull" : "error";
-      this.live.set(projectId, { state, message });
-      await this.writeConfig({ ...config, lastError: message });
+      if (error instanceof SyncSecurityBlockedError || error instanceof SyncWarningApprovalError) {
+        this.setLive(projectId, "blocked", message, error instanceof SyncSecurityBlockedError ? "error" : "warning", {
+          securityFindings: error.findings
+        });
+      } else if (error instanceof SyncNeedsPullError) {
+        this.setLive(projectId, "needsPull", message, "warning");
+      } else if (retryableNetworkError(message) && config?.autoSync) {
+        this.scheduleRetry(projectId, message);
+      } else {
+        this.setLive(projectId, "error", message, "error");
+      }
+      if (config) await this.writeConfig({ ...config, lastError: message });
     }
     return this.status(projectId, root);
+  }
+
+  private scheduleRetry(projectId: string, reason: string): void {
+    const previous = this.retryTimers.get(projectId);
+    if (previous) clearTimeout(previous);
+    const attempt = this.retryAttempts.get(projectId) ?? 0;
+    if (attempt >= this.retryDelaysMs.length) {
+      this.retryAttempts.delete(projectId);
+      this.setLive(projectId, "error", `网络重试 ${this.retryDelaysMs.length} 次后仍然失败：${reason}`, "error");
+      return;
+    }
+    const delay = this.retryDelaysMs[Math.min(attempt, this.retryDelaysMs.length - 1)];
+    this.retryAttempts.set(projectId, attempt + 1);
+    const nextRetryAt = new Date(Date.now() + delay).toISOString();
+    this.setLive(projectId, "retrying", `网络暂时不可用，将自动重试：${reason}`, "warning", { nextRetryAt });
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(projectId);
+      const root = this.roots.get(projectId);
+      if (root && !this.paused) void this.syncNow(projectId, root, true);
+    }, delay);
+    timer.unref();
+    this.retryTimers.set(projectId, timer);
   }
 
   private async resolveGit(cwd: string): Promise<string | null> {
@@ -929,6 +1202,7 @@ export class GitHubSyncService {
         || typeof value.autoSync !== "boolean" || typeof value.useLfsForDocuments !== "boolean") return null;
       if (value.visibility !== undefined && value.visibility !== "public" && value.visibility !== "private") return null;
       if (value.repositoryFullName !== undefined && (typeof value.repositoryFullName !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repositoryFullName))) return null;
+      if (value.acknowledgedWarnings !== undefined && (!Array.isArray(value.acknowledgedWarnings) || value.acknowledgedWarnings.some((path) => typeof path !== "string"))) return null;
       return value as StoredSyncConfig;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return null;
@@ -949,12 +1223,18 @@ export class GitHubSyncService {
     const root = this.roots.get(projectId);
     if (!root || !existsSync(root)) return;
     this.watchers.set(projectId, this.watcherFactory(root, () => this.scheduleSync(projectId)));
+    const pollTimer = setInterval(() => this.scheduleSync(projectId, 1_000), 60_000);
+    pollTimer.unref();
+    this.pollTimers.set(projectId, pollTimer);
   }
 
   private async stopWatcher(projectId: string): Promise<void> {
     const timer = this.timers.get(projectId);
     if (timer) clearTimeout(timer);
     this.timers.delete(projectId);
+    const pollTimer = this.pollTimers.get(projectId);
+    if (pollTimer) clearInterval(pollTimer);
+    this.pollTimers.delete(projectId);
     const watcher = this.watchers.get(projectId);
     this.watchers.delete(projectId);
     if (watcher) await watcher.close();

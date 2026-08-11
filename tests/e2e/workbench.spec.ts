@@ -105,6 +105,8 @@ test("Overleaf 风格项目库支持搜索、标签、复制、归档、回收�
   await expect(page.getByRole("button", { name: /快捷编译/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "变更" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /编译.*Build/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "移动端主 PDF" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /保存移动端设置/ })).toBeVisible();
 
   const projectTabs = page.getByRole("tablist", { name: "项目页面" });
   await expect(projectTabs.getByRole("tab")).toHaveCount(3);
@@ -123,6 +125,7 @@ test("Overleaf 风格项目库支持搜索、标签、复制、归档、回收�
   await expect(page.getByRole("textbox", { name: "提交邮箱" })).toHaveValue("Ararataki-number-one@users.noreply.github.com");
   await expect(page.getByRole("button", { name: "保存并继续同步" })).toBeVisible();
   await expect(page.getByText(/新增、修改和删除/).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "同步时间线" })).toBeVisible();
 
   await page.getByRole("navigation", { name: "应用导航" }).getByRole("button", { name: "设置" }).click();
   await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
@@ -130,8 +133,15 @@ test("Overleaf 风格项目库支持搜索、标签、复制、归档、回收�
   await expect(page.getByRole("checkbox", { name: /发现新版本后自动下载/ })).toBeChecked();
   await expect(page.getByRole("button", { name: "立即检查" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "GitHub 连接" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /关闭窗口后留在托盘/ })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /暂停所有自动同步/ })).not.toBeChecked();
   await expect(page.getByText("github.com/Ararataki-number-one/latex-project-manager", { exact: true })).toBeVisible();
-  await expect(page.getByText("0.3.6", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("0.5.0", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: "重新打开新手向导" }).click();
+  const onboarding = page.getByRole("dialog", { name: "配置 LaTeX 项目管理器" });
+  await expect(onboarding).toBeVisible();
+  await expect(onboarding.getByText("Git LFS", { exact: true })).toBeVisible();
+  await onboarding.getByRole("button", { name: "暂时关闭新手引导" }).click();
   await expectNoHorizontalOverflow(page);
 });
 

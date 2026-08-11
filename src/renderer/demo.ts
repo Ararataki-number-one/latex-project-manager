@@ -1,8 +1,11 @@
 import type { WorkbenchApi } from "@/shared/ipc";
 import type {
   AppUpdateStatus,
+  AppRuntimeSettings,
+  GitHubSyncEvent,
   GitHubSyncStatus,
   MigrationPreview,
+  MobileProjectIndex,
   ProjectManifest,
   ProjectSummary,
   ReferenceDocumentInfo,
@@ -382,20 +385,37 @@ export function createWorkbench(): DemoWorkbench {
     lastCommit: { hash: "4ec2f9a", message: "自动同步：2026/8/3 20:36:00", committedAt: "2026-08-03T12:36:00.000Z" },
     message: "2 个文件等待自动同步。"
   };
+  let mobileProjectIndex: MobileProjectIndex | null = {
+    schemaVersion: 1,
+    projectId: demoManifest.projectId,
+    name: demoManifest.name,
+    updatedAt: new Date().toISOString(),
+    defaultOutputId: "mobile-book-main",
+    outputs: [{
+      id: "mobile-book-main",
+      name: "讲义正文",
+      targetId: demoManifest.targets[0].id,
+      entry: demoManifest.targets[0].entry,
+      profileId: demoManifest.targets[0].profiles[0].id,
+      pdfPath: "main.pdf"
+    }]
+  };
+  let runtimeSettings: AppRuntimeSettings = { closeToTray: true, onboardingCompleted: false, syncPaused: false };
+  const syncEvents: GitHubSyncEvent[] = [];
   let referenceDocuments: ReferenceDocumentInfo[] = [
     { name: "Alon-Spencer-The-Probabilistic-Method.pdf", relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf", size: 18_724_811, modifiedAt: "2026-08-02T08:20:00.000Z", kind: "pdf", lfsRecommended: false },
     { name: "随机图中文讲义.pdf", relativePath: "references/随机图中文讲义.pdf", size: 62_104_322, modifiedAt: "2026-07-28T13:15:00.000Z", kind: "pdf", lfsRecommended: true }
   ];
   let updateStatus: AppUpdateStatus = {
-    currentVersion: "0.3.6",
-    latestVersion: "0.3.6",
+    currentVersion: "0.5.0",
+    latestVersion: "0.5.0",
     autoCheck: true,
     autoDownload: true,
     state: "upToDate",
     githubCliAvailable: true,
     releaseUrl: "https://github.com/Ararataki-number-one/latex-project-manager/releases",
     checkedAt: new Date().toISOString(),
-    message: "当前已是最新版本 0.3.6。"
+    message: "当前已是最新版本 0.5.0。"
   };
 
   const api: WorkbenchApi = {
@@ -520,6 +540,14 @@ export function createWorkbench(): DemoWorkbench {
         return { totalBytes: (index + 1) * 18_742_930, fileCount: 42 + index * 17, measuredAt: new Date().toISOString() };
       }
     },
+    mobileIndex: {
+      read: async () => structuredClone(mobileProjectIndex),
+      candidates: async () => [{ relativePath: "main.pdf", size: 8_640_000, modifiedAt: new Date().toISOString(), suggestedTargetIds: [demoManifest.targets[0].id] }],
+      write: async (_projectId, index) => {
+        mobileProjectIndex = structuredClone(index);
+        return structuredClone(index);
+      }
+    },
     github: {
       status: async () => structuredClone(githubStatus),
       configure: async (_projectId, settings) => {
@@ -562,7 +590,22 @@ export function createWorkbench(): DemoWorkbench {
       },
       openRemote: async () => undefined,
       openProductPage: async () => undefined,
-      openCliDownload: async () => undefined
+      openCliDownload: async () => undefined,
+      securityPreflight: async () => [],
+      acknowledgeWarnings: async () => structuredClone(githubStatus),
+      history: async (_projectId, limit = 100) => structuredClone(syncEvents.slice(0, limit)),
+      syncAll: async () => [structuredClone(githubStatus)],
+      pauseAll: async () => { runtimeSettings = { ...runtimeSettings, syncPaused: true }; },
+      resumeAll: async () => { runtimeSettings = { ...runtimeSettings, syncPaused: false }; },
+      onEvent: () => () => undefined
+    },
+    runtime: {
+      settings: async () => structuredClone(runtimeSettings),
+      setSettings: async (settings) => {
+        runtimeSettings = structuredClone(settings);
+        return structuredClone(runtimeSettings);
+      },
+      environmentStatus: async () => ({ gitAvailable: true, gitVersion: "2.51.0.windows.1", gitLfsAvailable: true, githubCliAvailable: true, githubCliVersion: "2.76.2" })
     },
     updates: {
       status: async () => structuredClone(updateStatus),

@@ -37,8 +37,9 @@ import {
   X
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { AppUpdateStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
+import type { AppRuntimeSettings, AppUpdateStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
 import { createWorkbench } from "./demo";
+import { OnboardingWizard } from "./OnboardingWizard";
 import { ProjectView } from "./ProjectView";
 
 const runtime = createWorkbench();
@@ -70,6 +71,18 @@ function ProjectSyncBadge({ status }: { status?: GitHubSyncStatus }) {
     label = "同步中";
     tone = "running";
     icon = <RefreshCw size={12} className="spin" />;
+  } else if (status?.state === "queued") {
+    label = "排队中";
+    tone = "running";
+    icon = <Clock3 size={12} />;
+  } else if (status?.state === "retrying") {
+    label = "等待重试";
+    tone = "warning";
+    icon = <RefreshCw size={12} />;
+  } else if (status?.state === "blocked") {
+    label = "安全阻止";
+    tone = "error";
+    icon = <ShieldCheck size={12} />;
   } else if (status?.configured && status.state === "synced") {
     label = "已同步";
     tone = "success";
@@ -117,9 +130,10 @@ interface LibraryViewProps {
   onProjectsChange: React.Dispatch<React.SetStateAction<ProjectSummary[]>>;
   onNotify: (message: string) => void;
   isDemo: boolean;
+  openImportNonce: number;
 }
 
-function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsChange, onNotify, isDemo }: LibraryViewProps) {
+function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsChange, onNotify, isDemo, openImportNonce }: LibraryViewProps) {
   const [query, setQuery] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [candidates, setCandidates] = useState<ScanCandidate[]>([]);
@@ -144,6 +158,10 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [syncOnImport, setSyncOnImport] = useState(false);
   const [importVisibility, setImportVisibility] = useState<GitHubRepositoryVisibility>("private");
   const [importingPath, setImportingPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (openImportNonce > 0) setImportOpen(true);
+  }, [openImportNonce]);
 
   const visible = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -746,7 +764,14 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   );
 }
 
-function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: boolean; onNotify: (message: string) => void }) {
+function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSettingsChange, onOpenOnboarding }: {
+  api: WorkbenchApi;
+  isDemo: boolean;
+  onNotify: (message: string) => void;
+  runtimeSettings: AppRuntimeSettings;
+  onRuntimeSettingsChange: (settings: AppRuntimeSettings) => void;
+  onOpenOnboarding: () => void;
+}) {
   const [status, setStatus] = useState<AppUpdateStatus | null>(null);
   const [account, setAccount] = useState<GitHubAccountStatus | null>(null);
   const [busy, setBusy] = useState<"settings" | "check" | "download" | "install" | "github" | null>(null);
@@ -814,6 +839,19 @@ function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: bo
       onNotify(next.autoCheck ? "已开启客户端自动检查更新" : "已关闭客户端自动检查更新");
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法保存更新设置");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveRuntimeSettings(next: AppRuntimeSettings, message: string) {
+    setBusy("settings");
+    try {
+      const saved = await api.runtime.setSettings(next);
+      onRuntimeSettingsChange(saved);
+      onNotify(message);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存后台运行设置");
     } finally {
       setBusy(null);
     }
@@ -889,8 +927,16 @@ function SettingsView({ api, isDemo, onNotify }: { api: WorkbenchApi; isDemo: bo
         </div>
         <div className="product-repository-address"><GitFork size={17} /><div><strong>本软件项目地址</strong><code>github.com/Ararataki-number-one/latex-project-manager</code></div><button className="button ghost" onClick={() => void openProductPage()}><ExternalLink size={15} />打开</button></div>
       </section>
+      <section className="settings-card runtime-settings-card">
+        <header><div><h2>后台运行与同步</h2><p>关闭主窗口后仍可通过 Windows 托盘安全同步项目。</p></div><HardDrive size={20} /></header>
+        <div className="settings-toggle-list">
+          <label className="sync-toggle"><span><strong>关闭窗口后留在托盘</strong><small>默认开启；从托盘菜单可以重新打开或彻底退出</small></span><input type="checkbox" checked={runtimeSettings.closeToTray} disabled={busy !== null} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, closeToTray: event.target.checked }, event.target.checked ? "关闭窗口后将继续在托盘运行" : "关闭窗口将退出客户端")} /></label>
+          <label className="sync-toggle"><span><strong>暂停所有自动同步</strong><small>暂停后保留待同步变化，恢复时继续处理队列</small></span><input type="checkbox" checked={runtimeSettings.syncPaused} disabled={busy !== null} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, syncPaused: event.target.checked }, event.target.checked ? "已暂停所有自动同步" : "已恢复自动同步")} /></label>
+        </div>
+        <div className="update-actions"><button className="button secondary" onClick={onOpenOnboarding}><BookOpenText size={16} />重新打开新手向导</button></div>
+      </section>
       <section className="settings-card update-settings-card">
-        <header><div><h2>客户端更新</h2><p>通过私有 GitHub Release 获取经过校验的 Windows 安装包。</p></div><Download size={20} /></header>
+        <header><div><h2>客户端更新</h2><p>通过官方 GitHub Release 获取经过校验的 Windows 安装包。</p></div><Download size={20} /></header>
         <div className={`app-update-summary update-${status.state}`}>
           <span className="update-summary-icon">{checking || downloading ? <RefreshCw size={20} className="spin" /> : status.state === "downloaded" || status.state === "upToDate" ? <CheckCircle2 size={20} /> : <Download size={20} />}</span>
           <div><strong>{stateLabel}</strong><p>{status.message}</p></div>
@@ -922,6 +968,10 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [runtimeSettings, setRuntimeSettings] = useState<AppRuntimeSettings>({ closeToTray: true, onboardingCompleted: false, syncPaused: false });
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [showOnboardingHint, setShowOnboardingHint] = useState(false);
+  const [openImportNonce, setOpenImportNonce] = useState(0);
 
   async function refreshProjects() {
     const items = await runtime.api.library.list();
@@ -929,10 +979,35 @@ export default function App() {
   }
 
   useEffect(() => {
-    runtime.api.library.list()
-      .then(setProjects)
+    Promise.all([runtime.api.library.list(), runtime.api.runtime.settings()])
+      .then(([items, settings]) => {
+        setProjects(items);
+        setRuntimeSettings(settings);
+        if (!settings.onboardingCompleted) {
+          if (items.length === 0) setOnboardingOpen(true);
+          else setShowOnboardingHint(true);
+        }
+      })
+      .catch((error) => setToast(error instanceof Error ? error.message : "无法读取客户端设置"))
       .finally(() => setLoading(false));
   }, []);
+
+  async function completeOnboarding(openImport: boolean) {
+    try {
+      const saved = await runtime.api.runtime.setSettings({ ...runtimeSettings, onboardingCompleted: true });
+      setRuntimeSettings(saved);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "无法保存新手向导状态");
+    }
+    setOnboardingOpen(false);
+    setShowOnboardingHint(false);
+    if (openImport) {
+      setSelected(null);
+      setSettingsOpen(false);
+      setFilter("all");
+      setOpenImportNonce((value) => value + 1);
+    }
+  }
 
   useEffect(() => {
     if (!toast) return;
@@ -1024,11 +1099,15 @@ export default function App() {
         {selected ? (
           <ProjectView api={runtime.api} project={selected} isDemo={runtime.isDemo} onBack={() => goLibrary()} onNotify={setToast} />
         ) : settingsOpen ? (
-          <SettingsView api={runtime.api} isDemo={runtime.isDemo} onNotify={setToast} />
+          <SettingsView api={runtime.api} isDemo={runtime.isDemo} onNotify={setToast} runtimeSettings={runtimeSettings} onRuntimeSettingsChange={setRuntimeSettings} onOpenOnboarding={() => setOnboardingOpen(true)} />
         ) : (
-          <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={(project) => { setSettingsOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} />
+          <>
+            {showOnboardingHint && <aside className="onboarding-hint" aria-label="v0.5 新手向导提示"><div><BookOpenText size={18} /><span><strong>v0.5 新手向导</strong><small>检查 Git、GitHub、VS Code，并完成第一个安全同步项目。</small></span></div><button className="button secondary" onClick={() => setOnboardingOpen(true)}>开始</button><IconButton label="不再提示" onClick={() => void completeOnboarding(false)}><X size={16} /></IconButton></aside>}
+            <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={(project) => { setSettingsOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />
+          </>
         )}
       </main>
+      {onboardingOpen && <OnboardingWizard api={runtime.api} onComplete={(openImport) => void completeOnboarding(openImport)} onNotify={setToast} />}
       {toast && <div className="toast" role="status">{toast}<IconButton label="关闭通知" onClick={() => setToast(null)}><X size={15} /></IconButton></div>}
     </div>
   );

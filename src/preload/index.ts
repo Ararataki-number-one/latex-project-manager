@@ -20,6 +20,11 @@ const api: WorkbenchApi = {
     applyTemporaryCleanup: (projectId, planId) => ipcRenderer.invoke(IPC.libraryCleanupApply, projectId, planId),
     storageInfo: (projectId) => ipcRenderer.invoke(IPC.libraryStorageInfo, projectId)
   },
+  mobileIndex: {
+    read: (projectId) => ipcRenderer.invoke(IPC.mobileIndexRead, projectId),
+    candidates: (projectId) => ipcRenderer.invoke(IPC.mobileIndexCandidates, projectId),
+    write: (projectId, index) => ipcRenderer.invoke(IPC.mobileIndexWrite, projectId, index)
+  },
   github: {
     status: (projectId) => ipcRenderer.invoke(IPC.githubStatus, projectId),
     configure: (projectId, settings) => ipcRenderer.invoke(IPC.githubConfigure, projectId, settings),
@@ -32,7 +37,23 @@ const api: WorkbenchApi = {
     setVisibility: (projectId, visibility) => ipcRenderer.invoke(IPC.githubSetVisibility, projectId, visibility),
     openRemote: (projectId) => ipcRenderer.invoke(IPC.githubOpenRemote, projectId),
     openProductPage: () => ipcRenderer.invoke(IPC.githubOpenProductPage),
-    openCliDownload: () => ipcRenderer.invoke(IPC.githubOpenCliDownload)
+    openCliDownload: () => ipcRenderer.invoke(IPC.githubOpenCliDownload),
+    securityPreflight: (projectId, includeTracked) => ipcRenderer.invoke(IPC.githubSecurityPreflight, projectId, includeTracked),
+    acknowledgeWarnings: (projectId, paths) => ipcRenderer.invoke(IPC.githubAcknowledgeWarnings, projectId, paths),
+    history: (projectId, limit) => ipcRenderer.invoke(IPC.githubHistory, projectId, limit),
+    syncAll: () => ipcRenderer.invoke(IPC.githubSyncAll),
+    pauseAll: () => ipcRenderer.invoke(IPC.githubPauseAll),
+    resumeAll: () => ipcRenderer.invoke(IPC.githubResumeAll),
+    onEvent: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value);
+      ipcRenderer.on(IPC.githubEvent, handler);
+      return () => ipcRenderer.removeListener(IPC.githubEvent, handler);
+    }
+  },
+  runtime: {
+    settings: () => ipcRenderer.invoke(IPC.runtimeSettings),
+    setSettings: (settings) => ipcRenderer.invoke(IPC.runtimeSetSettings, settings),
+    environmentStatus: () => ipcRenderer.invoke(IPC.runtimeEnvironmentStatus)
   },
   updates: {
     status: () => ipcRenderer.invoke(IPC.updatesStatus),

@@ -14,15 +14,18 @@ import {
 import { IPC } from "../shared/ipc";
 import type {
   AppUpdateSettings,
+  AppRuntimeSettings,
   BuildEvent,
   BuildRequest,
   ExportResult,
   FileWriteRequest,
   GitHubCreateRepositoryOptions,
+  GitHubSyncEvent,
   GitHubRepositoryVisibility,
   GitHubSyncSettings,
   GitIdentity,
   MigrationPreview,
+  MobileProjectIndex,
   ProjectManifest,
   ProjectPdfInfo,
   ProjectSummary,
@@ -35,6 +38,7 @@ import { TemporaryCleanupService } from "./services/cleanup";
 import { ProjectAccessController, ProjectAccessError } from "./services/access-control";
 import { ProjectFileService } from "./services/files";
 import { GitHubSyncService } from "./services/github-sync";
+import { MobileIndexService } from "./services/mobile-index";
 import { AppUpdateService } from "./services/app-updates";
 import {
   getManifestPath,
@@ -56,6 +60,20 @@ import { detectToolchains, resolveToolchain } from "./services/toolchain";
 import { VsCodeService } from "./services/vscode";
 
 let registered = false;
+
+export interface IpcRuntimeController {
+  runtimeSettings(): AppRuntimeSettings;
+  syncAll(): Promise<void>;
+  pauseSync(): Promise<void>;
+  resumeSync(): Promise<void>;
+}
+
+interface IpcRuntimeOptions {
+  onSyncEvent?: (event: GitHubSyncEvent) => void;
+  onRuntimeSettingsChanged?: (settings: AppRuntimeSettings) => void;
+}
+
+let runtimeController: IpcRuntimeController | null = null;
 
 function summaryFromCandidate(candidate: ScanCandidate, projectId = createProjectId()): ProjectSummary {
   return {
@@ -114,9 +132,13 @@ function register<T extends unknown[], TResult>(
 
 export function registerIpcHandlers(
   getWindow: () => BrowserWindow | null,
-  isTrustedUrl: (url: string) => boolean = () => false
-): void {
-  if (registered) return;
+  isTrustedUrl: (url: string) => boolean = () => false,
+  options: IpcRuntimeOptions = {}
+): IpcRuntimeController {
+  if (registered) {
+    if (!runtimeController) throw new Error("IPC runtime is still initializing.");
+    return runtimeController;
+  }
   registered = true;
   currentWindowGetter = getWindow;
   currentTrustedUrl = isTrustedUrl;
@@ -165,7 +187,14 @@ export function registerIpcHandlers(
   const buildService = new BuildService();
   const syncTex = new SyncTexService();
   const files = new ProjectFileService();
-  const github = new GitHubSyncService(join(userData, "github-sync"));
+  const github = new GitHubSyncService(join(userData, "github-sync"), {
+    onEvent: (event) => {
+      catalog.appendSyncEvent(event);
+      const owner = getWindow();
+      if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.githubEvent, event);
+      options.onSyncEvent?.(event);
+    }
+  });
   const updates = new AppUpdateService(join(userData, "updates"), { currentVersion: app.getVersion() });
   const references = new ReferenceService({
     openPath: (path) => shell.openPath(path),
@@ -176,6 +205,8 @@ export function registerIpcHandlers(
   const projectOperations = new ProjectOperationsService();
   const cleanup = new TemporaryCleanupService();
   const storage = new ProjectStorageService();
+  const mobileIndex = new MobileIndexService();
+  if (catalog.runtimeSettings().syncPaused) void github.pauseAll();
   for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable)) {
     void github.attachProject(project.id, project.rootPath);
   }
@@ -370,6 +401,26 @@ export function registerIpcHandlers(
     return storage.measure(root);
   });
 
+  register(IPC.mobileIndexRead, async (projectId: string) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return mobileIndex.read(root);
+  });
+  register(IPC.mobileIndexCandidates, async (projectId: string) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    const manifest = await readProjectManifest(root);
+    const latest = await projectOperations.lastSuccessfulPdf(root, manifest);
+    return mobileIndex.candidates(root, manifest, latest);
+  });
+  register(IPC.mobileIndexWrite, async (projectId: string, index: MobileProjectIndex) => {
+    if (!index || typeof index !== "object" || Array.isArray(index)) throw new Error("移动端项目索引无效。");
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const manifest = await readProjectManifest(root);
+    requireManifestIdentity(root, manifest);
+    const written = await mobileIndex.write(root, manifest, index);
+    await github.notifyProjectChanged(project.id, root);
+    return written;
+  });
+
   register(IPC.githubStatus, async (projectId: string) => {
     const { root } = await requireCatalogProjectRoot(projectId);
     return github.status(projectId, root);
@@ -408,6 +459,47 @@ export function registerIpcHandlers(
   });
   register(IPC.githubOpenProductPage, () => shell.openExternal("https://github.com/Ararataki-number-one/latex-project-manager"));
   register(IPC.githubOpenCliDownload, () => shell.openExternal("https://cli.github.com/"));
+  register(IPC.githubSecurityPreflight, async (projectId: string, includeTracked = false) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return github.securityPreflight(projectId, root, Boolean(includeTracked));
+  });
+  register(IPC.githubAcknowledgeWarnings, async (projectId: string, paths: string[]) => {
+    if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string")) throw new Error("同步警告确认无效。");
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return github.acknowledgeWarnings(projectId, root, paths);
+  });
+  register(IPC.githubHistory, (projectId: string, limit?: number) => {
+    requireCatalogProject(projectId);
+    const safeLimit = typeof limit === "number" && Number.isFinite(limit) ? limit : 100;
+    return catalog.syncHistory(projectId, safeLimit);
+  });
+  register(IPC.githubSyncAll, () => github.syncAll(false));
+  register(IPC.githubPauseAll, async () => {
+    await github.pauseAll();
+    const settings = catalog.setRuntimeSettings({ ...catalog.runtimeSettings(), syncPaused: true });
+    options.onRuntimeSettingsChanged?.(settings);
+  });
+  register(IPC.githubResumeAll, async () => {
+    await github.resumeAll();
+    const settings = catalog.setRuntimeSettings({ ...catalog.runtimeSettings(), syncPaused: false });
+    options.onRuntimeSettingsChanged?.(settings);
+  });
+
+  register(IPC.runtimeSettings, () => catalog.runtimeSettings());
+  register(IPC.runtimeEnvironmentStatus, () => github.environmentStatus(userData));
+  register(IPC.runtimeSetSettings, async (settings: AppRuntimeSettings) => {
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)
+      || typeof settings.closeToTray !== "boolean" || typeof settings.onboardingCompleted !== "boolean"
+      || typeof settings.syncPaused !== "boolean") throw new Error("客户端运行设置无效。");
+    const previous = catalog.runtimeSettings();
+    const saved = catalog.setRuntimeSettings(settings);
+    if (saved.syncPaused !== previous.syncPaused) {
+      if (saved.syncPaused) await github.pauseAll();
+      else await github.resumeAll();
+    }
+    options.onRuntimeSettingsChanged?.(saved);
+    return saved;
+  });
 
   register(IPC.updatesStatus, () => updates.status());
   register(IPC.updatesSetSettings, async (settings: AppUpdateSettings) => {
@@ -686,8 +778,24 @@ export function registerIpcHandlers(
     if (error) throw new Error(error);
   });
 
+  runtimeController = {
+    runtimeSettings: () => catalog.runtimeSettings(),
+    syncAll: async () => { await github.syncAll(false); },
+    pauseSync: async () => {
+      await github.pauseAll();
+      const settings = catalog.setRuntimeSettings({ ...catalog.runtimeSettings(), syncPaused: true });
+      options.onRuntimeSettingsChanged?.(settings);
+    },
+    resumeSync: async () => {
+      await github.resumeAll();
+      const settings = catalog.setRuntimeSettings({ ...catalog.runtimeSettings(), syncPaused: false });
+      options.onRuntimeSettingsChanged?.(settings);
+    }
+  };
+
   app.once("before-quit", () => {
     void github.dispose();
     catalog.close();
   });
+  return runtimeController;
 }

@@ -24,7 +24,16 @@ import {
 } from "lucide-react";
 
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncState, GitHubSyncStatus, ProjectSummary, ReferenceDocumentInfo } from "@/shared/types";
+import type {
+  GitHubAccountStatus,
+  GitHubRepositoryVisibility,
+  GitHubSyncEvent,
+  GitHubSyncState,
+  GitHubSyncStatus,
+  ProjectSummary,
+  ReferenceDocumentInfo,
+  SyncSecurityFinding
+} from "@/shared/types";
 
 interface SharedProps {
   api: WorkbenchApi;
@@ -60,17 +69,20 @@ const syncStateLabel: Record<GitHubSyncState, string> = {
   notConfigured: "尚未连接",
   ready: "等待首次同步",
   changes: "有待同步变更",
+  queued: "排队中",
   syncing: "正在同步",
+  retrying: "等待重试",
   synced: "已同步",
   needsPull: "需要处理远端更新",
+  blocked: "安全阻止",
   error: "同步异常"
 };
 
 function SyncStateIcon({ state }: { state: GitHubSyncState }) {
-  if (state === "syncing") return <LoaderCircle size={19} className="spin" />;
+  if (state === "syncing" || state === "retrying" || state === "queued") return <LoaderCircle size={19} className={state === "syncing" ? "spin" : ""} />;
   if (state === "synced") return <CheckCircle2 size={19} />;
   if (state === "unavailable" || state === "error") return <CloudOff size={19} />;
-  if (state === "needsPull") return <AlertCircle size={19} />;
+  if (state === "needsPull" || state === "blocked") return <AlertCircle size={19} />;
   return <Cloud size={19} />;
 }
 
@@ -84,13 +96,18 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
   const [identityEmail, setIdentityEmail] = useState("");
   const [repositoryName, setRepositoryName] = useState(() => suggestedRepositoryName(project));
   const [visibility, setVisibility] = useState<GitHubRepositoryVisibility>("private");
+  const [history, setHistory] = useState<GitHubSyncEvent[]>([]);
   const [initialized, setInitialized] = useState(false);
   const [busy, setBusy] = useState<"configure" | "create" | "sync" | "toggle" | "identity" | "login" | "visibility" | null>(null);
 
   const refresh = useCallback(async (initializeDraft = false) => {
     try {
-      const next = await api.github.status(project.id);
+      const [next, events] = await Promise.all([
+        api.github.status(project.id),
+        api.github.history(project.id, 20)
+      ]);
       setStatus(next);
+      setHistory(events);
       if (initializeDraft || !initialized) {
         setRemoteUrl(next.remoteUrl);
         setAutoSync(next.configured ? next.autoSync : true);
@@ -120,6 +137,10 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
   }, [refresh]);
 
   useEffect(() => { void refreshAccount(); }, [refreshAccount]);
+
+  useEffect(() => api.github.onEvent((event) => {
+    if (event.projectId === project.id) void refresh(false);
+  }), [api, project.id, refresh]);
 
   useEffect(() => {
     if (!account?.cliAvailable || account.authenticated) return;
@@ -156,6 +177,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
     }
     setBusy("create");
     try {
+      if (!await confirmSecurityPreflight(true)) return;
       const next = await api.github.createRepository(project.id, {
         repositoryName: repositoryName.trim(),
         visibility,
@@ -180,12 +202,41 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
     if (nextVisibility === "public" && !window.confirm("设为公开后，任何人都能看到并下载仓库中的 LaTeX 源码和原始文稿。确定继续吗？")) return;
     setBusy("visibility");
     try {
+      if (nextVisibility === "public" && !await confirmSecurityPreflight(true)) return;
       const next = await api.github.setVisibility(project.id, nextVisibility);
       setStatus(next);
       setVisibility(nextVisibility);
       onNotify(`仓库已切换为${nextVisibility === "public" ? "公开" : "私有"}`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法修改仓库可见性");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmSecurityPreflight(includeTracked: boolean): Promise<boolean> {
+    const findings = await api.github.securityPreflight(project.id, includeTracked);
+    const blocked = findings.filter((finding) => finding.severity === "block");
+    if (blocked.length) {
+      onNotify(`安全检查已阻止上传：${blocked[0].path} · ${blocked[0].message}`);
+      return false;
+    }
+    const warnings = findings.filter((finding) => finding.severity === "warning");
+    if (!warnings.length) return true;
+    return window.confirm(`发现 ${warnings.length} 项需要注意的文件：\n\n${warnings.slice(0, 8).map((finding) => `• ${finding.path}：${finding.message}`).join("\n")}\n\n确认这些文件可以同步吗？`);
+  }
+
+  async function approveWarnings(findings: SyncSecurityFinding[]) {
+    const warnings = findings.filter((finding) => finding.severity === "warning");
+    if (!warnings.length || !window.confirm(`确认允许同步以下 ${warnings.length} 个普通风险文件吗？高风险密钥仍然不能放行。`)) return;
+    setBusy("sync");
+    try {
+      const next = await api.github.acknowledgeWarnings(project.id, warnings.map((finding) => finding.path));
+      setStatus(next);
+      onNotify(next.message ?? "已确认同步警告");
+      await refresh(false);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法确认同步警告");
     } finally {
       setBusy(null);
     }
@@ -286,7 +337,7 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
 
   if (!status) return <div className="resource-loading"><LoaderCircle size={20} className="spin" />正在检查 Git 与仓库状态…</div>;
 
-  const stateClass = status.state === "synced" ? "success" : status.state === "error" || status.state === "unavailable" ? "error" : status.state === "needsPull" ? "warning" : "neutral";
+  const stateClass = status.state === "synced" ? "success" : status.state === "error" || status.state === "unavailable" || status.state === "blocked" ? "error" : status.state === "needsPull" || status.state === "retrying" ? "warning" : "neutral";
   const hasDraftChanges = status.configured && (remoteUrl.trim() !== status.remoteUrl || useLfs !== status.useLfsForDocuments);
 
   return (
@@ -301,6 +352,16 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
         <div><strong>{syncStateLabel[status.state]}</strong><p>{status.message}</p></div>
         <span className="sync-status-time">上次成功：{formatTime(status.lastSyncAt)}</span>
       </div>
+
+      {status.securityFindings && status.securityFindings.length > 0 && (
+        <section className="resource-card sync-security-findings">
+          <header><div><h3>同步安全检查</h3><p>高风险内容不会上传；普通风险内容需要你确认一次。</p></div><ShieldCheck size={19} /></header>
+          <div className="security-finding-list">
+            {status.securityFindings.map((finding) => <div key={`${finding.kind}-${finding.path}`} className={finding.severity}><strong>{finding.severity === "block" ? "已阻止" : "需确认"}</strong><code>{finding.path}</code><span>{finding.message}</span></div>)}
+          </div>
+          {status.securityFindings.some((finding) => finding.severity === "warning") && !status.securityFindings.some((finding) => finding.severity === "block") && <button className="button secondary" onClick={() => void approveWarnings(status.securityFindings ?? [])} disabled={busy !== null}>确认普通警告并重试</button>}
+        </section>
+      )}
 
       <section className={`resource-card github-account-card ${account?.authenticated ? "account-ready" : "account-required"}`}>
         <header>
@@ -381,6 +442,11 @@ export function GitHubSyncTab({ api, project, isDemo, onNotify }: SharedProps) {
           </div>
         </section>
       )}
+
+      <section className="resource-card sync-history-card">
+        <header><div><h3>同步时间线</h3><p>最近的排队、同步、重试与安全阻止记录，只保存在本机。</p></div><GitBranch size={18} /></header>
+        {history.length ? <div className="sync-history-list">{history.map((event) => <div key={event.id} className={`level-${event.level}`}><span className="history-dot" /><div><strong>{syncStateLabel[event.state]}</strong><p>{event.message}</p></div><time>{formatTime(event.occurredAt)}</time></div>)}</div> : <p className="resource-empty-copy">尚无同步记录。</p>}
+      </section>
     </section>
   );
 }

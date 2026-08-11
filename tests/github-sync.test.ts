@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   GitHubSyncService,
+  decideSafeRemoteAction,
   normalizeGitHubRemoteUrl,
   type GitCommandResult,
   type GitCommandRunner
@@ -18,6 +19,14 @@ afterEach(async () => {
 });
 
 describe("GitHub synchronization", () => {
+  it("only permits an automatic fast-forward for a clean, non-diverged branch", () => {
+    expect(decideSafeRemoteAction(0, 0, 0)).toBe("none");
+    expect(decideSafeRemoteAction(2, 0, 1)).toBe("none");
+    expect(decideSafeRemoteAction(0, 1, 0)).toBe("fastForward");
+    expect(decideSafeRemoteAction(0, 1, 1)).toBe("blocked");
+    expect(decideSafeRemoteAction(1, 1, 0)).toBe("blocked");
+  });
+
   it("accepts only credential-free github.com repository URLs", () => {
     expect(normalizeGitHubRemoteUrl("https://github.com/example/notes")).toBe("https://github.com/example/notes.git");
     expect(normalizeGitHubRemoteUrl("git@github.com:example/notes.git")).toBe("git@github.com:example/notes.git");

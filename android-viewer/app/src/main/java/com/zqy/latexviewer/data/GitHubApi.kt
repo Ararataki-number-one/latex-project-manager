@@ -5,6 +5,8 @@ import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.MobilePdfOutput
+import com.zqy.latexviewer.model.MobileProjectIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -68,6 +70,20 @@ class GitHubApi {
             ?: throw GitHubApiException("文件路径不能为空")
         val url = "$API_ROOT/repos/${encode(repository.owner)}/${encode(repository.name)}/contents/${encodePath(normalizedPath)}?ref=${encode(repository.defaultBranch)}"
         parseContent(JSONObject(request(url, token, JSON_ACCEPT, MAX_JSON_BYTES)))
+    }
+
+    suspend fun mobileProjectIndex(
+        repository: GitHubRepository,
+        token: String?
+    ): MobileProjectIndex? = withContext(Dispatchers.IO) {
+        val metadata = runCatching { getContent(repository, MOBILE_INDEX_PATH, token) }.getOrNull()
+            ?: return@withContext null
+        if (metadata.kind != GitHubContentKind.FILE || metadata.size > MAX_MOBILE_INDEX_BYTES) {
+            return@withContext null
+        }
+        val raw = runCatching { readTextFile(repository, metadata, token) }.getOrNull()
+            ?: return@withContext null
+        parseMobileProjectIndex(raw)
     }
 
     suspend fun readTextFile(
@@ -160,6 +176,46 @@ class GitHubApi {
         if (lower in PLAIN_TEXT_NAMES) return true
         val extension = lower.substringAfterLast('.', "")
         return extension in TEXT_EXTENSIONS
+    }
+
+    internal fun parseMobileProjectIndex(raw: String): MobileProjectIndex? = runCatching {
+        val value = JSONObject(raw)
+        if (value.optInt("schemaVersion") != 1) return@runCatching null
+        val projectId = value.getString("projectId").trim()
+        val displayName = value.getString("name").trim()
+        val updatedAt = value.getString("updatedAt").trim()
+        val defaultOutputId = value.getString("defaultOutputId").trim()
+        if (projectId.isEmpty() || displayName.isEmpty() || updatedAt.isEmpty() || defaultOutputId.isEmpty()) {
+            return@runCatching null
+        }
+        val rawOutputs = value.getJSONArray("outputs")
+        val outputs = buildList {
+            for (index in 0 until rawOutputs.length()) {
+                val output = rawOutputs.getJSONObject(index)
+                val parsed = MobilePdfOutput(
+                    id = output.getString("id").trim(),
+                    targetId = output.getString("targetId").trim(),
+                    name = output.getString("name").trim(),
+                    entry = output.getString("entry").trim(),
+                    profileId = output.optString("profileId").trim().takeIf { it.isNotEmpty() && it != "null" },
+                    pdfPath = output.getString("pdfPath").trim()
+                )
+                if (parsed.id.isEmpty() || parsed.targetId.isEmpty() || parsed.name.isEmpty()
+                    || parsed.entry.isEmpty() || !isSafePdfPath(parsed.pdfPath)
+                ) return@runCatching null
+                add(parsed)
+            }
+        }
+        if (outputs.isEmpty() || outputs.map(MobilePdfOutput::id).distinct().size != outputs.size
+            || outputs.none { it.id == defaultOutputId }
+        ) return@runCatching null
+        MobileProjectIndex(1, projectId, displayName, updatedAt, defaultOutputId, outputs)
+    }.getOrNull()
+
+    private fun isSafePdfPath(path: String): Boolean {
+        if (path.isBlank() || path.startsWith('/') || path.startsWith('\\') || WINDOWS_DRIVE.matches(path)) return false
+        val parts = path.replace('\\', '/').split('/')
+        return parts.none { it.isBlank() || it == "." || it == ".." } && path.endsWith(".pdf", ignoreCase = true)
     }
 
     private fun trustedGitHubDownloadUrl(value: String?): String? {
@@ -345,10 +401,13 @@ class GitHubApi {
         const val MAX_ERROR_BYTES = 128 * 1024
         const val MAX_INLINE_FILE_BYTES = 1_500_000
         const val MAX_REPOSITORY_PAGES = 10
+        const val MAX_MOBILE_INDEX_BYTES = 256_000L
         const val MAX_DOWNLOAD_BYTES = 4L * 1024 * 1024 * 1024
+        const val MOBILE_INDEX_PATH = ".latex-project.json"
         const val UPDATE_REPOSITORY = "Ararataki-number-one/latex-project-manager"
         val ANDROID_VERSION = Regex("(?i)([0-9]+\\.[0-9]+\\.[0-9]+)(?=\\.apk$)")
         val REPOSITORY_PART = Regex("[A-Za-z0-9_.-]+")
+        val WINDOWS_DRIVE = Regex("^[A-Za-z]:[/\\\\].*")
         val PLAIN_TEXT_NAMES = setOf("readme", "license", "makefile", "latexmkrc", ".gitignore", ".gitattributes")
         val TEXT_EXTENSIONS = setOf(
             "tex", "bib", "cls", "sty", "bst", "bbx", "cbx", "lbx", "dtx", "ins",

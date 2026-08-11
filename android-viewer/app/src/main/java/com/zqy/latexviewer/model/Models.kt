@@ -42,7 +42,43 @@ data class PdfDocument(
     val path: String,
     val htmlUrl: String?,
     val localPath: String? = null,
-    val contentUri: String? = null
+    val contentUri: String? = null,
+    val repositoryFullName: String? = null,
+    val sha: String? = null,
+    val initialPage: Int = 0
+)
+
+data class MobilePdfOutput(
+    val id: String,
+    val targetId: String,
+    val name: String,
+    val entry: String,
+    val profileId: String?,
+    val pdfPath: String
+)
+
+data class MobileProjectIndex(
+    val schemaVersion: Int,
+    val projectId: String,
+    val name: String,
+    val updatedAt: String,
+    val defaultOutputId: String,
+    val outputs: List<MobilePdfOutput>
+) {
+    val defaultOutput: MobilePdfOutput?
+        get() = outputs.firstOrNull { it.id == defaultOutputId }
+}
+
+data class ReadingProgress(
+    val schemaVersion: Int = 1,
+    val repositoryFullName: String,
+    val projectName: String,
+    val pdfPath: String,
+    val pdfName: String,
+    val sha: String,
+    val pageIndex: Int,
+    val pageCount: Int,
+    val lastReadAt: Long
 )
 
 data class DownloadedFile(
