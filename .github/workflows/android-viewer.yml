@@ -58,6 +58,7 @@ jobs:
           ./gradlew --no-daemon testDebugUnitTest
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             ./gradlew --no-daemon assembleRelease
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
           else
             ./gradlew --no-daemon assembleDebug
           fi
