@@ -38,7 +38,11 @@ class GitHubApiReleaseTest {
                     .setBody("{}")
             )
             val root = server.url("/").toString().removeSuffix("/")
-            val api = GitHubApi(apiRoot = root, githubRoot = root)
+            // This test exercises the stable `/releases/latest` contract in
+            // both product flavors. Do not inherit the Beta BuildConfig
+            // channel, otherwise the fixture provides the wrong endpoint and
+            // the second takeRequest would wait forever.
+            val api = GitHubApi(apiRoot = root, githubRoot = root, releaseChannel = "stable")
 
             val failure = runCatching { api.latestAndroidRelease() }.exceptionOrNull()
 
