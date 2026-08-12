@@ -61,7 +61,7 @@ jobs:
             android-viewer/*.gradle.kts
             android-viewer/app/*.gradle.kts
       - uses: android-actions/setup-android@v3
-      - run: sdkmanager "platforms;android-37" "build-tools;36.0.0"
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Restore fixed Android signing identity
         shell: bash
         env:

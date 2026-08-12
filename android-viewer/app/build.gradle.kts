@@ -16,7 +16,7 @@ fun firstPrivateKeyAlias(path: String, password: String): String {
 
 android {
     namespace = "com.zqy.latexviewer"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.zqy.latexviewer"
@@ -92,7 +92,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("dev.chrisbanes.haze:haze:1.7.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    implementation("io.legere:pdfiumandroid:2.0.3")
+    // 2.0.3 declares minCompileSdk 37, which is not yet available on the
+    // stable Android SDK channel used by GitHub Actions. 2.0.2 exposes the
+    // same v2 API used by the reader while remaining compatible with API 36.
+    implementation("io.legere:pdfiumandroid:2.0.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("androidx.room:room-testing:2.8.4")
