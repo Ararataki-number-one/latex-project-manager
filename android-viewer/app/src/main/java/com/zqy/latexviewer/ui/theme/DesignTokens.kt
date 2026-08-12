@@ -16,10 +16,11 @@ object AppSpacing {
     val lg = 20.dp
     val xl = 24.dp
     val xxl = 32.dp
-    val section = 40.dp
+    val section = 32.dp
 
-    val screenHorizontal = 20.dp
-    val screenVertical = 12.dp
+    /** TeXFlow v8 uses a generous page gutter without wasting narrow screens. */
+    val screenHorizontal = 24.dp
+    val screenVertical = 8.dp
 
     // Compatibility aliases for screens that adopted the first token set.
     val minimumTouchTarget = AppSize.minimumTouchTarget
@@ -29,14 +30,14 @@ object AppSpacing {
 object AppSize {
     val minimumTouchTarget = 48.dp
     val topBarHeight = 56.dp
-    val bottomBarHeight = 72.dp
+    val bottomBarHeight = 64.dp
     val bottomIndicatorWidth = 56.dp
     val bottomIndicatorHeight = 32.dp
     val searchHeight = 48.dp
-    val listRowCompact = 56.dp
-    val listRow = 64.dp
-    val projectRow = 72.dp
-    val listIconContainer = 40.dp
+    val listRowCompact = 48.dp
+    val listRow = 56.dp
+    val projectRow = 64.dp
+    val listIconContainer = 38.dp
     val listIcon = 22.dp
     val dividerInset = 56.dp
 }
@@ -44,35 +45,38 @@ object AppSize {
 object AppRadius {
     val icon = 10.dp
     val control = 12.dp
-    val search = 18.dp
+    val search = 14.dp
+    val row = 14.dp
+    val group = 18.dp
     val card = 18.dp
-    val floating = 26.dp
-    val sheet = 28.dp
+    val floating = 20.dp
+    val sheet = 24.dp
     val pill = 999.dp
 }
 
 object AppElevation {
     val none = 0.dp
-    val floating = 8.dp
+    val row = 1.dp
+    val floating = 6.dp
     val dialog = 12.dp
 }
 
 /** Optical layers for the Android Liquid Glass approximation. */
 object AppGlass {
-    const val lightTopAlpha = 0.82f
-    const val lightBottomAlpha = 0.62f
-    const val darkTopAlpha = 0.74f
-    const val darkBottomAlpha = 0.56f
-    const val highlightAlpha = 0.72f
-    const val lowlightAlpha = 0.16f
+    const val lightTopAlpha = 0.92f
+    const val lightBottomAlpha = 0.84f
+    const val darkTopAlpha = 0.90f
+    const val darkBottomAlpha = 0.82f
+    const val highlightAlpha = 0.58f
+    const val lowlightAlpha = 0.08f
 
     val borderWidth = 1.dp
     val navigationInset = 12.dp
     val controlInset = 8.dp
-    val toolbarRadius = 26.dp
+    val toolbarRadius = 20.dp
     val capsuleRadius = 999.dp
-    val navigationElevation = 10.dp
-    val controlElevation = 7.dp
+    val navigationElevation = 6.dp
+    val controlElevation = 4.dp
 }
 
 /**

@@ -169,4 +169,4 @@ Windows 安装版和便携版都包含 Electron 运行时，不捆绑 TeX Live�
 pnpm package:windows:beta
 ```
 
-GitHub Actions 的 Windows、Android 和联合发布工作流都要求显式选择 `stable` 或 `beta`。`v1.0.0-beta.2` 标签只会创建 GitHub Pre-release；正式标签仍创建 Latest Release。Beta 与正式版使用不同的工作流产物名和附件名，避免相互覆盖。
+GitHub Actions 的 Windows、Android 和联合发布工作流都要求显式选择 `stable` 或 `beta`。`v1.0.0-beta.3` 标签只会创建 GitHub Pre-release；正式标签仍创建 Latest Release。Beta 与正式版使用不同的工作流产物名和附件名，避免相互覆盖。

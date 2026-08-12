@@ -1,6 +1,7 @@
 package com.zqy.latexviewer.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,13 +53,18 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.zqy.latexviewer.ui.theme.AppRadius
+import com.zqy.latexviewer.ui.theme.AppSize
+import com.zqy.latexviewer.ui.theme.AppSpacing
 
-/** Root-screen header for the Paper Library visual language. */
+/** Transparent root-screen header for the TeXFlow v8 visual language. */
 @Composable
 internal fun PaperRootHeader(
     title: String,
@@ -68,8 +74,8 @@ internal fun PaperRootHeader(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 64.dp)
-            .padding(start = 20.dp, end = 4.dp),
+            .heightIn(min = AppSize.topBarHeight)
+            .padding(start = AppSpacing.screenHorizontal, end = AppSpacing.xxs),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -78,7 +84,12 @@ internal fun PaperRootHeader(
                 .weight(1f)
                 .semantics { heading() },
             color = MaterialTheme.colorScheme.onBackground,
-            style = MaterialTheme.typography.headlineLarge,
+            style = MaterialTheme.typography.headlineLarge.copy(
+                fontFamily = FontFamily.Serif,
+                fontSize = 30.sp,
+                lineHeight = 36.sp,
+                fontWeight = FontWeight.Bold
+            ),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
@@ -91,7 +102,7 @@ internal fun PaperRootHeader(
     }
 }
 
-/** Quiet section label used above flat lists rather than another card. */
+/** Quiet serif section label used above lists rather than another card. */
 @Composable
 internal fun PaperSectionHeader(
     title: String,
@@ -101,16 +112,21 @@ internal fun PaperSectionHeader(
         text = title,
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 16.dp, bottom = 8.dp)
+            .padding(top = 18.dp, bottom = 9.dp)
             .semantics { heading() },
         color = MaterialTheme.colorScheme.onSurface,
-        style = MaterialTheme.typography.titleSmall,
+        style = MaterialTheme.typography.titleMedium.copy(
+            fontFamily = FontFamily.Serif,
+            fontSize = 18.sp,
+            lineHeight = 24.sp,
+            fontWeight = FontWeight.Bold
+        ),
         maxLines = 1,
         overflow = TextOverflow.Ellipsis
     )
 }
 
-/** A 48 dp filled search field with no persistent Material outline. */
+/** A quiet 48 dp search field with the prototype's white paper and hairline edge. */
 @Composable
 internal fun PaperSearchField(
     value: String,
@@ -123,10 +139,15 @@ internal fun PaperSearchField(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .alpha(if (enabled) 1f else 0.5f),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+            .heightIn(min = AppSize.searchHeight)
+            .alpha(if (enabled) 1f else 0.5f)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+                shape = RoundedCornerShape(AppRadius.search)
+            ),
+        shape = RoundedCornerShape(AppRadius.search),
+        color = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

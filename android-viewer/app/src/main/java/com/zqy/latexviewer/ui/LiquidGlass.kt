@@ -23,9 +23,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -54,6 +56,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.zqy.latexviewer.model.GlassMode
+import com.zqy.latexviewer.ui.theme.AppElevation
+import com.zqy.latexviewer.ui.theme.AppGlass
+import com.zqy.latexviewer.ui.theme.AppRadius
+import com.zqy.latexviewer.ui.theme.AppSize
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
@@ -107,34 +113,34 @@ internal fun Modifier.liquidGlass(
         (glassMode == LiquidGlassMode.FULL || !lowRamDevice)
 
     val backdropTint = if (dark) {
-        Color(0xFF1C1C1E).copy(alpha = 0.66f)
+        Color(0xFF1C1C1E).copy(alpha = AppGlass.darkBottomAlpha)
     } else {
-        Color.White.copy(alpha = 0.62f)
+        Color.White.copy(alpha = AppGlass.lightBottomAlpha)
     }
     val opaqueFallback = if (dark) {
         Color(0xFF242426)
     } else {
-        Color(0xFFF7F7F8)
+        Color(0xFFFCFCFB)
     }
     val hazeStyle = HazeStyle(
         backgroundColor = colors.surface,
         tint = HazeTint(backdropTint),
-        blurRadius = 24.dp,
-        noiseFactor = if (dark) 0.035f else 0.025f,
+        blurRadius = 18.dp,
+        noiseFactor = if (dark) 0.020f else 0.012f,
         fallbackTint = HazeTint(opaqueFallback)
     )
     val highlightBorder = Brush.linearGradient(
         colors = if (dark) {
             listOf(
-                Color.White.copy(alpha = 0.28f),
-                colors.outline.copy(alpha = 0.34f),
-                Color.Black.copy(alpha = 0.22f)
+                Color.White.copy(alpha = 0.20f),
+                colors.outline.copy(alpha = 0.28f),
+                Color.Black.copy(alpha = 0.16f)
             )
         } else {
             listOf(
-                Color.White.copy(alpha = 0.96f),
-                colors.outlineVariant.copy(alpha = 0.72f),
-                colors.outline.copy(alpha = 0.24f)
+                Color.White.copy(alpha = 0.82f),
+                colors.outlineVariant.copy(alpha = 0.92f),
+                colors.outline.copy(alpha = 0.16f)
             )
         }
     )
@@ -166,8 +172,8 @@ internal fun Modifier.liquidGlass(
 @Composable
 internal fun LiquidGlassSurface(
     modifier: Modifier = Modifier,
-    shape: Shape = RoundedCornerShape(22.dp),
-    elevation: Dp = 8.dp,
+    shape: Shape = RoundedCornerShape(AppRadius.floating),
+    elevation: Dp = AppElevation.floating,
     enabled: Boolean = true,
     onClick: (() -> Unit)? = null,
     onClickLabel: String? = null,
@@ -183,15 +189,15 @@ internal fun LiquidGlassSurface(
     val sheen = Brush.verticalGradient(
         colors = if (dark) {
             listOf(
-                Color.White.copy(alpha = 0.10f),
+                Color.White.copy(alpha = 0.07f),
                 Color.Transparent,
-                Color.Black.copy(alpha = 0.08f)
+                Color.Black.copy(alpha = 0.05f)
             )
         } else {
             listOf(
-                Color.White.copy(alpha = 0.24f),
+                Color.White.copy(alpha = 0.14f),
                 Color.Transparent,
-                Color.Black.copy(alpha = 0.025f)
+                Color.Black.copy(alpha = 0.018f)
             )
         }
     )
@@ -252,8 +258,8 @@ internal fun LiquidGlassTopBar(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 64.dp),
-        shape = RoundedCornerShape(22.dp),
-        elevation = 8.dp,
+        shape = RoundedCornerShape(AppRadius.floating),
+        elevation = AppElevation.floating,
         contentPadding = PaddingValues(horizontal = 4.dp),
         hazeState = hazeState,
         backdropBlurEnabled = backdropBlurEnabled
@@ -296,66 +302,69 @@ internal fun LiquidGlassTopBar(
     }
 }
 
-/** Three-destination floating glass bar with no Material selection capsule. */
+/**
+ * Five real destinations from the TeXFlow v8 mobile information architecture.
+ * Callers own navigation and fallback behaviour; this component never invents
+ * a project, file, or reading destination.
+ */
 @Composable
 internal fun LiquidGlassBottomBar(
     selected: String,
     downloadActive: Boolean,
-    onHome: () -> Unit,
     onProjects: () -> Unit,
+    onFiles: () -> Unit,
+    onReader: () -> Unit,
     onDownloads: () -> Unit,
+    onSettings: () -> Unit,
     modifier: Modifier = Modifier,
     hazeState: HazeState? = null,
     backdropBlurEnabled: Boolean = true
 ) {
     val selectedKey = when (selected.lowercase()) {
-        "home", "read", "reading" -> LIQUID_HOME
-        "project", "projects", "repository", "repositories" -> LIQUID_PROJECTS
+        "project", "projects", "repository", "repositories", "project_home", "projecthome" -> LIQUID_PROJECTS
+        "file", "files", "text", "source" -> LIQUID_FILES
+        "home", "read", "reader", "reading", "pdf" -> LIQUID_READER
         "download", "downloads" -> LIQUID_DOWNLOADS
+        "setting", "settings" -> LIQUID_SETTINGS
         else -> ""
     }
 
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+    LiquidGlassNavigationFrame(
+        modifier = modifier,
+        hazeState = hazeState,
+        backdropBlurEnabled = backdropBlurEnabled
     ) {
-        LiquidGlassSurface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 64.dp),
-            shape = RoundedCornerShape(26.dp),
-            elevation = 10.dp,
-            hazeState = hazeState,
-            backdropBlurEnabled = backdropBlurEnabled
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight()
-            ) {
-                LiquidGlassBottomItem(
-                    label = "阅读",
-                    icon = Icons.Outlined.Home,
-                    selected = selectedKey == LIQUID_HOME,
-                    onClick = onHome
-                )
-                LiquidGlassBottomItem(
-                    label = "项目",
-                    icon = Icons.Outlined.Folder,
-                    selected = selectedKey == LIQUID_PROJECTS,
-                    onClick = onProjects
-                )
-                LiquidGlassBottomItem(
-                    label = "下载",
-                    icon = Icons.Outlined.Download,
-                    selected = selectedKey == LIQUID_DOWNLOADS,
-                    statusActive = downloadActive,
-                    onClick = onDownloads
-                )
-            }
-        }
+        LiquidGlassBottomItem(
+            label = "项目",
+            icon = Icons.Outlined.Folder,
+            selected = selectedKey == LIQUID_PROJECTS,
+            onClick = onProjects
+        )
+        LiquidGlassBottomItem(
+            label = "文件",
+            icon = Icons.Outlined.Description,
+            selected = selectedKey == LIQUID_FILES,
+            onClick = onFiles
+        )
+        LiquidGlassBottomItem(
+            label = "阅读",
+            icon = Icons.Outlined.MenuBook,
+            selected = selectedKey == LIQUID_READER,
+            onClick = onReader
+        )
+        LiquidGlassBottomItem(
+            label = "下载",
+            icon = Icons.Outlined.Download,
+            selected = selectedKey == LIQUID_DOWNLOADS,
+            statusActive = downloadActive,
+            onClick = onDownloads
+        )
+        LiquidGlassBottomItem(
+            label = "设置",
+            icon = Icons.Outlined.Settings,
+            selected = selectedKey == LIQUID_SETTINGS,
+            onClick = onSettings
+        )
     }
 }
 
@@ -363,28 +372,59 @@ internal fun LiquidGlassBottomBar(
 internal fun LiquidGlassBottomBar(
     selected: ViewerScreen,
     downloadActive: Boolean,
-    onHome: () -> Unit,
     onProjects: () -> Unit,
+    onFiles: () -> Unit,
+    onReader: () -> Unit,
     onDownloads: () -> Unit,
+    onSettings: () -> Unit,
     modifier: Modifier = Modifier,
     hazeState: HazeState? = null,
     backdropBlurEnabled: Boolean = true
 ) {
     LiquidGlassBottomBar(
-        selected = when (selected) {
-            ViewerScreen.HOME -> LIQUID_HOME
-            ViewerScreen.REPOSITORIES -> LIQUID_PROJECTS
-            ViewerScreen.DOWNLOADS -> LIQUID_DOWNLOADS
-            else -> ""
-        },
+        selected = selected.name,
         downloadActive = downloadActive,
-        onHome = onHome,
         onProjects = onProjects,
+        onFiles = onFiles,
+        onReader = onReader,
         onDownloads = onDownloads,
+        onSettings = onSettings,
         modifier = modifier,
         hazeState = hazeState,
         backdropBlurEnabled = backdropBlurEnabled
     )
+}
+
+@Composable
+private fun LiquidGlassNavigationFrame(
+    modifier: Modifier,
+    hazeState: HazeState?,
+    backdropBlurEnabled: Boolean,
+    content: @Composable RowScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = AppGlass.navigationInset, vertical = AppGlass.controlInset)
+    ) {
+        LiquidGlassSurface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = AppSize.bottomBarHeight),
+            shape = RoundedCornerShape(AppRadius.floating),
+            elevation = AppGlass.navigationElevation,
+            hazeState = hazeState,
+            backdropBlurEnabled = backdropBlurEnabled
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(),
+                content = content
+            )
+        }
+    }
 }
 
 @Composable
@@ -396,7 +436,7 @@ private fun RowScope.LiquidGlassBottomItem(
     statusActive: Boolean = false
 ) {
     val foreground = if (selected) {
-        MaterialTheme.colorScheme.primary
+        MaterialTheme.colorScheme.onSurface
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
@@ -405,7 +445,20 @@ private fun RowScope.LiquidGlassBottomItem(
         modifier = Modifier
             .weight(1f)
             .fillMaxHeight()
-            .semantics(mergeDescendants = true) {}
+            .padding(4.dp)
+            .shadow(
+                elevation = if (selected) 2.dp else 0.dp,
+                shape = RoundedCornerShape(15.dp),
+                clip = false
+            )
+            .clip(RoundedCornerShape(15.dp))
+            .background(
+                color = if (selected) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f) else Color.Transparent,
+                shape = RoundedCornerShape(15.dp)
+            )
+            .semantics(mergeDescendants = true) {
+                contentDescription = if (statusActive) "$label，正在下载" else label
+            }
             .selectable(
                 selected = selected,
                 onClick = onClick,
@@ -413,18 +466,6 @@ private fun RowScope.LiquidGlassBottomItem(
             ),
         contentAlignment = Alignment.Center
     ) {
-        if (selected) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .width(20.dp)
-                    .height(2.dp)
-                    .background(
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.92f),
-                        shape = RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp)
-                    )
-            )
-        }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 modifier = Modifier.size(28.dp),
@@ -433,7 +474,7 @@ private fun RowScope.LiquidGlassBottomItem(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier.size(20.dp),
                     tint = foreground
                 )
                 if (statusActive) {
@@ -441,7 +482,6 @@ private fun RowScope.LiquidGlassBottomItem(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .size(7.dp)
-                            .semantics { contentDescription = "正在下载" }
                             .background(
                                 color = MaterialTheme.colorScheme.secondary,
                                 shape = RoundedCornerShape(999.dp)
@@ -460,6 +500,8 @@ private fun RowScope.LiquidGlassBottomItem(
     }
 }
 
-private const val LIQUID_HOME = "home"
 private const val LIQUID_PROJECTS = "projects"
+private const val LIQUID_FILES = "files"
+private const val LIQUID_READER = "reader"
 private const val LIQUID_DOWNLOADS = "downloads"
+private const val LIQUID_SETTINGS = "settings"

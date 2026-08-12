@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.annotation.RequiresApi
 import androidx.core.content.FileProvider
 import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.DownloadedFile
@@ -629,6 +630,7 @@ class DownloadStore(private val context: Context) {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private suspend fun saveWithMediaStore(
         displayName: String,
         mimeType: String,

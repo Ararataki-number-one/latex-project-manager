@@ -68,7 +68,7 @@ data class TransferUiState(
 )
 
 data class ViewerUiState(
-    val screen: ViewerScreen = ViewerScreen.HOME,
+    val screen: ViewerScreen = ViewerScreen.REPOSITORIES,
     val tokenStored: Boolean = false,
     val repositories: List<GitHubRepository> = emptyList(),
     val mobileIndexes: Map<String, MobileProjectIndex> = emptyMap(),
@@ -129,8 +129,8 @@ class ViewerViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(initialState())
     val state: StateFlow<ViewerUiState> = _state.asStateFlow()
-    private var settingsReturnScreen = ViewerScreen.HOME
-    private var viewerReturnScreen = ViewerScreen.HOME
+    private var settingsReturnScreen = ViewerScreen.REPOSITORIES
+    private var viewerReturnScreen = ViewerScreen.REPOSITORIES
     private var pendingPdfOpenKey: String? = null
     private val seenFinishedDownloads = mutableSetOf<String>()
     private val transferSamples = mutableMapOf<String, Pair<Long, Long>>()

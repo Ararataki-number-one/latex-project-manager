@@ -24,7 +24,7 @@ describe("parallel release channels", () => {
   it("keeps stable 0.11.1 metadata separate from 1.0 beta", () => {
     const mainProcess = readFileSync(join(root, "src/main/index.ts"), "utf8");
     expect(packageMetadata.version).toBe("0.11.1");
-    expect(packageMetadata.config.betaVersion).toBe("1.0.0-beta.2");
+    expect(packageMetadata.config.betaVersion).toBe("1.0.0-beta.3");
     expect(betaBuilder.appId).toBe("local.latex.workbench.beta");
     expect(betaBuilder.appId).not.toBe(packageMetadata.build.appId);
     expect(betaBuilder.productName).not.toBe(packageMetadata.build.productName);
@@ -46,7 +46,7 @@ describe("parallel release channels", () => {
     expect(gradle).toContain('versionName = "0.11.1"');
     expect(gradle).toContain('create("beta")');
     expect(gradle).toContain('applicationIdSuffix = ".beta"');
-    expect(gradle).toContain('versionName = "1.0.0-beta.2"');
+    expect(gradle).toContain('versionName = "1.0.0-beta.3"');
     expect(betaLabel).toContain("LaTeX 项目 Beta");
   });
 
