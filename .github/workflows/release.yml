@@ -1,6 +1,7 @@
 name: Release v0.11 desktop and Android
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -80,7 +81,9 @@ jobs:
         env:
           GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
         run: |
-          test -n "$GITHUB_OAUTH_CLIENT_ID"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            test -n "$GITHUB_OAUTH_CLIENT_ID"
+          fi
           chmod +x gradlew
           ./gradlew --no-daemon testDebugUnitTest
           ./gradlew --no-daemon assembleRelease
@@ -103,6 +106,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [windows, android]
     runs-on: ubuntu-latest
     timeout-minutes: 15
