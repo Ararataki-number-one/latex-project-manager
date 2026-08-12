@@ -1,6 +1,5 @@
 package com.zqy.latexviewer.data
 
-import android.net.Uri
 import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
@@ -533,7 +532,23 @@ class GitHubApi {
         return parts[0] to parts[1].removeSuffix(".git")
     }
 
-    private fun encode(value: String): String = Uri.encode(value)
+    private fun encode(value: String): String = buildString {
+        value.toByteArray(Charsets.UTF_8).forEach { byte ->
+            val unsigned = byte.toInt() and 0xff
+            val unreserved = unsigned in 'a'.code..'z'.code ||
+                unsigned in 'A'.code..'Z'.code ||
+                unsigned in '0'.code..'9'.code ||
+                unsigned == '-'.code || unsigned == '_'.code ||
+                unsigned == '.'.code || unsigned == '~'.code
+            if (unreserved) {
+                append(unsigned.toChar())
+            } else {
+                append('%')
+                append(HEX_DIGITS[unsigned ushr 4])
+                append(HEX_DIGITS[unsigned and 0x0f])
+            }
+        }
+    }
 
     private fun encodePath(path: String): String = path
         .split('/')
@@ -542,6 +557,7 @@ class GitHubApi {
 
     private companion object {
         const val API_ROOT = "https://api.github.com"
+        const val HEX_DIGITS = "0123456789ABCDEF"
         const val API_VERSION = "2026-03-10"
         const val JSON_ACCEPT = "application/vnd.github+json"
         const val RAW_ACCEPT = "application/vnd.github.raw+json"

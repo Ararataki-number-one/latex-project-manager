@@ -61,7 +61,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import kotlin.math.min
-import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 private data class PdfRendererHandle(
@@ -359,8 +358,10 @@ internal fun calculateRenderSize(
     val widthScale = min(requestedWidth, maximumWidth).toDouble() / pageWidth.toDouble()
     val pixelScale = sqrt(maximumPixels.toDouble() / (pageWidth.toLong() * pageHeight.toLong()).toDouble())
     val scale = min(widthScale, pixelScale).coerceAtLeast(1.0 / maxOf(pageWidth, pageHeight))
-    return (pageWidth * scale).roundToInt().coerceAtLeast(1) to
-        (pageHeight * scale).roundToInt().coerceAtLeast(1)
+    val targetWidth = (pageWidth * scale).toInt().coerceAtLeast(1)
+    val proportionalHeight = (pageHeight * scale).toInt().coerceAtLeast(1)
+    val pixelBoundHeight = (maximumPixels / targetWidth).toInt().coerceAtLeast(1)
+    return targetWidth to min(proportionalHeight, pixelBoundHeight)
 }
 
 private const val MAX_RENDER_WIDTH = 1200
