@@ -13,6 +13,7 @@ import com.zqy.latexviewer.data.DownloadStore
 import com.zqy.latexviewer.data.GitHubApi
 import com.zqy.latexviewer.data.SecureTokenStore
 import com.zqy.latexviewer.model.AndroidReleaseAsset
+import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
@@ -69,7 +70,9 @@ data class ViewerUiState(
     val completedDownload: DownloadedFile? = null,
     val completedDownloadWorkId: String? = null,
     val downloadedFiles: List<DownloadedFile> = emptyList(),
+    val downloadAvailability: Map<String, Boolean> = emptyMap(),
     val externalFile: DownloadedFile? = null,
+    val shareFile: DownloadedFile? = null,
     val loading: Boolean = false,
     val transfer: TransferUiState? = null,
     val transferPanelVisible: Boolean = true,
@@ -108,6 +111,7 @@ class ViewerViewModel(
         observeBackgroundDownloads()
         loadRepositories()
         refreshCacheUsage()
+        refreshDownloadHistoryAvailability()
         if (_state.value.autoCheckUpdates) checkForUpdates(silent = true)
     }
 
@@ -155,6 +159,7 @@ class ViewerViewModel(
                 error = null
             )
         }
+        refreshDownloadHistoryAvailability()
     }
 
     fun loadRepositories() {
@@ -335,6 +340,10 @@ class ViewerViewModel(
     }
 
     fun openDownloaded(downloaded: DownloadedFile) {
+        if (_state.value.downloadAvailability[downloaded.stableId] == false) {
+            showError("文件已被移动、删除或缓存已清理，可以移除这条历史记录后重新下载")
+            return
+        }
         viewerReturnScreen = _state.value.screen
         when {
             isPdfFile(downloaded.name) -> launchRequest {
@@ -368,19 +377,68 @@ class ViewerViewModel(
         }
     }
 
-    private fun recordDownload(downloaded: DownloadedFile, workId: String) {
-        preferences.saveDownloadedFile(downloaded)
+    private fun recordDownload(downloaded: DownloadedFile, workId: String, announce: Boolean = true) {
+        val historyItem = downloaded.copy(
+            id = workId,
+            downloadedAt = System.currentTimeMillis()
+        )
+        preferences.saveDownloadedFile(historyItem)
         _state.update {
             it.copy(
-                completedDownload = it.completedDownload ?: downloaded,
-                completedDownloadWorkId = it.completedDownloadWorkId ?: workId,
-                downloadedFiles = (listOf(downloaded) + it.downloadedFiles.filterNot { item -> item.contentUri == downloaded.contentUri }).take(30)
+                completedDownload = if (announce) it.completedDownload ?: historyItem else it.completedDownload,
+                completedDownloadWorkId = if (announce) it.completedDownloadWorkId ?: workId else it.completedDownloadWorkId,
+                downloadedFiles = preferences.downloadedFiles(),
+                downloadAvailability = it.downloadAvailability + (historyItem.stableId to true)
             )
         }
     }
 
     fun consumeExternalFile() {
         _state.update { it.copy(externalFile = null) }
+    }
+
+    fun shareDownloaded(downloaded: DownloadedFile) {
+        viewModelScope.launch {
+            if (!downloadStore.isDownloadedFileAvailable(downloaded)) {
+                _state.update {
+                    it.copy(downloadAvailability = it.downloadAvailability + (downloaded.stableId to false))
+                }
+                showError("文件已被移动、删除或缓存已清理，无法分享")
+                return@launch
+            }
+            _state.update { it.copy(shareFile = downloaded) }
+        }
+    }
+
+    fun consumeShareFile() {
+        _state.update { it.copy(shareFile = null) }
+    }
+
+    fun removeDownloadRecord(downloaded: DownloadedFile) {
+        preferences.removeDownloadedFile(downloaded.stableId)
+        _state.update {
+            val removingCompletion = it.completedDownload?.stableId == downloaded.stableId
+            it.copy(
+                downloadedFiles = preferences.downloadedFiles(),
+                downloadAvailability = it.downloadAvailability - downloaded.stableId,
+                completedDownload = it.completedDownload?.takeUnless { item -> item.stableId == downloaded.stableId },
+                completedDownloadWorkId = if (removingCompletion) null else it.completedDownloadWorkId
+            )
+        }
+        showNotice("已移除下载记录，手机中的文件仍然保留")
+    }
+
+    fun clearDownloadHistory() {
+        preferences.clearDownloadHistory()
+        _state.update {
+            it.copy(
+                downloadedFiles = emptyList(),
+                downloadAvailability = emptyMap(),
+                completedDownload = null,
+                completedDownloadWorkId = null
+            )
+        }
+        showNotice("下载历史已清空，手机中的文件仍然保留")
     }
 
     fun openCurrentPdfExternally() {
@@ -457,6 +515,7 @@ class ViewerViewModel(
             runCatching { downloadStore.clearPdfCache() }
                 .onSuccess { removed ->
                     _state.update { it.copy(pdfCacheBytes = 0) }
+                    refreshDownloadHistoryAvailability()
                     showNotice("已清理 ${formatByteCount(removed)} PDF 缓存")
                 }
                 .onFailure { showError(it.message ?: "无法清理 PDF 缓存") }
@@ -763,6 +822,26 @@ class ViewerViewModel(
         }
     }
 
+    private fun refreshDownloadHistoryAvailability() {
+        val history = _state.value.downloadedFiles
+        if (history.isEmpty()) {
+            _state.update { it.copy(downloadAvailability = emptyMap()) }
+            return
+        }
+        viewModelScope.launch {
+            val availability = buildMap {
+                history.chunked(12).forEach { batch ->
+                    coroutineScope {
+                        batch.map { item ->
+                            async { item.stableId to downloadStore.isDownloadedFileAvailable(item) }
+                        }.awaitAll()
+                    }.forEach { (id, available) -> put(id, available) }
+                }
+            }
+            _state.update { it.copy(downloadAvailability = availability) }
+        }
+    }
+
     private fun formatByteCount(bytes: Long): String = when {
         bytes < 1024 -> "$bytes B"
         bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
@@ -871,7 +950,18 @@ class ViewerViewModel(
                     showError("下载已结束，但无法读取保存位置")
                     return
                 }
-                recordDownload(downloaded, workId)
+                recordDownload(
+                    downloaded.copy(
+                        kind = if (snapshot.task.kind == BackgroundDownloadKind.REPOSITORY_ARCHIVE) {
+                            DownloadHistoryKind.PROJECT_ARCHIVE
+                        } else {
+                            downloaded.kind
+                        },
+                        sourceRepository = snapshot.task.repositoryFullName,
+                        sourcePath = snapshot.task.path
+                    ),
+                    workId
+                )
             }
             BackgroundDownloadKind.PDF_PREVIEW -> {
                 val localPath = snapshot.output.getString(BackgroundDownloadManager.KEY_OUTPUT_PATH)
@@ -890,6 +980,15 @@ class ViewerViewModel(
                         htmlUrl = "${repository.htmlUrl}/blob/${repository.defaultBranch}/$path",
                         downloadUrl = snapshot.task.downloadUrl
                     )
+                    runCatching {
+                        downloadStore.cachedPdfAsDownloadedFile(localPath, snapshot.task.name).copy(
+                            kind = DownloadHistoryKind.PDF,
+                            sourceRepository = repository.fullName,
+                            sourcePath = path
+                        )
+                    }.onSuccess { historyItem ->
+                        recordDownload(historyItem, workId, announce = false)
+                    }
                     val key = pdfOpenKey(repository.fullName, path)
                     if (pendingPdfOpenKey == key) {
                         openPdfDocument(repository, item, snapshot.task.name, localPath)
@@ -911,6 +1010,14 @@ class ViewerViewModel(
                             downloadedApkPath = path,
                             updateMessage = "新版本 ${snapshot.task.releaseVersion.orEmpty()} 已下载，可以安装"
                         )
+                    }
+                    runCatching {
+                        downloadStore.downloadedUpdateAsFile(path, snapshot.task.name).copy(
+                            kind = DownloadHistoryKind.APP_PACKAGE,
+                            sourcePath = snapshot.task.releaseTag
+                        )
+                    }.onSuccess { historyItem ->
+                        recordDownload(historyItem, workId, announce = false)
                     }
                     showNotice("更新包下载完成，请确认安装")
                 }

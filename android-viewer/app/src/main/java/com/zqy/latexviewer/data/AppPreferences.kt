@@ -1,6 +1,7 @@
 package com.zqy.latexviewer.data
 
 import android.content.Context
+import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
@@ -51,34 +52,76 @@ class AppPreferences(context: Context) {
         ).apply()
 
     fun downloadedFiles(): List<DownloadedFile> {
-        val raw = preferences.getString(KEY_DOWNLOAD_HISTORY, null) ?: return emptyList()
+        val raw = preferences.getString(KEY_DOWNLOAD_HISTORY, null)
+            ?: preferences.getString(KEY_DOWNLOAD_HISTORY_LEGACY, null)
+            ?: return emptyList()
         return runCatching {
             val values = JSONArray(raw)
             buildList {
                 for (index in 0 until values.length()) {
                     val value = values.getJSONObject(index)
+                    val contentUri = value.getString("contentUri")
                     add(DownloadedFile(
                         name = value.getString("name"),
-                        contentUri = value.getString("contentUri"),
+                        contentUri = contentUri,
                         displayPath = value.getString("displayPath"),
                         mimeType = value.getString("mimeType"),
-                        size = value.optLong("size")
+                        size = value.optLong("size"),
+                        id = value.optString("id").takeIf { it.isNotBlank() } ?: contentUri,
+                        downloadedAt = value.optLong("downloadedAt"),
+                        kind = value.optString("kind")
+                            .takeIf { it.isNotBlank() }
+                            ?.let { encoded -> runCatching { DownloadHistoryKind.valueOf(encoded) }.getOrNull() }
+                            ?: com.zqy.latexviewer.model.inferDownloadHistoryKind(
+                                value.getString("name"),
+                                value.getString("mimeType")
+                            ),
+                        sourceRepository = value.optionalString("sourceRepository"),
+                        sourcePath = value.optionalString("sourcePath")
                     ))
                 }
             }
-        }.getOrDefault(emptyList())
+        }.getOrDefault(emptyList()).sortedWith(
+            compareByDescending<DownloadedFile> { it.downloadedAt }.thenBy { it.name.lowercase() }
+        )
     }
 
     fun saveDownloadedFile(file: DownloadedFile) {
-        val updated = (listOf(file) + downloadedFiles().filterNot { it.contentUri == file.contentUri }).take(30)
+        val normalized = file.copy(
+            id = file.stableId,
+            downloadedAt = file.downloadedAt.takeIf { it > 0 } ?: System.currentTimeMillis()
+        )
+        val updated = (listOf(normalized) + downloadedFiles().filterNot {
+            it.stableId == normalized.stableId || it.contentUri == normalized.contentUri
+        }).take(MAX_DOWNLOAD_HISTORY)
+        saveDownloadedFiles(updated)
+    }
+
+    fun removeDownloadedFile(id: String) {
+        saveDownloadedFiles(downloadedFiles().filterNot { it.stableId == id })
+    }
+
+    fun clearDownloadHistory() {
+        preferences.edit()
+            .remove(KEY_DOWNLOAD_HISTORY)
+            .remove(KEY_DOWNLOAD_HISTORY_LEGACY)
+            .apply()
+    }
+
+    private fun saveDownloadedFiles(files: List<DownloadedFile>) {
         val values = JSONArray()
-        updated.forEach { item ->
+        files.take(MAX_DOWNLOAD_HISTORY).forEach { item ->
             values.put(JSONObject()
                 .put("name", item.name)
                 .put("contentUri", item.contentUri)
                 .put("displayPath", item.displayPath)
                 .put("mimeType", item.mimeType)
-                .put("size", item.size))
+                .put("size", item.size)
+                .put("id", item.stableId)
+                .put("downloadedAt", item.downloadedAt)
+                .put("kind", item.kind.name)
+                .put("sourceRepository", item.sourceRepository)
+                .put("sourcePath", item.sourcePath))
         }
         preferences.edit().putString(KEY_DOWNLOAD_HISTORY, values.toString()).apply()
     }
@@ -208,12 +251,17 @@ class AppPreferences(context: Context) {
         const val KEY_AUTO_DOWNLOAD = "auto_download_updates"
         const val KEY_REPOSITORIES = "saved_repositories"
         const val KEY_PDF_CACHE_LIMIT = "pdf_cache_limit_bytes"
-        const val KEY_DOWNLOAD_HISTORY = "download_history_v1"
+        const val KEY_DOWNLOAD_HISTORY = "download_history_v2"
+        const val KEY_DOWNLOAD_HISTORY_LEGACY = "download_history_v1"
         const val KEY_HANDLED_DOWNLOADS = "handled_downloads_v1"
         const val KEY_READING_PREFIX = "reading_v1:"
         const val KEY_INDEX_PREFIX = "mobile_index_v1:"
         const val DEFAULT_PDF_CACHE_LIMIT_BYTES = 512L * 1024 * 1024
         const val MIN_PDF_CACHE_LIMIT_BYTES = 64L * 1024 * 1024
         const val MAX_PDF_CACHE_LIMIT_BYTES = 4L * 1024 * 1024 * 1024
+        const val MAX_DOWNLOAD_HISTORY = 200
     }
 }
+
+private fun JSONObject.optionalString(key: String): String? = optString(key)
+    .takeIf { it.isNotBlank() && it != "null" }

@@ -174,6 +174,32 @@ class DownloadStore(private val context: Context) {
         )
     }
 
+    fun downloadedUpdateAsFile(localPath: String, displayName: String): DownloadedFile {
+        val file = File(localPath).canonicalFile
+        val updateRoot = updateDirectory().canonicalFile
+        require(file.isFile && file.length() > 0 && file.toPath().startsWith(updateRoot.toPath())) {
+            "找不到可分享的 Android 安装包"
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        return DownloadedFile(
+            name = safeName(displayName),
+            contentUri = uri.toString(),
+            displayPath = file.absolutePath,
+            mimeType = "application/vnd.android.package-archive",
+            size = file.length()
+        )
+    }
+
+    suspend fun isDownloadedFileAvailable(file: DownloadedFile): Boolean = withContext(Dispatchers.IO) {
+        val uri = runCatching { Uri.parse(file.contentUri) }.getOrNull() ?: return@withContext false
+        if (uri.scheme != "content") return@withContext false
+        runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+                descriptor.length != 0L
+            } ?: false
+        }.getOrDefault(false)
+    }
+
     fun deleteCachedPdf(localPath: String?): Boolean {
         val value = localPath ?: return false
         val file = runCatching { File(value).canonicalFile }.getOrNull() ?: return false

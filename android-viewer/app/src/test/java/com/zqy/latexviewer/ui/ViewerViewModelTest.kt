@@ -4,6 +4,8 @@ import com.zqy.latexviewer.data.GitHubApi
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.DownloadHistoryKind
+import com.zqy.latexviewer.model.inferDownloadHistoryKind
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -85,6 +87,18 @@ class ViewerViewModelTest {
         val tall = calculateRenderSize(100, 100_000, 1080)
         assertTrue(tall.first > 0 && tall.second > 0)
         assertTrue(tall.first.toLong() * tall.second <= 2_400_000L)
+    }
+
+    @Test
+    fun classifiesEveryDownloadHistoryType() {
+        assertEquals(DownloadHistoryKind.PDF, inferDownloadHistoryKind("paper.PDF", "application/octet-stream"))
+        assertEquals(DownloadHistoryKind.PROJECT_ARCHIVE, inferDownloadHistoryKind("notes.zip", "application/zip"))
+        assertEquals(DownloadHistoryKind.SOURCE_FILE, inferDownloadHistoryKind("chapter.tex", "text/x-tex"))
+        assertEquals(
+            DownloadHistoryKind.APP_PACKAGE,
+            inferDownloadHistoryKind("LaTeX.Android.apk", "application/vnd.android.package-archive")
+        )
+        assertEquals(DownloadHistoryKind.OTHER, inferDownloadHistoryKind("font.ttf", "font/ttf"))
     }
 
     private fun repository(isPrivate: Boolean) = GitHubRepository(

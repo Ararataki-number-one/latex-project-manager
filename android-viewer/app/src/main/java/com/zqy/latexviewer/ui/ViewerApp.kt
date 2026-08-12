@@ -2,6 +2,7 @@ package com.zqy.latexviewer.ui
 
 import android.Manifest
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -62,6 +63,7 @@ import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -73,6 +75,7 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -101,6 +104,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -115,9 +119,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.ui.theme.LaTeXViewerTheme
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -187,6 +195,29 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
         }
     }
 
+    LaunchedEffect(state.shareFile) {
+        state.shareFile?.let { file ->
+            val uri = Uri.parse(file.contentUri)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = file.mimeType.ifBlank { "application/octet-stream" }
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(context.contentResolver, file.name, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching {
+                context.startActivity(Intent.createChooser(intent, "分享 ${file.name}"))
+            }.onFailure { failure ->
+                val message = if (failure is ActivityNotFoundException) {
+                    "手机上没有可接收这种文件的应用"
+                } else {
+                    failure.message ?: "无法分享这个文件"
+                }
+                viewModel.showError(message)
+            }
+            viewModel.consumeShareFile()
+        }
+    }
+
     LaunchedEffect(state.notice) {
         state.notice?.let {
             snackbarHostState.showSnackbar(it)
@@ -250,6 +281,9 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     ViewerScreen.DOWNLOADS -> DownloadsScreen(
                         state = state,
                         onOpen = viewModel::openDownloaded,
+                        onShare = viewModel::shareDownloaded,
+                        onRemove = viewModel::removeDownloadRecord,
+                        onClearHistory = viewModel::clearDownloadHistory,
                         onCancelTransfer = viewModel::cancelTransfer,
                         onOpenSettings = viewModel::openSettings
                     )
@@ -681,53 +715,234 @@ private fun HomeScreen(
 private fun DownloadsScreen(
     state: ViewerUiState,
     onOpen: (DownloadedFile) -> Unit,
+    onShare: (DownloadedFile) -> Unit,
+    onRemove: (DownloadedFile) -> Unit,
+    onClearHistory: () -> Unit,
     onCancelTransfer: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    var filterName by rememberSaveable { mutableStateOf(DownloadHistoryFilter.ALL.name) }
+    var expandedDownloadId by remember { mutableStateOf<String?>(null) }
+    var detailDownload by remember { mutableStateOf<DownloadedFile?>(null) }
+    var showHeaderMenu by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    val filter = runCatching { DownloadHistoryFilter.valueOf(filterName) }
+        .getOrDefault(DownloadHistoryFilter.ALL)
+    val filteredDownloads = state.downloadedFiles.filter(filter::accepts)
+    val totalBytes = state.downloadedFiles.sumOf { it.size.coerceAtLeast(0) }
+
+    detailDownload?.let { download ->
+        val available = state.downloadAvailability[download.stableId] != false
+        AlertDialog(
+            onDismissRequest = { detailDownload = null },
+            title = { Text(download.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Text("${downloadHistoryKindLabel(download.kind)} · ${formatBytes(download.size)}")
+                    download.sourceRepository?.let { Text("来源项目：$it") }
+                    download.sourcePath?.let { Text("源文件：$it") }
+                    Text("下载时间：${formatDownloadTime(download.downloadedAt)}")
+                    Text("保存位置：${download.displayPath}")
+                    if (!available) {
+                        Text("文件已经被移动、删除或缓存已清理。", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = available,
+                    onClick = {
+                        detailDownload = null
+                        onOpen(download)
+                    }
+                ) { Text("打开") }
+            },
+            dismissButton = { TextButton(onClick = { detailDownload = null }) { Text("关闭") } }
+        )
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("清空下载历史？") },
+            text = { Text("只会清空客户端中的历史记录，不会删除已经下载到手机的 ZIP、PDF、源码或 APK。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClear = false
+                    onClearHistory()
+                }) { Text("清空记录", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } }
+        )
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         item {
-            Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 5.dp)) {
-                Text("下载", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(4.dp))
-                Text("用户下载保存在内部存储/Download/LaTeX项目", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+            Row(
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("下载中心", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (state.downloadedFiles.isEmpty()) {
+                            "项目 ZIP、PDF、源码和安装包会统一显示在这里"
+                        } else {
+                            "${state.downloadedFiles.size} 条记录 · ${formatBytes(totalBytes)}"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Box {
+                    IconButton(
+                        enabled = state.downloadedFiles.isNotEmpty(),
+                        onClick = { showHeaderMenu = true }
+                    ) { Icon(Icons.Outlined.MoreVert, contentDescription = "下载历史选项") }
+                    DropdownMenu(expanded = showHeaderMenu, onDismissRequest = { showHeaderMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("清空历史记录") },
+                            onClick = {
+                                showHeaderMenu = false
+                                confirmClear = true
+                            }
+                        )
+                    }
+                }
             }
+            Spacer(Modifier.height(10.dp))
         }
         state.transfer?.let { transfer ->
             item {
                 TransferCard(transfer, onCancelTransfer)
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(14.dp))
+            }
+        }
+        if (state.downloadedFiles.isNotEmpty()) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    DownloadHistoryFilter.entries.forEach { option ->
+                        val count = state.downloadedFiles.count(option::accepts)
+                        FilterChip(
+                            selected = filter == option,
+                            onClick = { filterName = option.name },
+                            label = { Text(if (option == DownloadHistoryFilter.ALL) option.label else "${option.label} $count") }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
             }
         }
         if (state.downloadedFiles.isEmpty()) {
-            item { EmptyState("还没有下载文件", "项目 ZIP、PDF 和源码文件下载完成后会显示在这里。") }
+            item { EmptyState("还没有下载记录", "从项目或文件页面下载后，可以在这里打开、查看位置并分享到微信、WPS 等应用。") }
+        } else if (filteredDownloads.isEmpty()) {
+            item { EmptyState("这个分类还没有文件", "切换到“全部”查看其他下载记录。") }
         } else {
-            item { HomeSectionTitle("最近下载", "本次使用期间") }
-            itemsIndexed(state.downloadedFiles, key = { _, download -> download.contentUri }) { index, download ->
+            item { HomeSectionTitle("最近下载", "最多保留 200 条记录") }
+            itemsIndexed(filteredDownloads, key = { _, download -> download.stableId }) { index, download ->
+                val available = state.downloadAvailability[download.stableId] != false
                 Surface(
                     onClick = { onOpen(download) },
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(9.dp),
+                    shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    Row(modifier = Modifier.padding(horizontal = 4.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Surface(modifier = Modifier.size(38.dp), shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                            Box(contentAlignment = Alignment.Center) { Icon(if (download.name.endsWith(".pdf", true)) Icons.Outlined.PictureAsPdf else Icons.Outlined.Download, contentDescription = null) }
+                    Row(modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            modifier = Modifier.size(42.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (available) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.errorContainer
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = downloadHistoryIcon(download.kind),
+                                    contentDescription = null,
+                                    tint = if (available) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+                                )
+                            }
                         }
                         Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(download.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${formatBytes(download.size)} · ${download.displayPath}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                if (available) {
+                                    "${downloadHistoryKindLabel(download.kind)} · ${formatBytes(download.size)} · ${formatDownloadTime(download.downloadedAt)}"
+                                } else {
+                                    "文件已不可用 · 仅保留历史记录"
+                                },
+                                color = if (available) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            download.sourceRepository?.let { repository ->
+                                Text(
+                                    repository,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
-                        Icon(Icons.Outlined.OpenInNew, contentDescription = "打开 ${download.name}")
+                        IconButton(enabled = available, onClick = { onShare(download) }) {
+                            Icon(Icons.Outlined.Share, contentDescription = "分享 ${download.name}")
+                        }
+                        Box {
+                            IconButton(onClick = { expandedDownloadId = download.stableId }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "${download.name} 的更多操作")
+                            }
+                            DropdownMenu(
+                                expanded = expandedDownloadId == download.stableId,
+                                onDismissRequest = { expandedDownloadId = null }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("打开") },
+                                    enabled = available,
+                                    onClick = {
+                                        expandedDownloadId = null
+                                        onOpen(download)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("分享到其他应用") },
+                                    enabled = available,
+                                    onClick = {
+                                        expandedDownloadId = null
+                                        onShare(download)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("查看详情和保存位置") },
+                                    onClick = {
+                                        expandedDownloadId = null
+                                        detailDownload = download
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("移除历史记录") },
+                                    onClick = {
+                                        expandedDownloadId = null
+                                        onRemove(download)
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
-                if (index != state.downloadedFiles.lastIndex) {
+                if (index != filteredDownloads.lastIndex) {
                     HorizontalDivider(
-                        modifier = Modifier.padding(start = 50.dp),
+                        modifier = Modifier.padding(start = 58.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
@@ -747,6 +962,22 @@ private fun DownloadsScreen(
                 }
             }
         }
+    }
+}
+
+private enum class DownloadHistoryFilter(val label: String) {
+    ALL("全部"),
+    PDF("PDF"),
+    PROJECT("项目"),
+    FILE("文件"),
+    APP("安装包");
+
+    fun accepts(download: DownloadedFile): Boolean = when (this) {
+        ALL -> true
+        PDF -> download.kind == DownloadHistoryKind.PDF
+        PROJECT -> download.kind == DownloadHistoryKind.PROJECT_ARCHIVE
+        FILE -> download.kind in setOf(DownloadHistoryKind.SOURCE_FILE, DownloadHistoryKind.OTHER)
+        APP -> download.kind == DownloadHistoryKind.APP_PACKAGE
     }
 }
 
@@ -1741,6 +1972,7 @@ private fun ReadOnlyFooter() {
 }
 
 private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return if (bytes == 0L) "0 B" else "未知大小"
     if (bytes < 1024) return "$bytes B"
     val units = arrayOf("KB", "MB", "GB")
     var value = bytes.toDouble()
@@ -1750,6 +1982,35 @@ private fun formatBytes(bytes: Long): String {
         unit += 1
     }
     return if (value >= 10) "%.0f %s".format(value, units[unit]) else "%.1f %s".format(value, units[unit])
+}
+
+private fun downloadHistoryKindLabel(kind: DownloadHistoryKind): String = when (kind) {
+    DownloadHistoryKind.PROJECT_ARCHIVE -> "项目压缩包"
+    DownloadHistoryKind.PDF -> "PDF 文档"
+    DownloadHistoryKind.SOURCE_FILE -> "源码文件"
+    DownloadHistoryKind.APP_PACKAGE -> "Android 安装包"
+    DownloadHistoryKind.OTHER -> "文件"
+}
+
+private fun downloadHistoryIcon(kind: DownloadHistoryKind): ImageVector = when (kind) {
+    DownloadHistoryKind.PROJECT_ARCHIVE -> Icons.Outlined.Folder
+    DownloadHistoryKind.PDF -> Icons.Outlined.PictureAsPdf
+    DownloadHistoryKind.SOURCE_FILE -> Icons.Outlined.Code
+    DownloadHistoryKind.APP_PACKAGE -> Icons.Outlined.SystemUpdateAlt
+    DownloadHistoryKind.OTHER -> Icons.Outlined.Description
+}
+
+private fun formatDownloadTime(timestamp: Long): String {
+    if (timestamp <= 0) return "旧版记录"
+    val now = System.currentTimeMillis()
+    val elapsed = (now - timestamp).coerceAtLeast(0)
+    return when {
+        elapsed < 60_000 -> "刚刚"
+        elapsed < 60 * 60_000 -> "${elapsed / 60_000} 分钟前"
+        elapsed < 24 * 60 * 60_000 -> "${elapsed / (60 * 60_000)} 小时前"
+        elapsed < 7 * 24 * 60 * 60_000 -> "${elapsed / (24 * 60 * 60_000)} 天前"
+        else -> SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))
+    }
 }
 
 private fun shortDate(iso: String): String = iso.take(10).ifBlank { "未知日期" }
