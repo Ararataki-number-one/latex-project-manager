@@ -120,7 +120,49 @@ describe("GitHub synchronization", () => {
     expect(commands.filter((command) => command[0] === "push").flat()).not.toContain("--force");
     expect(await readdir(join(configDirectory, "git-hooks"))).toHaveLength(1);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/build/");
+    expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/undo/");
     expect(await readFile(join(root, ".gitignore"), "utf8")).not.toContain("references/");
+    await service.dispose();
+  });
+
+  it("blocks an undo snapshot that was already tracked without reading or committing it", async () => {
+    const base = await mkdtemp(join(tmpdir(), "latex-workbench-github-undo-"));
+    temporaryDirectories.push(base);
+    const root = join(base, "project");
+    const configDirectory = join(base, "config");
+    await (await import("node:fs/promises")).mkdir(root);
+    const blobId = "4".repeat(40);
+    const treeId = "5".repeat(40);
+    const commands: string[][] = [];
+    const result = (code = 0, stdout = "", stderr = ""): GitCommandResult => ({ code, stdout, stderr });
+    const runner: GitCommandRunner = async (_executable, cwd, args) => {
+      expect(cwd).toBe(root);
+      const command = args.slice(2);
+      commands.push(command);
+      if (command[0] === "rev-parse" && command[1] === "--show-toplevel") return result(0, `${root}\n`);
+      if (command[0] === "add") return result();
+      if (command[0] === "write-tree") return result(0, `${treeId}\n`);
+      if (command[0] === "ls-files" && command[1] === "--stage") {
+        return result(0, `100644 ${blobId} 0\t.latex-workbench/undo/private/journal.json\0`);
+      }
+      if (command[0] === "status") return result(0, "M  .latex-workbench/undo/private/journal.json\0");
+      throw new Error(`Unexpected Git command: ${command.join(" ")}`);
+    };
+    const service = new GitHubSyncService(configDirectory, {
+      platform: "win32",
+      gitExecutable: "git.exe",
+      runner,
+      watcherFactory: () => ({ close: () => undefined })
+    });
+
+    const findings = await service.securityPreflight("project-undo", root);
+    expect(findings).toContainEqual(expect.objectContaining({
+      path: ".latex-workbench/undo/private/journal.json",
+      kind: "sensitiveFile",
+      severity: "block"
+    }));
+    expect(commands.some((command) => command[0] === "cat-file")).toBe(false);
+    expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/undo/");
     await service.dispose();
   });
 });

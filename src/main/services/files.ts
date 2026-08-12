@@ -386,6 +386,8 @@ interface ReferenceEdit extends LatexReferenceChange { content: string; }
 interface StoredPlan { root: string; source: string; destination?: string; plan: ProjectFileOperationPlan; edits: ReferenceEdit[]; }
 interface UndoRecord {
   root: string;
+  createdAt: string;
+  expiresAt: string;
   kind: ProjectFileOperationPlan["kind"];
   source: string;
   destination?: string;
@@ -393,6 +395,24 @@ interface UndoRecord {
   payloadHash: string;
   referenceBackups: Array<{ path: string; backup: string; backupHash: string; appliedHash: string }>;
 }
+
+interface UndoJournal {
+  schemaVersion: 1;
+  undoId: string;
+  createdAt: string;
+  expiresAt: string;
+  kind: ProjectFileOperationPlan["kind"];
+  sourcePath: string;
+  destinationPath?: string;
+  backupPath?: string;
+  payloadHash: string;
+  referenceBackups: Array<{ path: string; backupPath: string; backupHash: string; appliedHash: string }>;
+}
+
+const UNDO_TTL_MS = 24 * 60 * 60_000;
+const UNDO_JOURNAL_VERSION = 1;
+const undoIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const hashPattern = /^[a-f0-9]{64}$/i;
 
 const referencePattern = /(\\(?:input|include|subfile|includegraphics|bibliography|addbibresource)(?:\[[^\]]*\])?\s*\{)([^{}]+)(\})/g;
 const referenceExtensions = new Set([".tex", ".sty", ".cls", ".bib"]);
@@ -436,6 +456,140 @@ export class ProjectFileService {
 
   constructor(private readonly trashItem: TrashItem = electronTrashItem) {}
 
+  private undoDirectory(root: string, undoId: string): string {
+    if (!undoIdPattern.test(undoId)) {
+      throw new FileServiceError("This undo operation is no longer available.", "PLAN_EXPIRED");
+    }
+    return join(root, ".latex-workbench", "undo", undoId);
+  }
+
+  private async persistUndoRecord(undoId: string, record: UndoRecord): Promise<void> {
+    const undoRoot = this.undoDirectory(record.root, undoId);
+    const journal: UndoJournal = {
+      schemaVersion: UNDO_JOURNAL_VERSION,
+      undoId,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      kind: record.kind,
+      sourcePath: toPosix(relative(record.root, record.source)),
+      destinationPath: record.destination ? toPosix(relative(record.root, record.destination)) : undefined,
+      backupPath: record.backupPath ? toPosix(relative(undoRoot, record.backupPath)) : undefined,
+      payloadHash: record.payloadHash,
+      referenceBackups: record.referenceBackups.map((reference) => ({
+        path: reference.path,
+        backupPath: toPosix(relative(undoRoot, reference.backup)),
+        backupHash: reference.backupHash,
+        appliedHash: reference.appliedHash
+      }))
+    };
+    const destination = join(undoRoot, "journal.json");
+    const temporary = join(undoRoot, `.journal.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await rename(temporary, destination);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+  }
+
+  private async loadUndoRecord(root: string, undoId: string): Promise<UndoRecord> {
+    const cached = this.undoRecords.get(undoId);
+    if (cached && cached.root === root && Date.parse(cached.expiresAt) > Date.now()) return cached;
+    const undoRoot = this.undoDirectory(root, undoId);
+    let journal: UndoJournal;
+    try {
+      journal = JSON.parse(await readFile(join(undoRoot, "journal.json"), "utf8")) as UndoJournal;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) {
+        throw new FileServiceError("This undo operation is no longer available.", "PLAN_EXPIRED");
+      }
+      throw error;
+    }
+    const validKind = new Set<ProjectFileOperationPlan["kind"]>(["rename", "move", "copy", "trash"]);
+    const expiresAt = Date.parse(journal.expiresAt);
+    if (journal.schemaVersion !== UNDO_JOURNAL_VERSION || journal.undoId !== undoId
+      || !validKind.has(journal.kind) || !Number.isFinite(expiresAt)
+      || !hashPattern.test(journal.payloadHash) || !Array.isArray(journal.referenceBackups)) {
+      throw new FileServiceError("This undo operation is no longer available.", "PLAN_EXPIRED");
+    }
+    if (expiresAt <= Date.now()) {
+      await rm(undoRoot, { recursive: true, force: true });
+      this.undoRecords.delete(undoId);
+      throw new FileServiceError("This undo operation has expired.", "PLAN_EXPIRED");
+    }
+    const resolveArtifact = (path: string): string => {
+      if (typeof path !== "string" || isAbsolute(path)) throw new FileServiceError("The undo journal is invalid.", "PLAN_EXPIRED");
+      const result = resolve(undoRoot, path);
+      if (!isInside(undoRoot, result) || result === undoRoot) throw new FileServiceError("The undo journal is invalid.", "PLAN_EXPIRED");
+      return result;
+    };
+    const source = resolveProjectPath(root, journal.sourcePath);
+    const destination = journal.destinationPath ? resolveProjectPath(root, journal.destinationPath) : undefined;
+    if ((journal.kind === "trash") === Boolean(destination)) {
+      throw new FileServiceError("The undo journal is invalid.", "PLAN_EXPIRED");
+    }
+    const referenceBackups = journal.referenceBackups.map((reference) => {
+      if (!reference || typeof reference.path !== "string" || !hashPattern.test(reference.backupHash)
+        || !hashPattern.test(reference.appliedHash)) {
+        throw new FileServiceError("The undo journal is invalid.", "PLAN_EXPIRED");
+      }
+      resolveProjectPath(root, reference.path);
+      return {
+        path: reference.path,
+        backup: resolveArtifact(reference.backupPath),
+        backupHash: reference.backupHash,
+        appliedHash: reference.appliedHash
+      };
+    });
+    const record: UndoRecord = {
+      root,
+      createdAt: journal.createdAt,
+      expiresAt: journal.expiresAt,
+      kind: journal.kind,
+      source,
+      destination,
+      backupPath: journal.backupPath ? resolveArtifact(journal.backupPath) : undefined,
+      payloadHash: journal.payloadHash,
+      referenceBackups
+    };
+    this.undoRecords.set(undoId, record);
+    return record;
+  }
+
+  private async cleanupExpiredUndo(root: string): Promise<void> {
+    const undoBase = join(root, ".latex-workbench", "undo");
+    let entries;
+    try {
+      entries = await readdir(undoBase, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !undoIdPattern.test(entry.name)) continue;
+      const directory = join(undoBase, entry.name);
+      let expiresAt = Number.NaN;
+      try {
+        const journal = JSON.parse(await readFile(join(directory, "journal.json"), "utf8")) as Partial<UndoJournal>;
+        expiresAt = typeof journal.expiresAt === "string" ? Date.parse(journal.expiresAt) : Number.NaN;
+      } catch {
+        // Incomplete snapshots are retained for 24 hours before cleanup.
+      }
+      if (!Number.isFinite(expiresAt)) expiresAt = (await stat(directory)).mtimeMs + UNDO_TTL_MS;
+      if (expiresAt <= now) {
+        await rm(directory, { recursive: true, force: true });
+        this.undoRecords.delete(entry.name);
+      }
+    }
+  }
+
   read(projectRoot: string, path: string): Promise<FileReadResult> {
     return readProjectFile(projectRoot, path);
   }
@@ -474,6 +628,7 @@ export class ProjectFileService {
 
   async plan(projectRoot: string, request: ProjectFileOperationRequest): Promise<ProjectFileOperationPlan> {
     const root = resolve(projectRoot);
+    await this.cleanupExpiredUndo(root);
     const source = resolveProjectPath(root, request.sourcePath);
     await assertRealPathInside(root, source);
     const snapshot = await snapshotPath(source);
@@ -508,6 +663,7 @@ export class ProjectFileService {
 
   async apply(projectRoot: string, planId: string): Promise<ProjectFileOperationResult> {
     const root = resolve(projectRoot);
+    await this.cleanupExpiredUndo(root);
     const stored = this.plans.get(planId);
     if (!stored || stored.root !== root || Date.parse(stored.plan.expiresAt) < Date.now()) {
       this.plans.delete(planId);
@@ -545,6 +701,9 @@ export class ProjectFileService {
     let backupPath: string | undefined;
     let payloadApplied = false;
     let copyStagingPath: string | undefined;
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + UNDO_TTL_MS).toISOString();
+    let undoRecord: UndoRecord | undefined;
     try {
       if (stored.plan.kind === "trash") {
         backupPath = join(undoRoot, "payload", basename(stored.source));
@@ -589,6 +748,18 @@ export class ProjectFileService {
           appliedHash: written.hash
         });
       }
+      undoRecord = {
+        root,
+        createdAt,
+        expiresAt,
+        kind: stored.plan.kind,
+        source: stored.source,
+        destination: stored.destination,
+        backupPath,
+        payloadHash: stored.plan.sourceHash,
+        referenceBackups
+      };
+      await this.persistUndoRecord(undoId, undoRecord);
     } catch (error) {
       if (copyStagingPath) await rm(copyStagingPath, { recursive: true, force: true });
       const rollbackFailures: string[] = [];
@@ -643,15 +814,7 @@ export class ProjectFileService {
       await rm(undoRoot, { recursive: true, force: true });
       throw error;
     }
-    this.undoRecords.set(undoId, {
-      root,
-      kind: stored.plan.kind,
-      source: stored.source,
-      destination: stored.destination,
-      backupPath,
-      payloadHash: stored.plan.sourceHash,
-      referenceBackups
-    });
+    this.undoRecords.set(undoId, undoRecord!);
     this.plans.delete(planId);
     return {
       undoId,
@@ -660,14 +823,14 @@ export class ProjectFileService {
       operation: stored.plan.kind,
       sourcePath: stored.plan.sourcePath,
       destinationPath: stored.plan.destinationPath,
-      undoExpiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString()
+      undoExpiresAt: expiresAt
     };
   }
 
   async undo(projectRoot: string, undoId: string): Promise<ProjectFileUndoResult> {
     const root = resolve(projectRoot);
-    const record = this.undoRecords.get(undoId);
-    if (!record || record.root !== root) throw new FileServiceError("This undo operation is no longer available.", "PLAN_EXPIRED");
+    await this.cleanupExpiredUndo(root);
+    const record = await this.loadUndoRecord(root, undoId);
 
     // Undo is all-or-nothing with respect to external edits: validate every
     // reference and payload before the first restore, move or recycle action.
@@ -707,6 +870,7 @@ export class ProjectFileService {
       revertedReferenceFiles.push(reference.path);
     }
     this.undoRecords.delete(undoId);
+    await rm(this.undoDirectory(root, undoId), { recursive: true, force: true });
     return { restoredPaths: [toPosix(relative(root, record.source))], revertedReferenceFiles };
   }
 }

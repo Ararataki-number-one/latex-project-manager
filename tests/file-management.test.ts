@@ -147,4 +147,51 @@ describe("managed project files", () => {
     expect(await readFile(join(root, "chapters", "new.tex"), "utf8")).toBe("body\n");
     await expect(stat(join(root, "chapters", "old.tex"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("persists the undo journal and can undo after the service restarts", async () => {
+    const root = await projectRoot();
+    await writeFile(join(root, "main.tex"), "\\input{chapters/old}\n", "utf8");
+    await writeFile(join(root, "chapters", "old.tex"), "body\n", "utf8");
+    const firstService = new ProjectFileService(async () => undefined);
+    const plan = await firstService.plan(root, {
+      kind: "rename",
+      sourcePath: "chapters/old.tex",
+      destinationPath: "chapters/new.tex"
+    });
+    const result = await firstService.apply(root, plan.id);
+    const journal = join(root, ".latex-workbench", "undo", result.undoId, "journal.json");
+    expect(JSON.parse(await readFile(journal, "utf8"))).toMatchObject({
+      schemaVersion: 1,
+      undoId: result.undoId,
+      sourcePath: "chapters/old.tex",
+      destinationPath: "chapters/new.tex"
+    });
+
+    const restartedService = new ProjectFileService(async () => undefined);
+    await restartedService.undo(root, result.undoId);
+    expect(await readFile(join(root, "chapters", "old.tex"), "utf8")).toBe("body\n");
+    expect(await readFile(join(root, "main.tex"), "utf8")).toBe("\\input{chapters/old}\n");
+    await expect(stat(join(root, ".latex-workbench", "undo", result.undoId))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("expires and removes undo journals after 24 hours", async () => {
+    const root = await projectRoot();
+    await writeFile(join(root, "chapters", "source.tex"), "body\n", "utf8");
+    const service = new ProjectFileService(async (path) => { await rm(path, { recursive: true, force: true }); });
+    const plan = await service.plan(root, {
+      kind: "copy",
+      sourcePath: "chapters/source.tex",
+      destinationPath: "chapters/copy.tex"
+    });
+    const result = await service.apply(root, plan.id);
+    const undoDirectory = join(root, ".latex-workbench", "undo", result.undoId);
+    const journalPath = join(undoDirectory, "journal.json");
+    const journal = JSON.parse(await readFile(journalPath, "utf8")) as Record<string, unknown>;
+    journal.expiresAt = new Date(Date.now() - 1_000).toISOString();
+    await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+
+    await expect(new ProjectFileService().undo(root, result.undoId)).rejects.toMatchObject({ code: "PLAN_EXPIRED" });
+    await expect(stat(undoDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(root, "chapters", "copy.tex"), "utf8")).toBe("body\n");
+  });
 });

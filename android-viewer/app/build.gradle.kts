@@ -22,8 +22,8 @@ android {
         applicationId = "com.zqy.latexviewer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.11.0"
+        versionCode = 15
+        versionName = "0.11.1"
 
         val githubClientId = providers.gradleProperty("githubOAuthClientId")
             .orElse(providers.environmentVariable("GITHUB_OAUTH_CLIENT_ID"))

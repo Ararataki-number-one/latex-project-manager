@@ -31,6 +31,7 @@ const MANAGED_IGNORES = [
   ".latex-workbench/runtime/",
   ".latex-workbench/snapshots/",
   ".latex-workbench/trash/",
+  ".latex-workbench/undo/",
   "*.aux",
   "*.bcf",
   "*.blg",
@@ -111,6 +112,13 @@ interface CandidateSecuritySnapshot {
   changes: GitHubChangedFile[];
   largeFiles: GitHubLargeFile[];
   findings: SyncSecurityFinding[];
+}
+
+const MANAGED_UNDO_PREFIX = ".latex-workbench/undo/";
+
+function isManagedUndoPath(path: string): boolean {
+  const normalized = portablePath(path).replace(/^\.\//, "");
+  return normalized === MANAGED_UNDO_PREFIX.slice(0, -1) || normalized.startsWith(MANAGED_UNDO_PREFIX);
 }
 
 class SyncNeedsPullError extends Error {
@@ -442,6 +450,7 @@ export class GitHubSyncService {
     this.roots.set(projectId, resolve(root));
     await this.requireGit(root);
     await this.ensureRepository(root);
+    await ensureManagedGitIgnore(root);
     await this.run(root, ["add", "-A", "--", "."]);
     return (await this.candidateSecuritySnapshot(root, includeTracked)).findings;
   }
@@ -452,6 +461,7 @@ export class GitHubSyncService {
     const safePaths = [...new Set(paths.map((path) => portablePath(path.trim())).filter(Boolean))];
     await this.requireGit(root);
     await this.ensureRepository(root);
+    await ensureManagedGitIgnore(root);
     await this.run(root, ["add", "-A", "--", "."]);
     const snapshot = await this.candidateSecuritySnapshot(root, false);
     const findings = snapshot.findings;
@@ -711,6 +721,7 @@ export class GitHubSyncService {
     if (!account.authenticated || !account.login) throw new Error("请先在客户端设置中登录 GitHub。");
     await this.requireGit(root);
     await this.ensureRepository(root);
+    await ensureManagedGitIgnore(root);
     await this.run(root, ["add", "-A", "--", "."]);
     const preflightSnapshot = await this.candidateSecuritySnapshot(root, true);
     const preflight = preflightSnapshot.findings;
@@ -776,6 +787,7 @@ export class GitHubSyncService {
     if (visibility === "public") {
       await this.requireGit(root);
       await this.ensureRepository(root);
+      await ensureManagedGitIgnore(root);
       await this.run(root, ["add", "-A", "--", "."]);
       const publicSnapshot = await this.candidateSecuritySnapshot(root, true);
       publicPreflight = publicSnapshot.findings;
@@ -1024,6 +1036,7 @@ export class GitHubSyncService {
       this.setLive(projectId, "syncing", "正在检查本机变更与 GitHub 状态…", "info");
       await this.requireGit(root);
       await this.ensureRepository(root);
+      await ensureManagedGitIgnore(root);
       const branch = await this.ensureBranch(root);
       let changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
       let findings: SyncSecurityFinding[] = [];
@@ -1319,12 +1332,23 @@ export class GitHubSyncService {
 
     const listed = await this.run(root, ["ls-files", "--stage", "-z"]);
     const entries = new Map<string, { objectId: string; size?: number }>();
+    const managedUndoFindings: SyncSecurityFinding[] = [];
     for (const record of listed.stdout.split("\0").filter(Boolean)) {
       const tab = record.indexOf("\t");
       if (tab < 0) continue;
       const metadata = record.slice(0, tab).trim().split(/\s+/);
       if (metadata.length < 3 || metadata[2] !== "0" || !/^[a-f0-9]{40,64}$/i.test(metadata[1])) continue;
-      entries.set(portablePath(record.slice(tab + 1)), { objectId: metadata[1] });
+      const path = portablePath(record.slice(tab + 1));
+      if (isManagedUndoPath(path)) {
+        managedUndoFindings.push({
+          path,
+          kind: "sensitiveFile",
+          severity: "block",
+          message: "撤销快照只允许保存在本机。该路径已被 Git 跟踪，请先从 Git 索引中移除 .latex-workbench/undo 后再同步。"
+        });
+        continue;
+      }
+      entries.set(path, { objectId: metadata[1] });
     }
 
     const changes = includeTracked
@@ -1348,12 +1372,15 @@ export class GitHubSyncService {
       });
     }
 
-    const findings = await scanSyncSecuritySnapshot(changes, largeFiles, async (path) => {
+    const findings = [
+      ...managedUndoFindings,
+      ...await scanSyncSecuritySnapshot(changes.filter((change) => !isManagedUndoPath(change.path)), largeFiles, async (path) => {
       const entry = entries.get(path);
       if (!entry || (entry.size ?? Number.POSITIVE_INFINITY) > 2 * 1024 * 1024) return null;
       const blob = await this.run(root, ["cat-file", "blob", entry.objectId]);
       return Buffer.from(blob.stdout, "utf8");
-    });
+      })
+    ];
     const verifiedTree = (await this.run(root, ["write-tree"])).stdout.trim();
     if (verifiedTree !== tree) throw new Error("安全检查期间候选树发生变化，已停止同步；请重新检查后再试。");
     return { treeHash: tree, changes, largeFiles, findings };

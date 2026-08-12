@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,17 @@ afterEach(async () => {
 });
 
 describe("original manuscript management", () => {
+  it("does not create a references directory while listing an untouched project", async () => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-references-")));
+    temporaryDirectories.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+
+    const service = new ReferenceService();
+    await expect(service.list(root)).resolves.toEqual([]);
+    await expect(lstat(join(root, "references"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("copies source documents into references without overwriting equal names", async () => {
     const base = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-references-")));
     temporaryDirectories.push(base);

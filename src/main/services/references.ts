@@ -74,7 +74,6 @@ export class ReferenceService {
   async list(root: string): Promise<ReferenceDocumentInfo[]> {
     const directory = this.directory(root);
     try {
-      await mkdir(directory, { recursive: true });
       return (await this.collect(root, directory)).sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt) || left.name.localeCompare(right.name, "zh-CN"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
