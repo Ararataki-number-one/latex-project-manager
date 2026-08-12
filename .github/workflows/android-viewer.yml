@@ -39,7 +39,7 @@ jobs:
         working-directory: android-viewer
         shell: bash
         env:
-          GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
+          GITHUB_OAUTH_CLIENT_ID: ${{ secrets.ANDROID_GITHUB_CLIENT_ID }}
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon testDebugUnitTest

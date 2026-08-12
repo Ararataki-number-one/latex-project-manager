@@ -79,7 +79,7 @@ jobs:
         working-directory: android-viewer
         shell: bash
         env:
-          GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
+          GITHUB_OAUTH_CLIENT_ID: ${{ secrets.ANDROID_GITHUB_CLIENT_ID }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             test -n "$GITHUB_OAUTH_CLIENT_ID"
