@@ -59,12 +59,21 @@ jobs:
             finally { $hasher.Dispose() }
           }
           Set-Content -LiteralPath dist/windows-certificate-sha256.txt -Value $digest -NoNewline -Encoding ascii
+      - name: Prepare stable Windows attachment names
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          $setup = Get-ChildItem -LiteralPath dist -Filter '*.exe' | Where-Object { $_.Name -match 'setup' } | Select-Object -First 1
+          $portable = Get-ChildItem -LiteralPath dist -Filter '*.exe' | Where-Object { $_.Name -notmatch 'setup' } | Select-Object -First 1
+          if (-not $setup -or -not $portable) { throw 'Windows release assets were not produced.' }
+          New-Item -ItemType Directory -Force -Path dist/release-windows | Out-Null
+          Copy-Item -LiteralPath $setup.FullName -Destination "dist/release-windows/LaTeX.Setup.$version.exe"
+          Copy-Item -LiteralPath $portable.FullName -Destination "dist/release-windows/LaTeX.$version.exe"
+          Copy-Item -LiteralPath dist/windows-certificate-sha256.txt -Destination dist/release-windows/windows-certificate-sha256.txt
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows
-          path: |
-            dist/*.exe
-            dist/windows-certificate-sha256.txt
+          path: dist/release-windows/*
           if-no-files-found: error
 
   android:
