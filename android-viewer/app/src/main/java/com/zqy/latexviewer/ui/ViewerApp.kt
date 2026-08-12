@@ -1110,7 +1110,6 @@ private fun RepositoryListScreen(
 }
 
 @Composable
-@Composable
 private fun MobilePdfHomeCard(
     repository: GitHubRepository,
     output: MobilePdfOutput,
