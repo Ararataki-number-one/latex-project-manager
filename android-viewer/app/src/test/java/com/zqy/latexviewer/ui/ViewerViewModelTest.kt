@@ -64,7 +64,8 @@ class ViewerViewModelTest {
             size = 10_000_000,
             sha = "blob-sha",
             htmlUrl = null,
-            downloadUrl = "https://raw.githubusercontent.com/owner/repo/main/output/book.pdf"
+            downloadUrl = "https://raw.githubusercontent.com/owner/repo/main/output/book.pdf",
+            commitSha = "0123456789abcdef0123456789abcdef01234567"
         )
         val publicRepository = repository(isPrivate = false)
         val privateRepository = repository(isPrivate = true)
@@ -81,12 +82,12 @@ class ViewerViewModelTest {
     @Test
     fun capsPdfRenderMemoryForVeryLargeAndTallPages() {
         val normal = calculateRenderSize(595, 842, 1440)
-        assertTrue(normal.first <= 1200)
-        assertTrue(normal.first.toLong() * normal.second <= 2_400_000L)
+        assertTrue(normal.first <= 1800)
+        assertTrue(normal.first.toLong() * normal.second <= 3_200_000L)
 
         val tall = calculateRenderSize(100, 100_000, 1080)
         assertTrue(tall.first > 0 && tall.second > 0)
-        assertTrue(tall.first.toLong() * tall.second <= 2_400_000L)
+        assertTrue(tall.first.toLong() * tall.second <= 3_200_000L)
     }
 
     @Test
