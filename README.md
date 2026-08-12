@@ -83,7 +83,7 @@
 
 ## Android 只读客户端
 
-源码位于 [`android-viewer`](android-viewer)。它使用 Jetpack Compose 构建，采用内容优先的 Paper Library 设计：墨色用于主要操作，绿色只表示下载、同步和成功状态，并跟随系统浅色/深色主题：
+源码位于 [`android-viewer`](android-viewer)。它使用 Jetpack Compose 构建，采用内容优先的 Liquid Glass 设计：玻璃只用于浮动导航、PDF 工具栏和下载反馈，项目与文件内容保持清晰；Android 12 及以上使用真实背景模糊，旧设备或低内存设备自动降级为高对比霜化材质，并跟随系统浅色/深色主题：
 
 - 把多个 GitHub 公开或私有仓库持久保存在手机项目库中，并可随时添加、切换或移除本机入口；
 - 首页按“继续阅读 → 各项目最新主 PDF → 全部项目”排列；移动索引缺失或损坏时只隐藏主 PDF 卡片，不影响文件浏览；

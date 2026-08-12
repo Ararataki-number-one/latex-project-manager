@@ -68,6 +68,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zqy.latexviewer.model.GitHubContent
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
@@ -94,6 +96,7 @@ internal fun PdfPreviewScreen(
     val document = state.pdfDocument ?: return
     val sourceItem = state.contents.firstOrNull { it.path == document.path }
     val context = LocalContext.current
+    val hazeState = rememberHazeState()
     val handleResult by produceState<Result<PdfRendererHandle>?>(
         initialValue = null,
         document.localPath,
@@ -189,7 +192,9 @@ internal fun PdfPreviewScreen(
 
             else -> LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .liquidGlassSource(hazeState),
                 contentPadding = PaddingValues(
                     start = 5.dp,
                     top = 76.dp,
@@ -211,24 +216,25 @@ internal fun PdfPreviewScreen(
             onDownload = onDownload,
             onOpenExternal = onOpenExternal,
             onOpenGitHub = onOpenGitHub,
+            hazeState = hazeState,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(horizontal = 10.dp, vertical = 8.dp)
         )
 
         if (pageCount > 0 && handle != null) {
-            Surface(
+            LiquidGlassSurface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 12.dp),
+                    .padding(bottom = 12.dp)
+                    .height(34.dp),
                 shape = RoundedCornerShape(999.dp),
-                color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.82f),
-                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
-                shadowElevation = 1.dp
+                elevation = 3.dp,
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                hazeState = hazeState
             ) {
                 Text(
                     (currentPage + 1).toString() + " / " + pageCount,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Medium
                 )
@@ -245,18 +251,18 @@ private fun PdfFloatingToolbar(
     onDownload: (GitHubContent) -> Unit,
     onOpenExternal: () -> Unit,
     onOpenGitHub: () -> Unit,
+    hazeState: HazeState,
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
-    Surface(
+    LiquidGlassSurface(
         modifier = modifier
             .fillMaxWidth()
             .height(56.dp),
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        shadowElevation = 3.dp
+        elevation = 7.dp,
+        hazeState = hazeState
     ) {
         Row(
             modifier = Modifier.fillMaxSize(),

@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -84,8 +85,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -95,6 +94,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
@@ -115,6 +115,8 @@ import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.ui.theme.LaTeXViewerTheme
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.rememberHazeState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -221,8 +223,27 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     }
 
     LaTeXViewerTheme {
+        val colors = MaterialTheme.colorScheme
+        val hazeState = rememberHazeState()
+        val ambientBackground = Brush.verticalGradient(
+            colors = listOf(
+                colors.primaryContainer.copy(alpha = 0.42f),
+                colors.background,
+                colors.background,
+                colors.tertiaryContainer.copy(alpha = 0.18f)
+            )
+        )
+        Box(
+            modifier = Modifier.fillMaxSize()
+        ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ambientBackground)
+                .liquidGlassSource(hazeState)
+        )
         Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
+            containerColor = Color.Transparent,
             contentWindowInsets = WindowInsets.safeDrawing,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
@@ -234,6 +255,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onRefresh = viewModel::refresh,
                         onOpenGitHub = viewModel::openCurrentOnGitHub,
                         onOpenSettings = viewModel::openSettings,
+                        hazeState = hazeState,
                         onDownloadProject = {
                             state.currentRepository?.let(viewModel::downloadRepository)
                         }
@@ -245,6 +267,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     ViewerBottomBar(
                         screen = state.screen,
                         transferActive = state.transfer != null,
+                        hazeState = hazeState,
                         onHome = viewModel::openHome,
                         onProjects = viewModel::openProjects,
                         onDownloads = viewModel::openDownloads
@@ -257,7 +280,12 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     .fillMaxSize()
                     .padding(contentPadding)
             ) {
-                when (state.screen) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .liquidGlassSource(hazeState)
+                ) {
+                    when (state.screen) {
                     ViewerScreen.HOME -> HomeScreen(
                         state = state,
                         listState = homeListState,
@@ -318,15 +346,16 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onClearPdfCache = viewModel::clearPdfCache,
                         onDisconnect = viewModel::disconnect
                     )
-                }
-                if (state.loading) {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.TopCenter),
-                        color = MaterialTheme.colorScheme.secondary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
+                    }
+                    if (state.loading) {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.TopCenter),
+                            color = MaterialTheme.colorScheme.secondary,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    }
                 }
                 state.transfer?.takeIf { state.transferPanelVisible && state.screen != ViewerScreen.DOWNLOADS }?.let { transfer ->
                     TransferCard(
@@ -334,6 +363,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onCancel = viewModel::cancelTransfer,
                         onHide = viewModel::hideTransferPanel,
                         onOpenDownloads = viewModel::openDownloads,
+                        hazeState = hazeState,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(16.dp)
@@ -349,6 +379,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         download = download,
                         onOpen = viewModel::openCompletedDownload,
                         onDismiss = viewModel::dismissCompletedDownload,
+                        hazeState = hazeState,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(16.dp)
@@ -357,6 +388,8 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
             }
         }
     }
+}
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -368,6 +401,7 @@ private fun ViewerTopBar(
     onRefresh: () -> Unit,
     onOpenGitHub: () -> Unit,
     onOpenSettings: () -> Unit,
+    hazeState: HazeState,
     onDownloadProject: () -> Unit
 ) {
     var projectMenuExpanded by remember { mutableStateOf(false) }
@@ -382,9 +416,22 @@ private fun ViewerTopBar(
         ViewerScreen.SETTINGS -> "设置"
         ViewerScreen.CONNECT -> "添加项目"
     }
+    val isRootScreen = state.screen in setOf(
+        ViewerScreen.HOME,
+        ViewerScreen.REPOSITORIES,
+        ViewerScreen.DOWNLOADS
+    )
 
-    if (state.screen in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) {
-        PaperRootHeader(title = title) {
+    LiquidGlassTopBar(
+        title = title,
+        modifier = Modifier
+            .statusBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        navigationIcon = if (isRootScreen) null else Icons.AutoMirrored.Outlined.ArrowBack,
+        onNavigationClick = if (isRootScreen) null else onBack,
+        hazeState = hazeState
+    ) {
+        if (isRootScreen) {
             if (state.screen == ViewerScreen.REPOSITORIES) {
                 IconButton(onClick = onAddProject) {
                     Icon(Icons.Outlined.Add, contentDescription = "添加项目")
@@ -411,28 +458,7 @@ private fun ViewerTopBar(
                     }
                 }
             }
-        }
-        return
-    }
-
-    TopAppBar(
-        title = {
-            Text(
-                title,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold
-            )
-        },
-        navigationIcon = {
-            if (state.screen != ViewerScreen.PDF) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
-                }
-            }
-        },
-        actions = {
+        } else {
             if (state.screen == ViewerScreen.FILES) {
                 Box {
                     IconButton(onClick = { projectMenuExpanded = true }) {
@@ -498,28 +524,26 @@ private fun ViewerTopBar(
                     }
                 }
             }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.background,
-            titleContentColor = MaterialTheme.colorScheme.onBackground
-        )
-    )
+        }
+    }
 }
 
 @Composable
 private fun ViewerBottomBar(
     screen: ViewerScreen,
     transferActive: Boolean,
+    hazeState: HazeState,
     onHome: () -> Unit,
     onProjects: () -> Unit,
     onDownloads: () -> Unit
 ) {
-    PaperBottomBar(
+    LiquidGlassBottomBar(
         selected = screen,
         downloadActive = transferActive,
         onHome = onHome,
         onProjects = onProjects,
-        onDownloads = onDownloads
+        onDownloads = onDownloads,
+        hazeState = hazeState
     )
 }
 
@@ -1770,14 +1794,14 @@ private fun DownloadCompleteBanner(
     download: DownloadedFile,
     onOpen: () -> Unit,
     onDismiss: () -> Unit,
+    hazeState: HazeState? = null,
     modifier: Modifier = Modifier
 ) {
-    Surface(
+    LiquidGlassSurface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        shadowElevation = 3.dp
+        shape = RoundedCornerShape(24.dp),
+        elevation = 8.dp,
+        hazeState = hazeState
     ) {
         Row(
             modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 6.dp),
@@ -1809,18 +1833,18 @@ private fun TransferCard(
     onCancel: (() -> Unit)? = null,
     onHide: (() -> Unit)? = null,
     onOpenDownloads: (() -> Unit)? = null,
+    hazeState: HazeState? = null,
     modifier: Modifier = Modifier
 ) {
     val determinate = transfer.total > 0
     val progress = if (determinate) {
         (transfer.downloaded.toFloat() / transfer.total.toFloat()).coerceIn(0f, 1f)
     } else 0f
-    Surface(
+    LiquidGlassSurface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.inverseSurface,
-        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
-        shadowElevation = 3.dp
+        shape = RoundedCornerShape(24.dp),
+        elevation = 8.dp,
+        hazeState = hazeState
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
