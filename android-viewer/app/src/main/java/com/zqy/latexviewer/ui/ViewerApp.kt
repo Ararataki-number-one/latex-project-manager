@@ -390,8 +390,26 @@ private fun ViewerTopBar(
                     Icon(Icons.Outlined.Add, contentDescription = "添加项目")
                 }
             }
+            if (state.screen == ViewerScreen.HOME) {
+                IconButton(onClick = onRefresh, enabled = !state.loading) {
+                    Icon(Icons.Outlined.Refresh, contentDescription = "刷新文档")
+                }
+            }
             IconButton(onClick = onOpenSettings) {
-                Icon(Icons.Outlined.Settings, contentDescription = "打开设置")
+                Box(modifier = Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Outlined.Settings,
+                        contentDescription = if (state.updateAvailable) "打开设置，有新版本可用" else "打开设置"
+                    )
+                    if (state.updateAvailable) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(7.dp)
+                                .background(MaterialTheme.colorScheme.secondary, CircleShape)
+                        )
+                    }
+                }
             }
         }
         return
