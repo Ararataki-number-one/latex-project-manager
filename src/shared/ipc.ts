@@ -42,6 +42,7 @@ import type {
   ResearchSearchHit,
   ScanCandidate,
   ScanOptions,
+  TemplateCreateOptions,
   TemplateInfo,
   TemporaryCleanupPreview,
   TemporaryCleanupResult,
@@ -116,8 +117,10 @@ export const IPC = {
   updatesSetSettings: "updates:set-settings",
   updatesCheck: "updates:check",
   updatesDownload: "updates:download",
+  updatesCancel: "updates:cancel",
   updatesInstall: "updates:install",
   updatesOpenRelease: "updates:open-release",
+  updatesEvent: "updates:event",
   referencesList: "references:list",
   referencesImport: "references:import",
   referencesOpen: "references:open",
@@ -160,6 +163,8 @@ export const IPC = {
   fileReveal: "file:reveal",
   templatesList: "templates:list",
   templatesCreate: "templates:create",
+  templatesCreateFromProject: "templates:create-from-project",
+  templatesDelete: "templates:delete",
   templatesInstantiate: "templates:instantiate",
   toolchainsList: "toolchains:list",
   vscodeStatus: "vscode:status",
@@ -253,8 +258,10 @@ export interface WorkbenchApi {
     setSettings(settings: AppUpdateSettings): Promise<AppUpdateStatus>;
     check(): Promise<AppUpdateStatus>;
     download(): Promise<AppUpdateStatus>;
+    cancel(): Promise<AppUpdateStatus>;
     install(): Promise<void>;
     openRelease(): Promise<void>;
+    onEvent(listener: (status: AppUpdateStatus) => void): () => void;
   };
   references: {
     list(projectId: string): Promise<ReferenceDocumentInfo[]>;
@@ -301,6 +308,8 @@ export interface WorkbenchApi {
   templates: {
     list(): Promise<TemplateInfo[]>;
     create(sourceRoot: string, name: string): Promise<TemplateInfo>;
+    createFromProject(projectId: string, options: TemplateCreateOptions): Promise<TemplateInfo>;
+    delete(templateId: string): Promise<void>;
     instantiate(templateId: string, parentRoot: string, name: string): Promise<string>;
   };
   toolchains: {

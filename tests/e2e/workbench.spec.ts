@@ -276,6 +276,42 @@ test("跟随系统主题会响应系统深浅色变化", async ({ page }) => {
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
+test("模板库区分内置与个人模板并支持搜索和安全确认", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+  const navigation = page.getByRole("navigation", { name: "资料库导航" });
+  await navigation.getByRole("button", { name: "模板库" }).click();
+
+  await expect(page.getByTestId("template-library")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "模板库" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "内置模板", exact: true })).toContainText("分章书稿");
+  await expect(page.getByRole("region", { name: "我的模板", exact: true })).toContainText("我的概率论笔记");
+
+  const search = page.getByRole("textbox", { name: "搜索模板" });
+  await search.fill("不存在的模板名称");
+  await expect(page.getByText("没有符合条件的模板")).toBeVisible();
+  await page.getByRole("button", { name: "清除模板搜索" }).click();
+
+  await page.getByRole("option", { name: /简洁论文/ }).click();
+  await expect(page.getByRole("complementary", { name: "模板详情" })).toContainText("article");
+  await page.getByRole("button", { name: "使用此模板新建项目" }).click();
+  const createDialog = page.getByRole("dialog", { name: "简洁论文" });
+  await expect(createDialog).toBeVisible();
+  await expect(createDialog.getByRole("textbox", { name: "新项目名称" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(createDialog).toBeHidden();
+
+  await page.getByRole("option", { name: /我的概率论笔记/ }).click();
+  const deleteButton = page.getByRole("button", { name: "删除个人模板" });
+  await deleteButton.click();
+  const deleteDialog = page.getByRole("alertdialog", { name: /删除“我的概率论笔记”/ });
+  await expect(deleteDialog).toContainText("不会删除或修改创建它的原项目");
+  await page.keyboard.press("Escape");
+  await expect(deleteDialog).toBeHidden();
+  await expect(deleteButton).toBeFocused();
+  await expectNoHorizontalOverflow(page);
+});
+
 test("桌面 1.0 信息架构提供研究资料、智能视图与三栏资料浏览", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");

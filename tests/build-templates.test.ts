@@ -103,6 +103,29 @@ describe("local template pins", () => {
     const service = new TemplateService(store);
     const template = await service.create(source, "Article");
     await writeFile(join(template.rootPath, ".latex-template.json"), JSON.stringify({ formatVersion: 1, id: template.id, name: 42 }), "utf8");
-    expect(await service.list()).toEqual([]);
+    expect((await service.list()).some((item) => item.id === template.id)).toBe(false);
+  });
+
+  it("provides safe built-in templates and only deletes user templates", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "latex-workbench-templates-")));
+    temporaryDirectories.push(root);
+    const source = join(root, "source");
+    const store = join(root, "store");
+    await mkdir(source);
+    await writeFile(join(source, "main.tex"), "\\documentclass{article}", "utf8");
+    const service = new TemplateService(store);
+
+    const initial = await service.list();
+    expect(initial.filter((item) => item.source === "builtin").map((item) => item.id)).toEqual(
+      expect.arrayContaining(["builtin-article", "builtin-book"])
+    );
+    expect(initial.every((item) => item.fileCount > 0 && item.totalBytes > 0)).toBe(true);
+
+    const personal = await service.create(source, "Personal", { description: "Local reusable structure", category: "article" });
+    expect(personal).toMatchObject({ source: "user", category: "article", description: "Local reusable structure" });
+    await expect(service.delete("builtin-article")).rejects.toThrow("cannot be deleted");
+    await service.delete(personal.id);
+    expect((await service.list()).some((item) => item.id === personal.id)).toBe(false);
+    expect(await readFile(join(source, "main.tex"), "utf8")).toBe("\\documentclass{article}");
   });
 });

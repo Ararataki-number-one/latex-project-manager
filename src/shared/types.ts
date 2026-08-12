@@ -356,8 +356,20 @@ export type AppUpdateState =
   | "available"
   | "downloading"
   | "downloaded"
+  | "cancelled"
   | "unavailable"
   | "error";
+
+export type AppUpdatePhase =
+  | "idle"
+  | "checkingRelease"
+  | "verifyingManifest"
+  | "preparingDownload"
+  | "downloading"
+  | "verifyingPackage"
+  | "ready"
+  | "cancelled"
+  | "failed";
 
 export interface AppUpdateSettings {
   autoCheck: boolean;
@@ -373,6 +385,12 @@ export interface AppUpdateStatus extends AppUpdateSettings {
   releaseName?: string;
   publishedAt?: string;
   downloadedPath?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  progressPercent?: number;
+  phase?: AppUpdatePhase;
+  canCancel?: boolean;
+  canRetry?: boolean;
   checkedAt?: string;
   message?: string;
 }
@@ -642,7 +660,8 @@ export interface VsCodeStatus {
   available: boolean;
   editor?: VsCodeEditor;
   executablePath?: string;
-  source?: "path" | "common";
+  source?: "configured" | "path" | "common";
+  diagnostics?: string[];
   latexWorkshop: {
     state: "installed" | "notFound" | "unknown";
     version?: string;
@@ -770,6 +789,17 @@ export interface TemplateInfo {
   name: string;
   description: string;
   rootPath: string;
+  source: "builtin" | "user";
+  category: "article" | "book" | "presentation" | "other";
+  createdAt: string;
+  fileCount: number;
+  totalBytes: number;
   className?: string;
   assetPins: AssetPin[];
+}
+
+export interface TemplateCreateOptions {
+  name: string;
+  description?: string;
+  category?: TemplateInfo["category"];
 }

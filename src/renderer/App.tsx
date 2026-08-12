@@ -5,6 +5,7 @@ import {
   ArchiveRestore,
   Activity,
   AlertTriangle,
+  BookCopy,
   BookOpenText,
   Check,
   CheckCircle2,
@@ -49,9 +50,11 @@ import {
 import type { WorkbenchApi } from "@/shared/ipc";
 import type { AppRuntimeSettings, AppUpdateStatus, CatalogProjectResearchItem, CatalogStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectCollection, ProjectStorageInfo, ProjectSummary, ResearchRole, ResearchSearchHit, ScanCandidate, SmartView, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
 import { createWorkbench } from "./demo";
+import { AppUpdateProgress } from "./AppUpdateProgress";
 import { useProjectGitHubStatuses } from "./github-status-store";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { ProjectView } from "./ProjectView";
+import { TemplateLibraryView } from "./TemplateLibraryView";
 
 const runtime = createWorkbench();
 
@@ -59,6 +62,7 @@ type LibraryFilter = "all" | "favorites" | "recent" | "archived";
 type ExtendedLibraryFilter = LibraryFilter | "trashed";
 type LibraryScope =
   | { kind: "standard" }
+  | { kind: "templates" }
   | { kind: "research" }
   | { kind: "organize" }
   | { kind: "issue"; issue: "path" | "sync" | "pdf"; label: string }
@@ -551,9 +555,16 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
       return;
     }
     try {
+      const editor = await api.vscode.status();
+      if (!editor.available) {
+        onNotify(editor.diagnostics?.[0] ?? "未检测到 VS Code 或 VSCodium；安装后请重启客户端");
+        return;
+      }
       await api.library.openInVsCode(project.id);
       onProjectsChange((current) => current.map((item) => item.id === project.id ? { ...item, lastOpenedAt: new Date().toISOString() } : item));
-      onNotify(`已在 VS Code 中打开 ${project.name}`);
+      onNotify(editor.latexWorkshop.state === "notFound"
+        ? `已在 VS Code 中打开 ${project.name}；未检测到 LaTeX Workshop`
+        : `已在 VS Code 中打开 ${project.name}`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法打开 VS Code 项目");
     }
@@ -771,7 +782,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
       return;
     }
     try {
-      const template = await api.templates.create(project.rootPath, project.name);
+      const template = await api.templates.createFromProject(project.id, { name: project.name, description: `由项目“${project.name}”保存的个人模板。`, category: "other" });
       onNotify(`已将「${project.name}」保存为模板「${template.name}」`);
       setMenuProjectId(null);
     } catch (error) {
@@ -1111,7 +1122,8 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
     };
     void refresh();
     const timer = setInterval(() => { void refresh(); }, 8_000);
-    return () => { cancelled = true; clearInterval(timer); };
+    const unsubscribe = api.updates.onEvent((next) => { if (!cancelled) setStatus(next); });
+    return () => { cancelled = true; clearInterval(timer); unsubscribe(); };
   }, [api, onNotify]);
 
   async function refreshGitHubAccount() {
@@ -1195,12 +1207,27 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
 
   async function downloadUpdate() {
     setBusy("download");
+    const operation = api.updates.download();
+    setBusy(null);
     try {
-      const next = await api.updates.download();
+      const next = await operation;
       setStatus(next);
       onNotify(next.message ?? "更新下载完成");
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "下载更新失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function cancelUpdate() {
+    setBusy("download");
+    try {
+      const next = await api.updates.cancel();
+      setStatus(next);
+      onNotify(next.message ?? "更新下载已取消");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法取消更新下载");
     } finally {
       setBusy(null);
     }
@@ -1232,10 +1259,11 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
     : status.state === "available" ? "发现新版本"
       : status.state === "downloading" ? "正在下载"
         : status.state === "downloaded" ? "更新已下载"
-          : status.state === "unavailable" ? "自动更新不可用"
-            : status.state === "error" ? "更新检查失败"
-              : status.state === "checking" ? "正在检查"
-                : "等待检查";
+          : status.state === "cancelled" ? "下载已暂停"
+            : status.state === "unavailable" ? "自动更新不可用"
+              : status.state === "error" ? "更新检查失败"
+                : status.state === "checking" ? "正在检查"
+                  : "等待检查";
 
   return (
     <section className="app-settings-page">
@@ -1282,17 +1310,19 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
           <div><strong>{stateLabel}</strong><p>{status.message}</p></div>
           <div className="update-version"><span>当前版本</span><strong>{status.currentVersion}</strong>{status.latestVersion && status.latestVersion !== status.currentVersion && <small>最新 {status.latestVersion}</small>}</div>
         </div>
+        <AppUpdateProgress status={status} busy={busy !== null} onCancel={() => void cancelUpdate()} onRetry={() => void downloadUpdate()} />
         <div className="settings-toggle-list">
           <label className="sync-toggle"><span><strong>自动检查更新</strong><small>启动客户端后自动检查最新正式版本</small></span><input type="checkbox" checked={status.autoCheck} disabled={busy !== null} onChange={(event) => void saveSettings({ autoCheck: event.target.checked, autoDownload: status.autoDownload })} /></label>
           <label className="sync-toggle"><span><strong>发现新版本后自动下载</strong><small>下载完成后由你确认安装，不会在工作中突然重启</small></span><input type="checkbox" checked={status.autoDownload} disabled={busy !== null || !status.autoCheck} onChange={(event) => void saveSettings({ autoCheck: status.autoCheck, autoDownload: event.target.checked })} /></label>
         </div>
         <div className="update-actions">
-          <button className="button secondary" onClick={() => void checkNow()} disabled={busy !== null || !status.githubCliAvailable}>{checking ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}立即检查</button>
+          <button className="button secondary" onClick={() => void checkNow()} disabled={busy !== null}>{checking ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}立即检查</button>
           {status.state === "available" && <button className="button primary" onClick={() => void downloadUpdate()} disabled={busy !== null}>{downloading ? <RefreshCw size={16} className="spin" /> : <Download size={16} />}下载 {status.latestVersion}</button>}
+          {(status.state === "cancelled" || status.state === "error") && status.canRetry && <button className="button primary" onClick={() => void downloadUpdate()} disabled={busy !== null}><RefreshCw size={16} />继续下载</button>}
           {status.state === "downloaded" && <button className="button primary" onClick={() => void installUpdate()} disabled={busy !== null}>{busy === "install" ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}安装并退出客户端</button>}
           <button className="button ghost" onClick={() => void openReleasePage()}>打开 Release 页面</button>
         </div>
-        <div className="private-update-note"><ShieldCheck size={17} /><div><strong>安全更新</strong><p>{status.githubCliAvailable ? "使用本机 GitHub CLI 获取 GitHub Release；客户端不会读取或保存你的访问令牌。" : "这台电脑未检测到 GitHub CLI，因此只能在浏览器中手动下载。"}</p></div></div>
+        <div className="private-update-note"><ShieldCheck size={17} /><div><strong>安全更新</strong><p>直接从公开 GitHub Release 下载，不需要 GitHub CLI；安装前会核对签名清单、文件大小和 SHA-256。</p></div></div>
         {isDemo && <p className="demo-note">浏览器演示模式不会访问 GitHub 或下载程序。</p>}
       </section>}
       {section === "about" && <section className="settings-card about-settings-card">
@@ -1695,6 +1725,7 @@ export default function App() {
             return <button key={item.id} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}><Icon size={18} /><span>{item.label}</span>{item.count !== undefined && <small>{item.count}</small>}</button>;
           })}
           <button className={libraryVisible && libraryScope.kind === "research" ? "active" : ""} aria-current={libraryVisible && libraryScope.kind === "research" ? "page" : undefined} onClick={() => goScopedLibrary({ kind: "research" })}><Library size={18} /><span>研究资料</span></button>
+          <button className={libraryVisible && libraryScope.kind === "templates" ? "active" : ""} aria-current={libraryVisible && libraryScope.kind === "templates" ? "page" : undefined} onClick={() => goScopedLibrary({ kind: "templates" })}><BookCopy size={18} /><span>模板库</span></button>
           <button className={libraryVisible && libraryScope.kind === "organize" ? "active" : ""} aria-current={libraryVisible && libraryScope.kind === "organize" ? "page" : undefined} onClick={() => goScopedLibrary({ kind: "organize" })}><Inbox size={18} /><span>待整理</span><small>{projects.filter((project) => !project.archived && !project.trashed && (!project.tags.length || !project.description?.trim())).length}</small></button>
 
           <p className="sidebar-section-label">智能视图</p>
@@ -1774,7 +1805,7 @@ export default function App() {
         ) : (
           <>
             {showOnboardingHint && <aside className="onboarding-hint" aria-label="新手向导提示"><div><BookOpenText size={18} /><span><strong>首次使用向导</strong><small>检查 Git、GitHub、VS Code，并完成第一个安全同步项目。</small></span></div><button className="button secondary" onClick={() => setOnboardingOpen(true)}>开始</button><IconButton label="不再提示" onClick={() => void completeOnboarding(false)}><X size={16} /></IconButton></aside>}
-            {libraryScope.kind === "research" ? <GlobalResearchLibrary api={runtime.api} projects={projects} onNotify={setToast} onOpenProject={(project) => { setSelectedProjectTab("references"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} scopeTitle={scopeMeta.title} scopeDescription={scopeMeta.description} scopedProjectIds={scopeMeta.ids} issueFilterOverride={scopeMeta.issue} onManage={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />}
+            {libraryScope.kind === "research" ? <GlobalResearchLibrary api={runtime.api} projects={projects} onNotify={setToast} onOpenProject={(project) => { setSelectedProjectTab("references"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : libraryScope.kind === "templates" ? <TemplateLibraryView api={runtime.api} projects={projects} isDemo={runtime.isDemo} onNotify={setToast} onProjectsChange={setProjects} onOpenProject={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} scopeTitle={scopeMeta.title} scopeDescription={scopeMeta.description} scopedProjectIds={scopeMeta.ids} issueFilterOverride={scopeMeta.issue} onManage={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />}
           </>
         )}
       </main>

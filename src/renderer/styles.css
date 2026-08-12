@@ -3947,6 +3947,7 @@ input[type="checkbox"] {
 }
 
 .app-update-summary.update-error,
+.app-update-summary.update-cancelled,
 .app-update-summary.update-unavailable {
   border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
   background: var(--danger-soft);
@@ -4301,6 +4302,28 @@ html[data-glass="off"] .dialog-card {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
+
+.update-progress-panel {
+  margin: 0 20px 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 30%, var(--border));
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface) 90%, var(--cyan-soft));
+}
+
+.update-progress-heading { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 9px; }
+.update-progress-heading > span { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 10px; background: var(--cyan-soft); color: var(--cyan); }
+.update-progress-heading > div { display: grid; gap: 2px; }
+.update-progress-heading strong { font-size: 13px; }
+.update-progress-heading small,
+.update-progress-meta { color: var(--text-secondary); font-size: 11px; }
+.update-progress-heading b { color: var(--cyan); font-size: 14px; font-variant-numeric: tabular-nums; }
+.update-progress-track { height: 7px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--border) 75%, transparent); }
+.update-progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--blue)); transition: width 180ms ease; }
+.update-progress-meta { display: flex; margin-top: 8px; justify-content: space-between; gap: 12px; font-variant-numeric: tabular-nums; }
+.update-progress-actions { display: flex; margin-top: 11px; justify-content: flex-end; gap: 8px; }
+.update-progress-downloaded { border-color: color-mix(in srgb, var(--green) 30%, var(--border)); }
+.update-progress-downloaded .update-progress-heading > span { background: var(--green-soft); color: var(--green); }
 
 .catalog-persistence-warning {
   align-items: flex-start;

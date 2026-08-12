@@ -151,5 +151,46 @@ describe("application updates", () => {
 
     const settings = await service.setSettings({ autoCheck: false, autoDownload: false });
     expect(settings).toMatchObject({ autoCheck: false, autoDownload: false });
+
+    await rm(downloaded.downloadedPath!, { force: true });
+    let started!: () => void;
+    const downloadStarted = new Promise<void>((resolve) => { started = resolve; });
+    const interrupted = new AppUpdateService(directory, {
+      currentVersion: "0.3.0",
+      ghExecutable: "gh.exe",
+      runner,
+      publicKeyPem: publicKey,
+      downloader: async (_url, destination, options) => {
+        const partial = bytes.subarray(0, 8);
+        await writeFile(destination, partial);
+        options.onProgress({ downloadedBytes: partial.length, totalBytes: bytes.length });
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true });
+        });
+      }
+    });
+    await interrupted.check(false);
+    const interruptedJob = interrupted.download();
+    await downloadStarted;
+    const cancelled = await interrupted.cancel();
+    expect(cancelled).toMatchObject({ state: "cancelled", downloadedBytes: 8, totalBytes: bytes.length, canRetry: true });
+    await interruptedJob;
+
+    let resumedFrom = -1;
+    const resumed = new AppUpdateService(directory, {
+      currentVersion: "0.3.0",
+      ghExecutable: "gh.exe",
+      runner,
+      publicKeyPem: publicKey,
+      downloader: async (_url, destination, options) => {
+        resumedFrom = options.resumeFrom;
+        await writeFile(destination, bytes.subarray(options.resumeFrom), { flag: "a" });
+        options.onProgress({ downloadedBytes: bytes.length, totalBytes: bytes.length });
+      }
+    });
+    const resumedStatus = await resumed.download();
+    expect(resumedFrom).toBe(8);
+    expect(resumedStatus).toMatchObject({ state: "downloaded", downloadedBytes: bytes.length, totalBytes: bytes.length, progressPercent: 100 });
   });
 });

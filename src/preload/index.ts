@@ -88,8 +88,14 @@ const api: WorkbenchApi = {
     setSettings: (settings) => ipcRenderer.invoke(IPC.updatesSetSettings, settings),
     check: () => ipcRenderer.invoke(IPC.updatesCheck),
     download: () => ipcRenderer.invoke(IPC.updatesDownload),
+    cancel: () => ipcRenderer.invoke(IPC.updatesCancel),
     install: () => ipcRenderer.invoke(IPC.updatesInstall),
-    openRelease: () => ipcRenderer.invoke(IPC.updatesOpenRelease)
+    openRelease: () => ipcRenderer.invoke(IPC.updatesOpenRelease),
+    onEvent: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, status: Parameters<typeof listener>[0]) => listener(status);
+      ipcRenderer.on(IPC.updatesEvent, handler);
+      return () => ipcRenderer.removeListener(IPC.updatesEvent, handler);
+    }
   },
   references: {
     list: (projectId) => ipcRenderer.invoke(IPC.referencesList, projectId),
@@ -136,6 +142,8 @@ const api: WorkbenchApi = {
   templates: {
     list: () => ipcRenderer.invoke(IPC.templatesList),
     create: (sourceRoot, name) => ipcRenderer.invoke(IPC.templatesCreate, sourceRoot, name),
+    createFromProject: (projectId, options) => ipcRenderer.invoke(IPC.templatesCreateFromProject, projectId, options),
+    delete: (templateId) => ipcRenderer.invoke(IPC.templatesDelete, templateId),
     instantiate: (templateId, parentRoot, name) => ipcRenderer.invoke(IPC.templatesInstantiate, templateId, parentRoot, name)
   },
   toolchains: {

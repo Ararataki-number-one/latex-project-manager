@@ -27,7 +27,8 @@ import java.util.Base64
 class GitHubApi(
     private val apiRoot: String = DEFAULT_API_ROOT,
     private val githubRoot: String = DEFAULT_GITHUB_ROOT,
-    private val releaseChannel: String = BuildConfig.RELEASE_CHANNEL
+    private val releaseChannel: String = BuildConfig.RELEASE_CHANNEL,
+    private val allowLocalHttpDownloadsForTests: Boolean = false
 ) {
     suspend fun listRepositories(token: String): List<GitHubRepository> = withContext(Dispatchers.IO) {
         require(token.isNotBlank()) { "查看私有仓库需要只读令牌" }
@@ -365,7 +366,7 @@ class GitHubApi(
             candidates = listOf(
                 DownloadCandidate(asset.downloadUrl, BINARY_ACCEPT),
                 DownloadCandidate(asset.apiUrl, BINARY_ACCEPT)
-            ).filter { it.url.startsWith("https://") },
+            ).filter { isAllowedDownloadUrl(it.url) },
             token = null,
             destination = destination,
             expectPdf = false,
@@ -559,9 +560,16 @@ class GitHubApi(
     ) {
         require(candidates.isNotEmpty()) { "没有可用的安全下载地址" }
         destination.parentFile?.mkdirs()
+        val resumeIdentity = when {
+            expectedLfsSha256?.matches(SHA256) == true -> "sha256:${expectedLfsSha256.lowercase()}"
+            expectedContentSha256?.matches(SHA256) == true -> "sha256:${expectedContentSha256.lowercase()}"
+            expectedGitBlobSha?.matches(GIT_OBJECT_SHA) == true -> "git:${expectedGitBlobSha.lowercase()}"
+            else -> null
+        }
         if (expectPdf && destination.isFile) {
             runCatching { validatePdfPrefix(destination, complete = false) }.onFailure {
                 destination.delete()
+                resumeMetadataFile(destination).delete()
             }
         }
 
@@ -574,6 +582,7 @@ class GitHubApi(
                     destination = destination,
                     expectPdf = expectPdf,
                     failFastOnSlowStart = index < candidates.lastIndex,
+                    resumeIdentity = resumeIdentity,
                     onProgress = onProgress
                 )
                 if (expectPdf) validatePdfPrefix(destination, complete = true)
@@ -604,12 +613,16 @@ class GitHubApi(
         destination: File,
         expectPdf: Boolean,
         failFastOnSlowStart: Boolean,
+        resumeIdentity: String?,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
         var mayRestart = true
         while (true) {
             val storedResume = readResumeMetadata(destination)
-            if (destination.isFile && destination.length() > 0 && storedResume?.url != candidate.url) {
+            val sameImmutableObject = resumeIdentity != null && storedResume?.identity == resumeIdentity
+            if (destination.isFile && destination.length() > 0 &&
+                storedResume?.url != candidate.url && !sameImmutableObject
+            ) {
                 destination.delete()
                 resumeMetadataFile(destination).delete()
             }
@@ -628,7 +641,10 @@ class GitHubApi(
                 setRequestProperty("Connection", "keep-alive")
                 if (existing > 0) {
                     setRequestProperty("Range", "bytes=$existing-")
-                    storedResume?.validator?.takeIf(String::isNotBlank)?.let {
+                    storedResume?.validator
+                        ?.takeIf { storedResume.url == candidate.url }
+                        ?.takeIf(String::isNotBlank)
+                        ?.let {
                         setRequestProperty("If-Range", it)
                     }
                 }
@@ -668,7 +684,7 @@ class GitHubApi(
                 if (!appending && existing > 0) destination.delete()
                 val validator = connection.getHeaderField("ETag")
                     ?: connection.getHeaderField("Last-Modified")
-                writeResumeMetadata(destination, ResumeMetadata(candidate.url, validator))
+                writeResumeMetadata(destination, ResumeMetadata(candidate.url, validator, resumeIdentity))
                 val responseBytes = connection.contentLengthLong.coerceAtLeast(-1L)
                 val total = parseContentRangeTotal(connection.getHeaderField("Content-Range"))
                     ?: responseBytes.takeIf { it >= 0 }?.let { it + downloadedBeforeRequest }
@@ -792,14 +808,22 @@ class GitHubApi(
 
     private fun readResumeMetadata(destination: File): ResumeMetadata? = runCatching {
         val value = JSONObject(resumeMetadataFile(destination).readText(Charsets.UTF_8))
-        ResumeMetadata(value.getString("url"), value.optString("validator").takeIf(String::isNotBlank))
+        ResumeMetadata(
+            value.getString("url"),
+            value.optString("validator").takeIf(String::isNotBlank),
+            value.optString("identity").takeIf(String::isNotBlank)
+        )
     }.getOrNull()
 
     private fun writeResumeMetadata(destination: File, metadata: ResumeMetadata) {
         val target = resumeMetadataFile(destination)
         val temporary = File(target.parentFile, "${target.name}.tmp")
         temporary.writeText(
-            JSONObject().put("url", metadata.url).put("validator", metadata.validator).toString(),
+            JSONObject()
+                .put("url", metadata.url)
+                .put("validator", metadata.validator)
+                .put("identity", metadata.identity)
+                .toString(),
             Charsets.UTF_8
         )
         if (target.exists()) target.delete()
@@ -812,6 +836,14 @@ class GitHubApi(
         ?.toLongOrNull()
 
     private fun parseUnsatisfiedTotal(value: String?): Long? = parseContentRangeTotal(value)
+
+    private fun isAllowedDownloadUrl(value: String): Boolean = runCatching {
+        val parsed = URL(value)
+        parsed.protocol.equals("https", ignoreCase = true) ||
+            (allowLocalHttpDownloadsForTests &&
+                parsed.protocol.equals("http", ignoreCase = true) &&
+                parsed.host in setOf("localhost", "127.0.0.1", "::1"))
+    }.getOrDefault(false)
 
     private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
         val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
@@ -993,7 +1025,7 @@ sealed interface MobileIndexFetchResult {
 
 private data class DownloadCandidate(val url: String, val accept: String)
 
-private data class ResumeMetadata(val url: String, val validator: String?)
+private data class ResumeMetadata(val url: String, val validator: String?, val identity: String?)
 
 private class InvalidDownloadContentException(message: String) : Exception(message)
 

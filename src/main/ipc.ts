@@ -37,7 +37,8 @@ import type {
   ProjectSummary,
   ResearchSaveRequest,
   ScanCandidate,
-  ScanOptions
+  ScanOptions,
+  TemplateCreateOptions
 } from "../shared/types";
 import { BuildService, selectBuildEngine } from "./services/build";
 import { createProjectCatalog } from "./services/catalog";
@@ -216,7 +217,11 @@ export function registerIpcHandlers(
   const currentVersion = app.getVersion();
   const updates = new AppUpdateService(join(userData, "updates"), {
     currentVersion,
-    releaseChannel: currentVersion.includes("-beta.") ? "beta" : "stable"
+    releaseChannel: currentVersion.includes("-beta.") ? "beta" : "stable",
+    onStatus: (status) => {
+      const owner = getWindow();
+      if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.updatesEvent, status);
+    }
   });
   const references = new ReferenceService({
     openPath: (path) => shell.openPath(path),
@@ -681,6 +686,7 @@ export function registerIpcHandlers(
   });
   register(IPC.updatesCheck, () => updates.check(false));
   register(IPC.updatesDownload, () => updates.download());
+  register(IPC.updatesCancel, () => updates.cancel());
   register(IPC.updatesInstall, async () => {
     const installer = await updates.downloadedInstaller();
     const error = await shell.openPath(installer);
@@ -973,6 +979,15 @@ export function registerIpcHandlers(
     }
     return templates.create(canonicalRoot, name);
   });
+  register(IPC.templatesCreateFromProject, async (projectId: string, options: TemplateCreateOptions) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    if (!options || typeof options.name !== "string") throw new Error("A template name is required.");
+    return templates.create(root, options.name, {
+      description: typeof options.description === "string" ? options.description : undefined,
+      category: options.category
+    });
+  });
+  register(IPC.templatesDelete, async (templateId: string) => templates.delete(templateId));
   register(IPC.templatesInstantiate, async (templateId: string, parentRoot: string, name: string) =>
     templates.instantiate(templateId, await access.requireSelection(parentRoot), name)
   );

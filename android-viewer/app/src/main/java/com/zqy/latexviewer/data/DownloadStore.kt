@@ -25,10 +25,41 @@ import java.nio.file.StandardCopyOption
 
 class DownloadStore(private val context: Context) {
     private val dao by lazy { ViewerDatabase.get(context.applicationContext).viewerDao() }
+
+    /**
+     * Returns a staging file bound to the immutable download identity rather
+     * than a WorkManager attempt id. A retry creates a new WorkRequest, but it
+     * must continue the same verified byte stream instead of starting at zero.
+     *
+     * [legacyTaskId] migrates partials created by releases that used the
+     * WorkRequest UUID as the file name. The matching resume validator moves
+     * with the partial so an in-flight upgrade remains resumable.
+     */
+    fun resumableStagingFile(uniqueKey: String, legacyTaskId: String? = null): File {
+        // App-private, no-backup storage is not part of Android's disposable
+        // cache. This keeps a large APK/PDF fragment across process death,
+        // screen-off and routine cache cleanup without uploading it to backup.
+        val directory = File(context.noBackupFilesDir, "background-downloads").apply { mkdirs() }
+        val stable = File(directory, "download-${stableDownloadIdentity(uniqueKey)}.part")
+        val legacy = legacyTaskId?.let(::stagingFile)
+        if (!stable.exists() && legacy?.isFile == true) {
+            moveOrCopy(legacy, stable)
+            val legacyResume = File(legacy.parentFile, "${legacy.name}.resume")
+            val stableResume = File(stable.parentFile, "${stable.name}.resume")
+            if (legacyResume.isFile && !stableResume.exists()) moveOrCopy(legacyResume, stableResume)
+        }
+        return stable
+    }
+
     fun stagingFile(taskId: String): File {
         val safeId = taskId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
         val directory = File(context.cacheDir, "background-downloads").apply { mkdirs() }
         return File(directory, "${safeId.ifBlank { "download" }}.part")
+    }
+
+    fun discardResumableStaging(uniqueKey: String, legacyTaskId: String? = null) {
+        discardStaging(resumableStagingFile(uniqueKey))
+        legacyTaskId?.let { discardStaging(stagingFile(it)) }
     }
 
     fun discardStaging(file: File) {
@@ -751,3 +782,8 @@ internal fun stablePdfCacheFileName(cacheKey: String): String {
         .joinToString("") { "%02x".format(it) }
     return "$readable-$digest.pdf"
 }
+
+/** Stable, filesystem-safe identity for resumable transfer fragments. */
+internal fun stableDownloadIdentity(uniqueKey: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(uniqueKey.toByteArray(Charsets.UTF_8))
+    .joinToString("") { "%02x".format(it) }

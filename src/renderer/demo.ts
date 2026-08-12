@@ -350,8 +350,9 @@ const candidates: ScanCandidate[] = [
 ];
 
 const templates: TemplateInfo[] = [
-  { id: "elegant-book", name: "ElegantBook 讲义", description: "含章节目录、参考文献与索引的中文书稿", rootPath: "templates/elegant-book", className: "elegantbook", assetPins: demoManifest.assets },
-  { id: "article", name: "简洁论文", description: "适合单文件或小型多文件论文", rootPath: "templates/article", className: "article", assetPins: [] }
+  { id: "builtin-book", name: "分章书稿", description: "含独立章节目录的中文书稿", rootPath: "templates/book", source: "builtin", category: "book", createdAt: "2026-08-12T00:00:00.000Z", fileCount: 2, totalBytes: 2048, className: "book", assetPins: demoManifest.assets },
+  { id: "builtin-article", name: "简洁论文", description: "适合单文件或小型多文件论文", rootPath: "templates/article", source: "builtin", category: "article", createdAt: "2026-08-12T00:00:00.000Z", fileCount: 1, totalBytes: 760, className: "article", assetPins: [] },
+  { id: "user-probability-notes", name: "我的概率论笔记", description: "从已有项目保存的个人模板", rootPath: "templates/probability", source: "user", category: "book", createdAt: "2026-08-11T08:30:00.000Z", fileCount: 12, totalBytes: 48_300, className: "elegantbook", assetPins: demoManifest.assets }
 ];
 
 export interface DemoWorkbench {
@@ -746,8 +747,13 @@ export function createWorkbench(): DemoWorkbench {
         updateStatus = { ...updateStatus, state: "downloaded", downloadedPath: "D:\\Downloads\\LaTeX-Project-Manager-Setup.exe", message: "演示模式：更新已下载。" };
         return structuredClone(updateStatus);
       },
+      cancel: async () => {
+        updateStatus = { ...updateStatus, state: "cancelled", phase: "cancelled", canRetry: true, message: "演示模式：更新下载已取消。" };
+        return structuredClone(updateStatus);
+      },
       install: async () => undefined,
-      openRelease: async () => undefined
+      openRelease: async () => undefined,
+      onEvent: () => () => undefined
     },
     references: {
       list: async () => structuredClone(referenceDocuments),
@@ -849,6 +855,8 @@ export function createWorkbench(): DemoWorkbench {
     templates: {
       list: async () => structuredClone(templates),
       create: async () => readonlyError(),
+      createFromProject: async () => readonlyError(),
+      delete: async () => readonlyError(),
       instantiate: async () => readonlyError()
     },
     toolchains: {

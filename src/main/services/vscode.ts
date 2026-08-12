@@ -7,7 +7,7 @@ import type { VsCodeEditor, VsCodeStatus } from "../../shared/types";
 interface VsCodeInstallation {
   editor: VsCodeEditor;
   executablePath: string;
-  source: "path" | "common";
+  source: "configured" | "path" | "common";
   extensionDirectory: ".vscode" | ".vscode-insiders" | ".vscode-oss";
 }
 
@@ -29,18 +29,33 @@ function defaultReadDirectory(path: string): string[] {
   }
 }
 
-function launchDetached(executablePath: string, args: string[]): Promise<void> {
+export function launchVsCodeProcess(executablePath: string, args: string[]): Promise<void> {
   return new Promise((resolveLaunch, rejectLaunch) => {
     const child = spawn(executablePath, args, {
-      detached: true,
+      detached: false,
       shell: false,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true
     });
-    child.once("error", rejectLaunch);
-    child.once("spawn", () => {
+    let stderr = "";
+    let settled = false;
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = `${stderr}${chunk.toString("utf8")}`.slice(-4_000); });
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stderr?.destroy();
+      if (error) rejectLaunch(error); else resolveLaunch();
+    };
+    const timer = setTimeout(() => {
       child.unref();
-      resolveLaunch();
+      finish();
+    }, 1_200);
+    timer.unref();
+    child.once("error", (error) => finish(new Error(`无法启动 VS Code：${error.message}`)));
+    child.once("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(`VS Code 启动失败（退出代码 ${code ?? "未知"}）${stderr.trim() ? `：${stderr.trim()}` : "。"}`));
     });
   });
 }
@@ -50,7 +65,7 @@ function installationCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEn
   const add = (
     editor: VsCodeEditor,
     executablePath: string | undefined,
-    source: "path" | "common",
+    source: VsCodeInstallation["source"],
     extensionDirectory: VsCodeInstallation["extensionDirectory"] = editor === "codium" ? ".vscode-oss" : ".vscode"
   ): void => {
     if (executablePath) candidates.push({ editor, executablePath: resolve(executablePath), source, extensionDirectory });
@@ -61,6 +76,8 @@ function installationCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEn
     .split(separator)
     .map((path) => path.trim().replace(/^"|"$/g, ""))
     .filter(Boolean);
+
+  add("code", env.VSCODE_EXECUTABLE ?? env.VSCODE_CLI, "configured");
 
   for (const directory of pathDirectories) {
     if (platform === "win32") {
@@ -87,6 +104,9 @@ function installationCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEn
     add("codium", env.ProgramFiles ? join(env.ProgramFiles, "VSCodium", "VSCodium.exe") : undefined, "common");
     add("codium", programFilesX86 ? join(programFilesX86, "VSCodium", "VSCodium.exe") : undefined, "common");
     add("code", join(env.SystemDrive || "C:", "vscode", "Microsoft VS Code", "Code.exe"), "common");
+    add("code", env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Microsoft", "WindowsApps", "code.exe") : undefined, "common");
+    add("code", env.USERPROFILE ? join(env.USERPROFILE, "scoop", "apps", "vscode", "current", "Code.exe") : undefined, "common");
+    add("codium", env.USERPROFILE ? join(env.USERPROFILE, "scoop", "apps", "vscodium", "current", "VSCodium.exe") : undefined, "common");
   } else if (platform === "darwin") {
     add("code", "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code", "common");
     add("codium", "/Applications/VSCodium.app/Contents/Resources/app/bin/codium", "common");
@@ -146,7 +166,7 @@ export class VsCodeService {
     this.env = options.env ?? process.env;
     this.exists = options.exists ?? existsSync;
     this.readDirectory = options.readDirectory ?? defaultReadDirectory;
-    this.launch = options.launch ?? launchDetached;
+    this.launch = options.launch ?? launchVsCodeProcess;
   }
 
   status(): VsCodeStatus {
@@ -156,12 +176,15 @@ export class VsCodeService {
       editor: installation?.editor,
       executablePath: installation?.executablePath,
       source: installation?.source,
+      diagnostics: installation
+        ? undefined
+        : ["未在 PATH、用户安装目录、系统安装目录、WindowsApps、Scoop 或便携版常用位置找到 VS Code。"],
       latexWorkshop: latexWorkshopStatus(installation, this.env, this.exists, this.readDirectory)
     };
   }
 
   async openProject(projectRoot: string): Promise<void> {
-    await this.open(["--reuse-window", projectRoot]);
+    await this.open(["--reuse-window", resolve(projectRoot)]);
   }
 
   async openFile(projectRoot: string, path: string, line?: number): Promise<void> {
@@ -170,8 +193,8 @@ export class VsCodeService {
       : undefined;
     await this.open(
       safeLine
-        ? ["--reuse-window", projectRoot, "--goto", `${path}:${safeLine}`]
-        : ["--reuse-window", projectRoot, path]
+        ? ["--reuse-window", "--goto", `${resolve(path)}:${safeLine}:1`, resolve(projectRoot)]
+        : ["--reuse-window", resolve(path), resolve(projectRoot)]
     );
   }
 
@@ -181,7 +204,7 @@ export class VsCodeService {
 
   private async open(args: string[]): Promise<void> {
     const installation = this.installation();
-    if (!installation) throw new Error("VS Code or VSCodium was not found.");
+    if (!installation) throw new Error("未检测到 VS Code 或 VSCodium。请安装后重启客户端，或通过 VSCODE_EXECUTABLE 指定 Code.exe 路径。");
     await this.launch(installation.executablePath, args);
   }
 }

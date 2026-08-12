@@ -138,12 +138,14 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
   async function openProjectInVsCode() {
     const vscode = getVsCodeApi(api);
     if (!vscode || vsCodeStatus?.available === false) {
-      onNotify("未检测到 VS Code 或 VSCodium");
+      onNotify(vsCodeStatus?.diagnostics?.[0] ?? "未检测到 VS Code 或 VSCodium；安装后请重启客户端");
       return;
     }
     try {
       await vscode.openProject(project.rootPath);
-      onNotify(isDemo ? "演示模式：已模拟打开 VS Code 项目" : "已在 VS Code 中打开项目");
+      onNotify(isDemo ? "演示模式：已模拟打开 VS Code 项目" : vsCodeStatus?.latexWorkshop.state === "notFound"
+        ? "已在 VS Code 中打开项目；未检测到 LaTeX Workshop，编译功能可能不可用"
+        : "已在 VS Code 中打开项目");
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法在 VS Code 中打开项目");
     }
@@ -208,7 +210,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
         </div>
         <div className="project-header-actions">
           <button className="button primary" onClick={() => void openProjectFolder()} disabled={!project.pathAvailable}><FolderOpen size={16} />打开文件夹</button>
-          <button className="button secondary" onClick={() => void openProjectInVsCode()} disabled={vsCodeStatus?.available === false}><Code2 size={16} />在 VS Code 中打开</button>
+          <button className="button secondary" onClick={() => void openProjectInVsCode()}><Code2 size={16} />在 VS Code 中打开</button>
         </div>
       </header>
 
@@ -342,7 +344,7 @@ function ProjectIntroductionTab({
             <div><span>当前方案</span><strong>{profile.name}</strong></div>
             <div><span>文档类与引擎</span><strong>{target.classConfig.name} · {target.engine === "auto" ? "自动检测" : target.engine}</strong></div>
             <div><span>TeX 工具链</span><strong>{toolchain ? `${toolchain.name === "texlive" ? "TeX Live" : toolchain.name} ${toolchain.version ?? ""}` : "未检测到"}</strong></div>
-            <div><span>{editorLabel}</span><strong>{vsCodeStatus?.available ? "已就绪" : "未检测到"}</strong></div>
+            <div><span>{editorLabel}</span><strong>{vsCodeStatus?.available ? "已就绪" : "未检测到"}</strong>{vsCodeStatus?.executablePath && <small title={vsCodeStatus.executablePath}>{vsCodeStatus.executablePath}</small>}</div>
             <div><span>LaTeX Workshop</span><strong>{workshop}</strong></div>
             <div className="introduction-pdf"><span>最近 PDF</span><strong>{pdfName}</strong><small>{pdfDetail}</small></div>
           </div>

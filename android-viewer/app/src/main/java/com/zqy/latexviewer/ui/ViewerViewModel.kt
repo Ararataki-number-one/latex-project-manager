@@ -28,6 +28,8 @@ import com.zqy.latexviewer.model.MobileProjectIndex
 import com.zqy.latexviewer.model.OfflinePdfDocument
 import com.zqy.latexviewer.model.PdfDocument
 import com.zqy.latexviewer.model.PdfBookmark
+import com.zqy.latexviewer.model.PersistentDownloadKind
+import com.zqy.latexviewer.model.PersistentDownloadState
 import com.zqy.latexviewer.model.PersistentDownloadTask
 import com.zqy.latexviewer.model.ReadingProgress
 import com.zqy.latexviewer.model.RepositoryRefreshFailure
@@ -944,8 +946,48 @@ class ViewerViewModel(
             showNotice("当前已经是最新版本")
             return
         }
-        backgroundDownloads.enqueueUpdate(release)
-        showNotice("Android ${release.version} 已加入后台下载，息屏后仍会继续")
+        val existing = _state.value.downloadTasks
+            .filter { it.kind == PersistentDownloadKind.APP_UPDATE && it.name == release.name }
+            .maxByOrNull { it.updatedAt }
+        when (existing?.state) {
+            PersistentDownloadState.QUEUED,
+            PersistentDownloadState.RUNNING,
+            PersistentDownloadState.WAITING_FOR_NETWORK -> {
+                _state.update { it.copy(transferPanelVisible = true) }
+                showNotice("Android ${release.version} 已在下载队列中")
+            }
+            PersistentDownloadState.FAILED,
+            PersistentDownloadState.CANCELLED -> {
+                val workId = backgroundDownloads.retry(existing.id)
+                if (workId == null) {
+                    backgroundDownloads.enqueueUpdate(release)
+                }
+                _state.update { it.copy(transferPanelVisible = true) }
+                showNotice("已从上次进度继续下载 Android ${release.version}")
+            }
+            else -> {
+                backgroundDownloads.enqueueUpdate(release)
+                _state.update { it.copy(transferPanelVisible = true) }
+                showNotice("Android ${release.version} 已加入后台下载，息屏后仍会继续")
+            }
+        }
+    }
+
+    fun cancelUpdateDownload() {
+        val releaseName = _state.value.updateInfo?.name ?: return
+        val task = _state.value.downloadTasks
+            .filter {
+                it.kind == PersistentDownloadKind.APP_UPDATE &&
+                    it.name == releaseName &&
+                    it.state in setOf(
+                        PersistentDownloadState.QUEUED,
+                        PersistentDownloadState.RUNNING,
+                        PersistentDownloadState.WAITING_FOR_NETWORK
+                    )
+            }
+            .maxByOrNull { it.updatedAt }
+            ?: return
+        cancelDownloadTask(task.id)
     }
 
     fun openReleasePage() {

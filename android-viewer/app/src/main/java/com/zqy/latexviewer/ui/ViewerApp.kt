@@ -123,6 +123,7 @@ import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
 import com.zqy.latexviewer.model.OfflinePdfDocument
+import com.zqy.latexviewer.model.PersistentDownloadKind
 import com.zqy.latexviewer.model.PersistentDownloadState
 import com.zqy.latexviewer.model.PersistentDownloadTask
 import com.zqy.latexviewer.model.ProjectResearchItem
@@ -415,6 +416,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onAutoDownloadChange = viewModel::setAutoDownloadUpdates,
                         onCheck = { viewModel.checkForUpdates() },
                         onDownloadUpdate = viewModel::downloadUpdate,
+                        onCancelUpdate = viewModel::cancelUpdateDownload,
                         onInstallUpdate = ::installDownloadedUpdate,
                         onOpenRelease = viewModel::openReleasePage,
                         onClearPdfCache = viewModel::clearPdfCache,
@@ -2239,6 +2241,7 @@ private fun SettingsScreen(
     onAutoDownloadChange: (Boolean) -> Unit,
     onCheck: () -> Unit,
     onDownloadUpdate: () -> Unit,
+    onCancelUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
     onOpenRelease: () -> Unit,
     onClearPdfCache: () -> Unit,
@@ -2250,6 +2253,15 @@ private fun SettingsScreen(
     onGlassModeChange: (LiquidGlassMode) -> Unit
 ) {
     var confirmDisconnect by remember { mutableStateOf(false) }
+    val currentUpdateName = state.updateInfo?.name
+    val updateTask = state.downloadTasks
+        .filter { it.kind == PersistentDownloadKind.APP_UPDATE && it.name == currentUpdateName }
+        .maxByOrNull { it.updatedAt }
+    val updateIsActive = updateTask?.state in setOf(
+        PersistentDownloadState.QUEUED,
+        PersistentDownloadState.RUNNING,
+        PersistentDownloadState.WAITING_FOR_NETWORK
+    )
 
     if (confirmDisconnect) {
         AlertDialog(
@@ -2458,10 +2470,83 @@ private fun SettingsScreen(
                             }
                         }
                     }
+                    updateTask?.takeIf {
+                        it.state in setOf(
+                            PersistentDownloadState.QUEUED,
+                            PersistentDownloadState.RUNNING,
+                            PersistentDownloadState.WAITING_FOR_NETWORK,
+                            PersistentDownloadState.FAILED
+                        )
+                    }?.let { task ->
+                        val determinate = task.total > 0
+                        val progress = if (determinate) {
+                            (task.downloaded.toFloat() / task.total.toFloat()).coerceIn(0f, 1f)
+                        } else 0f
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        when (task.state) {
+                                            PersistentDownloadState.QUEUED -> "更新已排队"
+                                            PersistentDownloadState.WAITING_FOR_NETWORK -> "等待网络，稍后自动继续"
+                                            PersistentDownloadState.FAILED -> "更新下载已暂停"
+                                            else -> "正在下载更新"
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    if (determinate) Text("${(progress * 100).toInt()}%")
+                                }
+                                if (determinate) {
+                                    LinearProgressIndicator(
+                                        progress = { progress },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
+                                    Text(
+                                        "${formatBytes(task.downloaded)} / ${formatBytes(task.total)}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    LinearProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
+                                    if (task.downloaded > 0) {
+                                        Text(
+                                            "已保留 ${formatBytes(task.downloaded)}，恢复后从这里继续",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                task.error?.takeIf { task.state == PersistentDownloadState.FAILED }?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                                if (updateIsActive) {
+                                    TextButton(onClick = onCancelUpdate, modifier = Modifier.align(Alignment.End)) {
+                                        Text("取消下载")
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (state.updateAvailable) {
                         Button(
                             onClick = if (state.downloadedApkPath == null) onDownloadUpdate else onInstallUpdate,
-                            enabled = state.transfer == null,
+                            enabled = !updateIsActive,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 50.dp),
@@ -2473,7 +2558,14 @@ private fun SettingsScreen(
                                 modifier = Modifier.size(19.dp)
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text(if (state.downloadedApkPath == null) "下载更新" else "安装更新")
+                            Text(
+                                when {
+                                    state.downloadedApkPath != null -> "安装更新"
+                                    updateIsActive -> "正在下载"
+                                    updateTask?.state == PersistentDownloadState.FAILED -> "继续下载"
+                                    else -> "下载更新"
+                                }
+                            )
                         }
                     }
                     Row(
@@ -2482,7 +2574,7 @@ private fun SettingsScreen(
                     ) {
                         OutlinedButton(
                             onClick = onCheck,
-                            enabled = !state.updateChecking && state.transfer == null,
+                            enabled = !state.updateChecking && !updateIsActive,
                             modifier = Modifier.weight(1f)
                         ) {
                             if (state.updateChecking) {

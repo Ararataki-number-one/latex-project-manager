@@ -43,8 +43,8 @@ android {
         create("beta") {
             dimension = "releaseChannel"
             applicationIdSuffix = ".beta"
-            versionCode = 1_000_001
-            versionName = "1.0.0-beta.1"
+            versionCode = 1_000_002
+            versionName = "1.0.0-beta.2"
             buildConfigField("String", "RELEASE_CHANNEL", "\"beta\"")
         }
     }
