@@ -3,6 +3,12 @@ import type {
   AppUpdateStatus,
   AppRuntimeSettings,
   CatalogStatus,
+  CatalogBackupInfo,
+  BackupRestoreResult,
+  BackupSnapshot,
+  BackupVerification,
+  CatalogProjectResearchItem,
+  CatalogRestoreResult,
   DesktopEnvironmentStatus,
   ExportResult,
   GitIdentity,
@@ -17,16 +23,23 @@ import type {
   MobileProjectIndex,
   ProjectManifest,
   ProjectCollection,
+  ProjectBackupPreview,
+  ProjectBackupSettings,
   ProjectFileEntry,
   ProjectFileListOptions,
   ProjectFileOperationPlan,
   ProjectFileOperationRequest,
   ProjectFileOperationResult,
+  ProjectFileOperationHistoryEntry,
   ProjectFileUndoResult,
   ProjectPdfInfo,
   ProjectStorageInfo,
+  ProjectSearchIndexStatus,
   ProjectSummary,
   ReferenceDocumentInfo,
+  LegacyResearchCandidate,
+  ResearchSaveRequest,
+  ResearchSearchHit,
   ScanCandidate,
   ScanOptions,
   TemplateInfo,
@@ -34,8 +47,8 @@ import type {
   TemporaryCleanupResult,
   ToolchainInfo,
   VsCodeStatus,
-  SyncSecurityFinding
-  ,SmartView
+  SyncSecurityFinding,
+  SmartView
 } from "./types";
 
 export const IPC = {
@@ -56,6 +69,16 @@ export const IPC = {
   libraryCleanupPreview: "library:cleanup-preview",
   libraryCleanupApply: "library:cleanup-apply",
   libraryStorageInfo: "library:storage-info",
+  catalogBackupsList: "catalog-backups:list",
+  catalogBackupsCreate: "catalog-backups:create",
+  catalogBackupsStageRestore: "catalog-backups:stage-restore",
+  projectBackupsPreview: "project-backups:preview",
+  projectBackupsCreate: "project-backups:create",
+  projectBackupsList: "project-backups:list",
+  projectBackupsVerify: "project-backups:verify",
+  projectBackupsRestore: "project-backups:restore",
+  projectBackupsSettings: "project-backups:settings",
+  projectBackupsSetSettings: "project-backups:set-settings",
   collectionsList: "collections:list",
   collectionsCreate: "collections:create",
   collectionsUpdate: "collections:update",
@@ -100,6 +123,14 @@ export const IPC = {
   referencesOpen: "references:open",
   referencesOpenFolder: "references:open-folder",
   referencesRemove: "references:remove",
+  researchList: "research:list",
+  researchListGlobal: "research:list-global",
+  researchDiscoverLegacy: "research:discover-legacy",
+  researchSave: "research:save",
+  researchOpenAttachment: "research:open-attachment",
+  researchSearchIndex: "research-search:index",
+  researchSearchIndexAll: "research-search:index-all",
+  researchSearchQuery: "research-search:query",
   manifestRead: "manifest:read",
   manifestWrite: "manifest:write",
   migrationPreview: "migration:preview",
@@ -124,6 +155,7 @@ export const IPC = {
   filePlan: "file:plan",
   fileApply: "file:apply",
   fileUndo: "file:undo",
+  fileHistory: "file:history",
   fileOpen: "file:open",
   fileReveal: "file:reveal",
   templatesList: "templates:list",
@@ -147,7 +179,7 @@ export interface WorkbenchApi {
     importMany(candidates: ScanCandidate[]): Promise<ProjectSummary[]>;
     catalogStatus(): Promise<CatalogStatus>;
     relink(projectId: string, rootPath: string): Promise<ProjectSummary>;
-    update(projectId: string, patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>): Promise<ProjectSummary>;
+    update(projectId: string, patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags" | "lifecycle" | "protectionState">>): Promise<ProjectSummary>;
     openFolder(projectId: string): Promise<void>;
     openInVsCode(projectId: string): Promise<void>;
     copy(projectId: string, destinationParent: string, name: string): Promise<ProjectSummary>;
@@ -164,6 +196,20 @@ export interface WorkbenchApi {
     create(input: Pick<ProjectCollection, "name" | "color" | "projectIds">): Promise<ProjectCollection>;
     update(id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>): Promise<ProjectCollection>;
     delete(id: string): Promise<void>;
+  };
+  catalogBackups: {
+    list(): Promise<CatalogBackupInfo[]>;
+    create(): Promise<CatalogBackupInfo | null>;
+    stageRestore(): Promise<CatalogRestoreResult | null>;
+  };
+  projectBackups: {
+    preview(projectId: string): Promise<ProjectBackupPreview>;
+    create(projectId: string): Promise<BackupSnapshot>;
+    list(projectId: string): Promise<BackupSnapshot[]>;
+    verify(projectId: string, snapshotId: string): Promise<BackupVerification>;
+    restore(projectId: string, snapshotId: string): Promise<BackupRestoreResult | null>;
+    settings(projectId: string): Promise<ProjectBackupSettings>;
+    setSettings(projectId: string, settings: Pick<ProjectBackupSettings, "frequency" | "retainCount">): Promise<ProjectBackupSettings>;
   };
   smartViews: {
     list(): Promise<SmartView[]>;
@@ -217,6 +263,18 @@ export interface WorkbenchApi {
     openFolder(projectId: string): Promise<void>;
     remove(projectId: string, relativePath: string): Promise<ReferenceDocumentInfo[]>;
   };
+  research: {
+    list(projectId: string): Promise<CatalogProjectResearchItem[]>;
+    listGlobal(): Promise<CatalogProjectResearchItem[]>;
+    discoverLegacy(projectId: string): Promise<LegacyResearchCandidate[]>;
+    save(projectId: string, request: ResearchSaveRequest): Promise<CatalogProjectResearchItem[]>;
+    openAttachment(projectId: string, itemId: string, attachmentId: string): Promise<void>;
+  };
+  researchSearch: {
+    index(projectId: string): Promise<ProjectSearchIndexStatus>;
+    indexAll(): Promise<ProjectSearchIndexStatus[]>;
+    query(query: string, projectIds?: string[], limit?: number): Promise<ResearchSearchHit[]>;
+  };
   manifest: {
     read(projectRoot: string): Promise<ProjectManifest>;
     write(projectRoot: string, manifest: ProjectManifest): Promise<ProjectManifest>;
@@ -232,6 +290,7 @@ export interface WorkbenchApi {
     plan(projectId: string, request: ProjectFileOperationRequest): Promise<ProjectFileOperationPlan>;
     apply(projectId: string, planId: string): Promise<ProjectFileOperationResult>;
     undo(projectId: string, undoId: string): Promise<ProjectFileUndoResult>;
+    history(projectId: string, limit?: number): Promise<ProjectFileOperationHistoryEntry[]>;
     open(projectId: string, path: string): Promise<void>;
     reveal(projectId: string, path: string): Promise<void>;
     rename(projectId: string, fromPath: string, toPath: string, expectedHash?: string): Promise<void>;

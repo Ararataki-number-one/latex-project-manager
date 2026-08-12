@@ -139,7 +139,7 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
   await expect(page.getByRole("button", { name: /导入文件/ })).toBeVisible();
   await projectTabs.getByRole("tab", { name: /原始文稿/ }).click();
   await expect(page.getByRole("heading", { name: "原始文稿" })).toBeVisible();
-  await expect(page.getByText("Alon-Spencer-The-Probabilistic-Method.pdf", { exact: true })).toBeVisible();
+  await expect(page.locator(".reference-main").filter({ hasText: "Alon-Spencer-The-Probabilistic-Method.pdf" })).toBeVisible();
   await expect(page.getByText(/\\references/).first()).toBeVisible();
   await projectTabs.getByRole("tab", { name: "同步", exact: true }).click();
   await expect(page.getByRole("heading", { name: "GitHub 同步" })).toBeVisible();
@@ -274,4 +274,59 @@ test("跟随系统主题会响应系统深浅色变化", async ({ page }) => {
 
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("桌面 1.0 信息架构提供研究资料、智能视图与三栏资料浏览", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+
+  const libraryNavigation = page.getByRole("navigation", { name: "资料库导航" });
+  await expect(libraryNavigation.getByRole("button", { name: "研究资料" })).toBeVisible();
+  await expect(libraryNavigation.getByRole("button", { name: "待整理" })).toBeVisible();
+  await expect(libraryNavigation.getByRole("button", { name: "同步需处理" })).toBeVisible();
+  await expect(libraryNavigation.getByText("智能视图", { exact: true })).toBeVisible();
+  await expect(libraryNavigation.getByText("集合", { exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "应用导航" })).toContainText("活动中心");
+
+  await libraryNavigation.getByRole("button", { name: "研究资料" }).click();
+  await expect(page.getByRole("heading", { name: "研究资料", exact: true })).toBeVisible();
+  await expect(page.getByLabel("研究资料列表").getByText("The Probabilistic Method", { exact: true })).toBeVisible();
+  await page.getByLabel("研究资料列表").getByText("The Probabilistic Method", { exact: true }).click();
+  await expect(page.getByLabel("资料检查器")).toContainText("2");
+  await page.getByLabel("资料检查器").getByRole("button", { name: /概率方法笔记/ }).click();
+  await expect(page.getByRole("tab", { name: /研究资料/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".reference-browser")).toBeVisible();
+  await page.getByRole("list", { name: "原始文稿列表" }).getByRole("button", { name: /The Probabilistic Method/ }).click();
+  const researchInspector = page.getByRole("complementary", { name: /资料详情/ });
+  await expect(researchInspector).toBeVisible();
+  await expect(page.getByLabel("研究资料分类")).toBeVisible();
+  await expect(researchInspector.getByRole("checkbox", { name: "关联到整个项目" })).toBeChecked();
+  await expect(researchInspector.getByRole("combobox", { name: "整个项目的资料角色" })).toHaveValue("primarySource");
+  await expect(researchInspector.getByRole("combobox", { name: "整个项目的首选附件" })).toHaveValue("attachment-probabilistic-method");
+
+  await researchInspector.getByRole("checkbox", { name: "关联到讲义正文" }).check();
+  await researchInspector.getByRole("combobox", { name: "讲义正文的资料角色" }).selectOption("translationSource");
+  await researchInspector.getByRole("combobox", { name: "讲义正文的首选附件" }).selectOption("attachment-probabilistic-method");
+  await researchInspector.getByRole("checkbox", { name: "关联到习题单" }).check();
+  await researchInspector.getByRole("combobox", { name: "习题单的资料角色" }).selectOption("supplement");
+  await researchInspector.getByRole("combobox", { name: "习题单的首选附件" }).selectOption("attachment-probabilistic-method");
+  await researchInspector.getByRole("button", { name: "保存资料信息" }).click();
+  await expect(researchInspector.getByRole("combobox", { name: "讲义正文的资料角色" })).toHaveValue("translationSource");
+  await expect(researchInspector.getByRole("combobox", { name: "讲义正文的首选附件" })).toHaveValue("attachment-probabilistic-method");
+  await expect(researchInspector.getByRole("combobox", { name: "习题单的资料角色" })).toHaveValue("supplement");
+  await expect(researchInspector.getByRole("combobox", { name: "习题单的首选附件" })).toHaveValue("attachment-probabilistic-method");
+  await expectNoHorizontalOverflow(page);
+});
+
+test("Ctrl+K 全局搜索可定位项目、文件和研究资料", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.keyboard.press("Control+k");
+  const dialog = page.getByRole("dialog", { name: "全局搜索" });
+  await expect(dialog).toBeVisible();
+  const search = dialog.getByRole("combobox", { name: "搜索项目、文件和研究资料" });
+  await search.fill("Probabilistic Method");
+  await expect(dialog.getByRole("option", { name: /The Probabilistic Method/ }).first()).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });

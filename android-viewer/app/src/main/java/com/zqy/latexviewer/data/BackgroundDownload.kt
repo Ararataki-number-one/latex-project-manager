@@ -59,6 +59,7 @@ data class BackgroundDownloadTask(
     val sha: String? = null,
     val commitSha: String? = null,
     val lfsOidSha256: String? = null,
+    val contentSha256: String? = null,
     val size: Long = -1,
     val downloadUrl: String? = null,
     val cacheKey: String? = null,
@@ -95,6 +96,7 @@ data class BackgroundDownloadTask(
                         sha = value.optionalString("sha"),
                         commitSha = value.optionalString("commitSha"),
                         lfsOidSha256 = value.optionalString("lfsOidSha256"),
+                        contentSha256 = value.optionalString("contentSha256"),
                         size = value.optLong("size", -1),
                         downloadUrl = value.optionalString("downloadUrl"),
                         cacheKey = value.optionalString("cacheKey"),
@@ -179,6 +181,7 @@ class BackgroundDownloadManager(context: Context) {
             sha = item.sha,
             commitSha = item.commitSha ?: repository.commitSha,
             lfsOidSha256 = item.lfsOidSha256,
+            contentSha256 = item.contentSha256,
             size = item.size,
             downloadUrl = item.downloadUrl
         )
@@ -217,6 +220,7 @@ class BackgroundDownloadManager(context: Context) {
             sha = item.sha,
             commitSha = item.commitSha ?: repository.commitSha,
             lfsOidSha256 = item.lfsOidSha256,
+            contentSha256 = item.contentSha256,
             size = item.size,
             downloadUrl = item.downloadUrl,
             cacheKey = "${repository.owner}-${repository.name}-${item.sha}.pdf",
@@ -581,7 +585,8 @@ private fun BackgroundDownloadTask.contentModel(): GitHubContent = GitHubContent
     downloadUrl = downloadUrl,
     commitSha = commitSha,
     gitObjectSha = sha.orEmpty(),
-    lfsOidSha256 = lfsOidSha256
+    lfsOidSha256 = lfsOidSha256,
+    contentSha256 = contentSha256
 )
 
 private fun BackgroundDownloadTask.releaseAsset(): AndroidReleaseAsset = AndroidReleaseAsset(
@@ -611,6 +616,7 @@ private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
     .put("sha", sha)
     .put("commitSha", commitSha)
     .put("lfsOidSha256", lfsOidSha256)
+    .put("contentSha256", contentSha256)
     .put("size", size)
     .put("downloadUrl", downloadUrl)
     .put("cacheKey", cacheKey)

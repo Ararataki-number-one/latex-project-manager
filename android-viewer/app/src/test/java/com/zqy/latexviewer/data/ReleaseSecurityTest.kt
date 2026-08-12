@@ -24,6 +24,15 @@ class ReleaseSecurityTest {
     }
 
     @Test
+    fun `verifies a signed beta manifest on the beta channel`() {
+        val fixture = manifestFixture(version = "1.0.0-beta.2", tag = "v1.0.0-beta.2")
+
+        val asset = ReleaseSecurity.verifyManifest(fixture.json, "v1.0.0-beta.2", fixture.publicKeySpki)
+
+        assertEquals("1.0.0-beta.2", asset.version)
+    }
+
+    @Test
     fun `rejects a payload changed after signing`() {
         val fixture = manifestFixture(version = "0.11.0", tag = "v0.11.0")
         val root = JSONObject(fixture.json)

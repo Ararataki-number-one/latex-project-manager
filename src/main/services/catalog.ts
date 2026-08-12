@@ -1,14 +1,19 @@
-import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
   AppRuntimeSettings,
   BuildStatus,
+  CatalogBackupInfo,
   CatalogStatus,
   GitHubSyncEvent,
   ProjectCollection,
+  CatalogProjectResearchItem,
+  ProjectResearchItem,
+  ResearchSearchHit,
+  ResearchWork,
   ProjectManifest,
   ProjectFileOperationHistoryEntry,
   ProjectSummary,
@@ -31,6 +36,8 @@ interface CatalogRow {
   tags: string;
   thumbnail_path: string | null;
   description: string;
+  lifecycle: string;
+  protection_state: string;
 }
 
 const BUILD_STATUSES = new Set<BuildStatus>([
@@ -79,8 +86,14 @@ function fromRow(row: CatalogRow): ProjectSummary {
     trashedAt: row.trashed_at ?? undefined,
     tags: parseStringArray(row.tags),
     thumbnailPath: row.thumbnail_path ?? undefined,
-    pathAvailable: existsSync(row.root_path)
-    ,description: row.description
+    pathAvailable: existsSync(row.root_path),
+    description: row.description,
+    lifecycle: (["active", "paused", "completed", "archived"] as const).includes(row.lifecycle as any)
+      ? row.lifecycle as ProjectSummary["lifecycle"]
+      : (row.archived === 1 ? "archived" : "active"),
+    protectionState: (["unprotected", "localBackup", "github", "both"] as const).includes(row.protection_state as any)
+      ? row.protection_state as ProjectSummary["protectionState"]
+      : "unprotected"
   };
 }
 
@@ -109,7 +122,9 @@ export function projectSummaryFromManifest(
     tags: previous?.tags ?? [],
     thumbnailPath: previous?.thumbnailPath,
     pathAvailable: existsSync(rootPath),
-    description: previous?.description ?? ""
+    description: previous?.description ?? "",
+    lifecycle: previous?.lifecycle ?? (previous?.archived ? "archived" : "active"),
+    protectionState: previous?.protectionState ?? "unprotected"
   };
 }
 
@@ -128,6 +143,14 @@ export class ProjectCatalog {
     let fallbackReason: string | undefined;
     try {
       mkdirSync(dirname(databasePath), { recursive: true });
+      const pendingRestore = `${databasePath}.restore-pending`;
+      if (existsSync(pendingRestore)) {
+        this.assertValidBackup(pendingRestore);
+        if (existsSync(databasePath)) copyFileSync(databasePath, `${databasePath}.before-restore.bak`);
+        copyFileSync(pendingRestore, databasePath);
+        unlinkSync(pendingRestore);
+        for (const suffix of ["-wal", "-shm"]) if (existsSync(`${databasePath}${suffix}`)) unlinkSync(`${databasePath}${suffix}`);
+      }
       const databaseExisted = existsSync(databasePath);
       this.database = new DatabaseSync(databasePath, { timeout: 5_000 });
       const integrity = this.database.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: string }>;
@@ -144,9 +167,9 @@ export class ProjectCatalog {
         this.migrationBackupPath = backupOne;
       }
       const currentVersion = Number((this.database.prepare("PRAGMA user_version").get() as { user_version?: number })?.user_version ?? 0);
-      if (databaseExisted && currentVersion < 3) {
+      if (databaseExisted && currentVersion < 4) {
         this.database.exec("PRAGMA wal_checkpoint(FULL)");
-        const backupPath = `${databasePath}.pre-v3.bak`;
+        const backupPath = `${databasePath}.pre-v4.bak`;
         if (!existsSync(backupPath)) copyFileSync(databasePath, backupPath);
         this.migrationBackupPath = backupPath;
       }
@@ -169,6 +192,8 @@ export class ProjectCatalog {
           tags TEXT NOT NULL DEFAULT '[]',
           thumbnail_path TEXT,
           description TEXT NOT NULL DEFAULT '',
+          lifecycle TEXT NOT NULL DEFAULT 'active',
+          protection_state TEXT NOT NULL DEFAULT 'unprotected',
           updated_at TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS projects_root_path ON projects(root_path);
@@ -213,6 +238,58 @@ export class ProjectCatalog {
         );
         CREATE INDEX IF NOT EXISTS file_operation_project_time
           ON file_operation_history(project_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS research_works (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          authors TEXT NOT NULL DEFAULT '[]',
+          year INTEGER,
+          doi TEXT,
+          arxiv_id TEXT,
+          isbn TEXT,
+          language TEXT,
+          canonical_url TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS research_works_doi ON research_works(doi) WHERE doi IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS research_works_arxiv ON research_works(arxiv_id) WHERE arxiv_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS project_research_items (
+          id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          work_id TEXT NOT NULL,
+          item TEXT NOT NULL,
+          local_attachment_paths TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, id),
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+          FOREIGN KEY (work_id) REFERENCES research_works(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS project_research_work ON project_research_items(work_id);
+        CREATE TABLE IF NOT EXISTS search_documents (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL,
+          detail TEXT,
+          relative_path TEXT,
+          line INTEGER,
+          search_text TEXT NOT NULL,
+          source_hash TEXT,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS search_documents_project ON search_documents(project_id);
+        CREATE TABLE IF NOT EXISTS search_sources (
+          project_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          modified_ms REAL NOT NULL,
+          source_hash TEXT NOT NULL,
+          indexed_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, relative_path),
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
         `);
         const columns = new Set(
           (this.database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((column) => column.name)
@@ -220,7 +297,10 @@ export class ProjectCatalog {
         if (!columns.has("trashed")) this.database.exec("ALTER TABLE projects ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
         if (!columns.has("trashed_at")) this.database.exec("ALTER TABLE projects ADD COLUMN trashed_at TEXT");
         if (!columns.has("description")) this.database.exec("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''");
-        this.database.exec("PRAGMA user_version = 3; COMMIT;");
+        if (!columns.has("lifecycle")) this.database.exec("ALTER TABLE projects ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active'");
+        if (!columns.has("protection_state")) this.database.exec("ALTER TABLE projects ADD COLUMN protection_state TEXT NOT NULL DEFAULT 'unprotected'");
+        this.database.exec("UPDATE projects SET lifecycle = 'archived' WHERE archived = 1 AND lifecycle = 'active'");
+        this.database.exec("PRAGMA user_version = 4; COMMIT;");
       } catch (error) {
         try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
         throw error;
@@ -243,7 +323,7 @@ export class ProjectCatalog {
 
   status(): CatalogStatus {
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       persistent: this.persistent,
       databasePath: this.databasePath,
       backupPath: this.migrationBackupPath,
@@ -263,7 +343,7 @@ export class ProjectCatalog {
     const rows = this.database
       .prepare(
         `SELECT id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description
+                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, lifecycle, protection_state
            FROM projects
           ORDER BY favorite DESC, COALESCE(last_opened_at, updated_at) DESC, name COLLATE NOCASE`
       )
@@ -279,7 +359,7 @@ export class ProjectCatalog {
     const row = this.database
       .prepare(
         `SELECT id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description
+                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, lifecycle, protection_state
            FROM projects WHERE id = ?`
       )
       .get(projectId) as CatalogRow | undefined;
@@ -303,8 +383,8 @@ export class ProjectCatalog {
       .prepare(
         `INSERT INTO projects (
            id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-           last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, lifecycle, protection_state, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            root_path = excluded.root_path,
@@ -320,6 +400,8 @@ export class ProjectCatalog {
            tags = excluded.tags,
            thumbnail_path = excluded.thumbnail_path,
            description = excluded.description,
+           lifecycle = excluded.lifecycle,
+           protection_state = excluded.protection_state,
            updated_at = excluded.updated_at`
       )
       .run(
@@ -338,6 +420,8 @@ export class ProjectCatalog {
         JSON.stringify(normalized.tags),
         normalized.thumbnailPath ?? null,
         normalized.description ?? "",
+        normalized.lifecycle ?? (normalized.archived ? "archived" : "active"),
+        normalized.protectionState ?? "unprotected",
         new Date().toISOString()
       );
     return this.get(normalized.id)!;
@@ -355,7 +439,7 @@ export class ProjectCatalog {
 
   update(
     projectId: string,
-    patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>
+    patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags" | "lifecycle" | "protectionState">>
   ): ProjectSummary {
     const current = this.require(projectId);
     const trashedAt = patch.trashed === true
@@ -363,9 +447,13 @@ export class ProjectCatalog {
       : patch.trashed === false
         ? undefined
         : current.trashedAt;
+    const lifecycle = patch.lifecycle ?? (patch.archived === true ? "archived" : patch.archived === false && current.lifecycle === "archived" ? "active" : current.lifecycle);
+    const archived = lifecycle === "archived" ? true : patch.archived ?? current.archived;
     return this.upsert({
       ...current,
       ...patch,
+      lifecycle,
+      archived,
       trashedAt,
       tags: patch.tags ? [...new Set(patch.tags.map((tag) => tag.trim()).filter(Boolean))] : current.tags
     });
@@ -593,6 +681,235 @@ export class ProjectCatalog {
     }));
   }
 
+  listBackups(): CatalogBackupInfo[] {
+    const candidates: Array<[string, CatalogBackupInfo["kind"]]> = [
+      [`${this.databasePath}.backup-1`, "automatic"], [`${this.databasePath}.backup-2`, "automatic"],
+      [`${this.databasePath}.pre-v4.bak`, "preMigration"], [`${this.databasePath}.pre-v3.bak`, "preMigration"],
+      [`${this.databasePath}.before-restore.bak`, "automatic"]
+    ];
+    return candidates.flatMap(([path, kind]) => {
+      if (!existsSync(path)) return [];
+      const metadata = statSync(path);
+      return [{ path, kind, size: metadata.size, createdAt: metadata.mtime.toISOString() }];
+    }).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  backupTo(destination: string): CatalogBackupInfo {
+    if (!this.database) throw new Error("The catalog is running in temporary memory mode and cannot be backed up.");
+    const resolved = resolve(destination);
+    if (resolved === resolve(this.databasePath)) throw new Error("A backup cannot overwrite the active catalog.");
+    this.database.exec("PRAGMA wal_checkpoint(FULL)");
+    const temporary = `${resolved}.${randomUUID()}.tmp`;
+    copyFileSync(this.databasePath, temporary);
+    try {
+      this.assertValidBackup(temporary);
+      renameSync(temporary, resolved);
+    } catch (error) {
+      if (existsSync(temporary)) unlinkSync(temporary);
+      throw error;
+    }
+    const metadata = statSync(resolved);
+    return { path: resolved, kind: "manual", size: metadata.size, createdAt: metadata.mtime.toISOString() };
+  }
+
+  stageRestore(source: string): CatalogBackupInfo {
+    if (!this.database) throw new Error("The catalog is running in temporary memory mode and cannot stage a restore.");
+    const resolved = resolve(source);
+    this.assertValidBackup(resolved);
+    this.database.exec("PRAGMA wal_checkpoint(FULL)");
+    const pending = `${this.databasePath}.restore-pending`;
+    copyFileSync(resolved, pending);
+    this.assertValidBackup(pending);
+    const metadata = statSync(resolved);
+    return { path: resolved, kind: "manual", size: metadata.size, createdAt: metadata.mtime.toISOString() };
+  }
+
+  upsertResearchWork(work: ResearchWork): ResearchWork {
+    if (!this.database) {
+      throw new Error("The research library is read-only while the catalog is running in temporary memory mode. Restore persistent storage before saving research metadata.");
+    }
+    const normalized: ResearchWork = {
+      ...work,
+      title: work.title?.trim() || undefined,
+      authors: work.authors?.map((author) => author.trim()).filter(Boolean),
+      doi: work.doi?.trim() || undefined,
+      arxivId: work.arxivId?.trim() || undefined,
+      isbn: work.isbn?.trim() || undefined,
+      language: work.language?.trim() || undefined,
+      canonicalUrl: work.canonicalUrl?.trim() || undefined
+    };
+    this.database.prepare(`
+      INSERT INTO research_works
+        (id, title, authors, year, doi, arxiv_id, isbn, language, canonical_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET title=excluded.title, authors=excluded.authors, year=excluded.year,
+        doi=excluded.doi, arxiv_id=excluded.arxiv_id, isbn=excluded.isbn, language=excluded.language,
+        canonical_url=excluded.canonical_url, updated_at=excluded.updated_at
+    `).run(normalized.id, normalized.title ?? null, JSON.stringify(normalized.authors ?? []), normalized.year ?? null,
+      normalized.doi ?? null, normalized.arxivId ?? null, normalized.isbn ?? null, normalized.language ?? null,
+      normalized.canonicalUrl ?? null, normalized.createdAt, normalized.updatedAt);
+    return normalized;
+  }
+
+  researchWorks(): ResearchWork[] {
+    if (!this.database) return [];
+    return (this.database.prepare(`
+      SELECT id, title, authors, year, doi, arxiv_id, isbn, language, canonical_url, created_at, updated_at
+        FROM research_works ORDER BY COALESCE(title, id) COLLATE NOCASE
+    `).all() as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id), title: row.title ? String(row.title) : undefined, authors: parseStringArray(String(row.authors)),
+      year: row.year === null ? undefined : Number(row.year), doi: row.doi ? String(row.doi) : undefined,
+      arxivId: row.arxiv_id ? String(row.arxiv_id) : undefined, isbn: row.isbn ? String(row.isbn) : undefined,
+      language: row.language ? String(row.language) : undefined, canonicalUrl: row.canonical_url ? String(row.canonical_url) : undefined,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+    }));
+  }
+
+  researchItems(projectId?: string): CatalogProjectResearchItem[] {
+    if (!this.database) return [];
+    const statement = projectId ? this.database.prepare(`
+      SELECT project_id, work_id, item, local_attachment_paths, created_at, updated_at
+        FROM project_research_items WHERE project_id = ? ORDER BY updated_at DESC
+    `) : this.database.prepare(`
+      SELECT project_id, work_id, item, local_attachment_paths, created_at, updated_at
+        FROM project_research_items ORDER BY updated_at DESC
+    `);
+    const rows = (projectId ? statement.all(projectId) : statement.all()) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      projectId: String(row.project_id), workId: String(row.work_id),
+      item: JSON.parse(String(row.item)) as ProjectResearchItem,
+      localAttachmentPaths: JSON.parse(String(row.local_attachment_paths)) as Record<string, string>,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+    }));
+  }
+
+  replaceResearchItems(projectId: string, entries: CatalogProjectResearchItem[]): CatalogProjectResearchItem[] {
+    this.require(projectId);
+    if (!this.database) {
+      throw new Error("The research library is read-only while the catalog is running in temporary memory mode. No research changes were saved.");
+    }
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("DELETE FROM project_research_items WHERE project_id = ?").run(projectId);
+      const insert = this.database.prepare(`
+        INSERT INTO project_research_items
+          (id, project_id, work_id, item, local_attachment_paths, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const entry of entries) {
+        insert.run(entry.item.id, projectId, entry.workId, JSON.stringify(entry.item),
+          JSON.stringify(entry.localAttachmentPaths), entry.createdAt, entry.updatedAt);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      throw error;
+    }
+    return this.researchItems(projectId);
+  }
+
+  replaceSearchDocuments(projectId: string, hits: ResearchSearchHit[], sourceHashes: Record<string, string> = {}): void {
+    this.require(projectId);
+    if (!this.database) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("DELETE FROM search_documents WHERE project_id = ?").run(projectId);
+      const insert = this.database.prepare(`
+        INSERT INTO search_documents
+          (id, project_id, kind, title, detail, relative_path, line, search_text, source_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const now = new Date().toISOString();
+      for (const hit of hits) {
+        insert.run(hit.id, projectId, hit.kind, hit.title, hit.detail ?? null, hit.relativePath ?? null, hit.line ?? null,
+          `${hit.title}\n${hit.detail ?? ""}`.toLocaleLowerCase(), hit.relativePath ? (sourceHashes[hit.relativePath] ?? null) : null, now);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      throw error;
+    }
+  }
+
+  searchSourceState(projectId: string): Record<string, { size: number; modifiedMs: number; hash: string }> {
+    if (!this.database) return {};
+    const rows = this.database.prepare(`
+      SELECT relative_path, size, modified_ms, source_hash FROM search_sources WHERE project_id = ?
+    `).all(projectId) as Array<Record<string, unknown>>;
+    return Object.fromEntries(rows.map((row) => [String(row.relative_path), {
+      size: Number(row.size), modifiedMs: Number(row.modified_ms), hash: String(row.source_hash)
+    }]));
+  }
+
+  updateSearchDocuments(
+    projectId: string,
+    changed: Array<{ path: string; size: number; modifiedMs: number; hash: string; hits: ResearchSearchHit[] }>,
+    removedPaths: string[],
+    projectHit: ResearchSearchHit
+  ): void {
+    this.require(projectId);
+    if (!this.database) return;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const deleteDocuments = this.database.prepare("DELETE FROM search_documents WHERE project_id = ? AND relative_path = ?");
+      const deleteSource = this.database.prepare("DELETE FROM search_sources WHERE project_id = ? AND relative_path = ?");
+      for (const path of removedPaths) { deleteDocuments.run(projectId, path); deleteSource.run(projectId, path); }
+      const insertDocument = this.database.prepare(`
+        INSERT INTO search_documents
+          (id, project_id, kind, title, detail, relative_path, line, search_text, source_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const upsertSource = this.database.prepare(`
+        INSERT INTO search_sources (project_id, relative_path, size, modified_ms, source_hash, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, relative_path) DO UPDATE SET size=excluded.size, modified_ms=excluded.modified_ms,
+          source_hash=excluded.source_hash, indexed_at=excluded.indexed_at
+      `);
+      const now = new Date().toISOString();
+      for (const source of changed) {
+        deleteDocuments.run(projectId, source.path);
+        for (const hit of source.hits) insertDocument.run(hit.id, projectId, hit.kind, hit.title, hit.detail ?? null,
+          hit.relativePath ?? null, hit.line ?? null, `${hit.title}\n${hit.detail ?? ""}`.toLocaleLowerCase(), source.hash, now);
+        upsertSource.run(projectId, source.path, source.size, source.modifiedMs, source.hash, now);
+      }
+      this.database.prepare("DELETE FROM search_documents WHERE project_id = ? AND relative_path IS NULL").run(projectId);
+      insertDocument.run(projectHit.id, projectId, projectHit.kind, projectHit.title, projectHit.detail ?? null,
+        null, null, `${projectHit.title}\n${projectHit.detail ?? ""}`.toLocaleLowerCase(), null, now);
+      for (const entry of this.researchItems(projectId)) {
+        const item = entry.item;
+        const title = item.title || item.attachments[0]?.name || item.id;
+        const detail = [item.authors.join(", "), item.year, item.doi, item.arxivId, item.isbn,
+          ...item.attachments.map((attachment) => attachment.name)].filter(Boolean).join(" · ");
+        insertDocument.run(`research:${projectId}:${item.id}`, projectId, "research", title, detail || null,
+          null, null, `${title}\n${detail}`.toLocaleLowerCase(), null, now);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      throw error;
+    }
+  }
+
+  search(query: string, projectIds?: string[], limit = 100): ResearchSearchHit[] {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized || !this.database) return [];
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const placeholders = projectIds?.length ? ` AND project_id IN (${projectIds.map(() => "?").join(",")})` : "";
+    const rows = this.database.prepare(`
+      SELECT id, project_id, kind, title, detail, relative_path, line,
+             CASE WHEN lower(title) = ? THEN 100 WHEN lower(title) LIKE ? THEN 70 ELSE 40 END AS score
+        FROM search_documents
+       WHERE search_text LIKE ?${placeholders}
+       ORDER BY score DESC, title COLLATE NOCASE LIMIT ?
+    `).all(normalized, `${normalized}%`, `%${normalized}%`, ...(projectIds ?? []), safeLimit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id), projectId: String(row.project_id), kind: row.kind as ResearchSearchHit["kind"],
+      title: String(row.title), detail: row.detail ? String(row.detail) : undefined,
+      relativePath: row.relative_path ? String(row.relative_path) : undefined,
+      line: row.line === null ? undefined : Number(row.line), score: Number(row.score)
+    }));
+  }
+
   close(): void {
     this.database?.close();
     this.database = null;
@@ -602,6 +919,21 @@ export class ProjectCatalog {
     const project = this.get(projectId);
     if (!project) throw new Error(`项目索引中不存在 ID: ${projectId}`);
     return project;
+  }
+
+  private assertValidBackup(path: string): void {
+    if (!existsSync(path) || !statSync(path).isFile()) throw new Error("The selected catalog backup does not exist or is not a regular file.");
+    const candidate = new DatabaseSync(path, { readOnly: true });
+    try {
+      const integrity = candidate.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: string }>;
+      if (!integrity.length || integrity.some((row) => row.integrity_check !== "ok")) {
+        throw new Error("The selected catalog backup failed SQLite integrity validation.");
+      }
+      const version = Number((candidate.prepare("PRAGMA user_version").get() as { user_version?: number })?.user_version ?? 0);
+      if (version < 1 || version > 4) throw new Error(`Unsupported catalog backup schema version: ${version}`);
+    } finally {
+      candidate.close();
+    }
   }
 }
 

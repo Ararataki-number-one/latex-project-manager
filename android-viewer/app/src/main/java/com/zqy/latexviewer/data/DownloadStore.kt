@@ -10,6 +10,8 @@ import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.DownloadedFile
+import com.zqy.latexviewer.model.OfflinePdfDocument
+import com.zqy.latexviewer.model.PdfStorageClass
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -68,7 +70,8 @@ class DownloadStore(private val context: Context) {
                     repositoryFullName = null,
                     pdfPath = null,
                     sha = cacheKey.substringAfterLast('-').removeSuffix(".pdf").takeIf { it.length >= 40 },
-                    knownGood = true
+                    knownGood = true,
+                    storageClass = PdfStorageClass.TEMPORARY.name
                 )
             )
             trimPdfCache(directory, destination, maxCacheBytes)
@@ -122,18 +125,29 @@ class DownloadStore(private val context: Context) {
     suspend fun savePdfPreview(
         cacheKey: String,
         maxCacheBytes: Long = DEFAULT_PDF_CACHE_BYTES,
+        replaceExisting: Boolean = false,
         writer: suspend (OutputStream) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val directory = File(context.cacheDir, "pdf-preview").apply { mkdirs() }
         val fileName = pdfCacheName(cacheKey)
         val destination = File(directory, fileName)
         val temporary = File(directory, "$fileName.part")
-        if (destination.isFile) {
+        if (destination.isFile && !replaceExisting) {
             val cached = runCatching { validatePdf(destination) }.isSuccess
             if (cached) {
                 destination.setLastModified(System.currentTimeMillis())
                 dao.upsertPdfCache(
-                    PdfCacheEntity(cacheKey, destination.absolutePath, destination.length(), System.currentTimeMillis(), null, null, null, true)
+                    PdfCacheEntity(
+                        cacheKey,
+                        destination.absolutePath,
+                        destination.length(),
+                        System.currentTimeMillis(),
+                        null,
+                        null,
+                        null,
+                        true,
+                        PdfStorageClass.TEMPORARY.name
+                    )
                 )
                 return@withContext destination
             }
@@ -145,7 +159,17 @@ class DownloadStore(private val context: Context) {
             validatePdf(temporary)
             atomicReplaceKeepingKnownGood(temporary, destination, ::validatePdf)
             dao.upsertPdfCache(
-                PdfCacheEntity(cacheKey, destination.absolutePath, destination.length(), System.currentTimeMillis(), null, null, null, true)
+                PdfCacheEntity(
+                    cacheKey,
+                    destination.absolutePath,
+                    destination.length(),
+                    System.currentTimeMillis(),
+                    null,
+                    null,
+                    null,
+                    true,
+                    PdfStorageClass.TEMPORARY.name
+                )
             )
             trimPdfCache(directory, destination, maxCacheBytes)
             destination
@@ -165,17 +189,161 @@ class DownloadStore(private val context: Context) {
         }
         candidate.setLastModified(System.currentTimeMillis())
         dao.upsertPdfCache(
-            PdfCacheEntity(cacheKey, candidate.absolutePath, candidate.length(), System.currentTimeMillis(), null, null, null, true)
+            PdfCacheEntity(
+                cacheKey,
+                candidate.absolutePath,
+                candidate.length(),
+                System.currentTimeMillis(),
+                null,
+                null,
+                null,
+                true,
+                PdfStorageClass.TEMPORARY.name
+            )
         )
         candidate
     }
 
+    /**
+     * Copies a validated preview into the user-controlled offline library.
+     * The preview remains available until the normal LRU removes it, while the
+     * offline copy is never considered by temporary-cache cleanup.
+     */
+    suspend fun promotePdfPreviewToOffline(
+        cacheKey: String,
+        repositoryFullName: String?,
+        pdfPath: String?,
+        sha: String?
+    ): File = withContext(Dispatchers.IO) {
+        val preview = findPdfPreview(cacheKey)
+            ?: throw IllegalStateException("临时缓存已经被清理，请重新下载后再离线保留")
+        val staging = File(offlinePdfDirectory(), ".${pdfCacheName(cacheKey)}.${System.nanoTime()}.part")
+        try {
+            preview.inputStream().use { input ->
+                FileOutputStream(staging).use { output ->
+                    input.copyTo(output, COPY_BUFFER_BYTES)
+                    output.fd.sync()
+                }
+            }
+            commitOfflinePdfFromFile(cacheKey, repositoryFullName, pdfPath, sha, staging)
+        } catch (failure: Throwable) {
+            staging.delete()
+            throw failure
+        }
+    }
+
+    /** Stores a PDF in app-private persistent storage without replacing the
+     * previous known-good copy until the new candidate has passed validation. */
+    suspend fun commitOfflinePdfFromFile(
+        cacheKey: String,
+        repositoryFullName: String?,
+        pdfPath: String?,
+        sha: String?,
+        source: File
+    ): File = withContext(Dispatchers.IO) {
+        val destination = File(offlinePdfDirectory(), pdfCacheName(cacheKey))
+        try {
+            validatePdf(source)
+            atomicReplaceKeepingKnownGood(source, destination, ::validatePdf)
+            destination.setLastModified(System.currentTimeMillis())
+            dao.upsertPdfCache(
+                PdfCacheEntity(
+                    cacheKey = offlineCacheKey(cacheKey),
+                    localPath = destination.absolutePath,
+                    size = destination.length(),
+                    lastAccessAt = System.currentTimeMillis(),
+                    repositoryFullName = repositoryFullName,
+                    pdfPath = pdfPath,
+                    sha = sha,
+                    knownGood = true,
+                    storageClass = PdfStorageClass.OFFLINE.name
+                )
+            )
+            destination
+        } catch (failure: Throwable) {
+            source.delete()
+            throw failure
+        }
+    }
+
+    suspend fun findOfflinePdf(cacheKey: String): File? = withContext(Dispatchers.IO) {
+        val persistedKey = offlineCacheKey(cacheKey)
+        val entry = dao.pdfCacheEntry(persistedKey)
+            ?.takeIf { it.storageClass == PdfStorageClass.OFFLINE.name }
+            ?: return@withContext null
+        val candidate = runCatching { File(entry.localPath).canonicalFile }.getOrNull()
+            ?: return@withContext null
+        val offlineRoot = offlinePdfDirectory().canonicalFile
+        if (!candidate.toPath().startsWith(offlineRoot.toPath()) || !candidate.isFile) {
+            dao.deletePdfCache(persistedKey)
+            return@withContext null
+        }
+        runCatching { validatePdf(candidate) }.getOrElse {
+            // A damaged offline copy is not exposed as readable. Keep the file
+            // for diagnostics; replacing it still uses the known-good protocol.
+            dao.upsertPdfCache(entry.copy(knownGood = false, lastAccessAt = System.currentTimeMillis()))
+            return@withContext null
+        }
+        val now = System.currentTimeMillis()
+        candidate.setLastModified(now)
+        dao.upsertPdfCache(entry.copy(size = candidate.length(), lastAccessAt = now, knownGood = true))
+        candidate
+    }
+
+    suspend fun offlinePdfEntries(): List<PdfCacheEntity> = withContext(Dispatchers.IO) {
+        dao.offlinePdfEntries().filter { entry ->
+            if (!entry.knownGood) return@filter false
+            runCatching {
+                val file = File(entry.localPath).canonicalFile
+                if (!file.isFile || !file.toPath().startsWith(offlinePdfDirectory().canonicalFile.toPath())) {
+                    return@runCatching false
+                }
+                validatePdf(file)
+                true
+            }.getOrDefault(false)
+        }
+    }
+
+    suspend fun offlinePdfDocuments(): List<OfflinePdfDocument> = offlinePdfEntries().mapNotNull { entry ->
+        val repository = entry.repositoryFullName?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        val path = entry.pdfPath?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        val sha = entry.sha?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        OfflinePdfDocument(
+            cacheKey = entry.cacheKey.removePrefix("offline:"),
+            repositoryFullName = repository,
+            pdfPath = path,
+            sha = sha,
+            localPath = entry.localPath,
+            size = entry.size,
+            lastAccessAt = entry.lastAccessAt
+        )
+    }
+
+    suspend fun removeOfflinePdf(cacheKey: String): Long = withContext(Dispatchers.IO) {
+        val persistedKey = offlineCacheKey(cacheKey)
+        val entry = dao.pdfCacheEntry(persistedKey)
+            ?.takeIf { it.storageClass == PdfStorageClass.OFFLINE.name }
+            ?: return@withContext 0L
+        val file = runCatching { File(entry.localPath).canonicalFile }.getOrNull()
+        val root = offlinePdfDirectory().canonicalFile
+        val removed = if (file != null && file.toPath().startsWith(root.toPath()) && file.isFile) {
+            val length = file.length()
+            if (file.delete()) length else throw IllegalStateException("无法删除离线资料")
+        } else {
+            0L
+        }
+        dao.deletePdfCache(persistedKey)
+        removed
+    }
+
     suspend fun materializePdfForViewer(
         file: DownloadedFile,
-        maxCacheBytes: Long = DEFAULT_PDF_CACHE_BYTES
+        maxCacheBytes: Long = DEFAULT_PDF_CACHE_BYTES,
+        replaceExisting: Boolean = false
     ): File = savePdfPreview(
         cacheKey = "download-${file.contentUri.hashCode().toUInt().toString(16)}-${file.size}.pdf",
-        maxCacheBytes = maxCacheBytes
+        maxCacheBytes = maxCacheBytes,
+        replaceExisting = replaceExisting
     ) { output ->
         val input = context.contentResolver.openInputStream(Uri.parse(file.contentUri))
             ?: throw IllegalStateException("无法读取已下载的 PDF")
@@ -185,7 +353,11 @@ class DownloadStore(private val context: Context) {
     fun cachedPdfAsDownloadedFile(localPath: String, displayName: String): DownloadedFile {
         val file = File(localPath).canonicalFile
         val cacheRoot = pdfCacheDirectory().canonicalFile
-        require(file.isFile && file.length() > 0 && file.toPath().startsWith(cacheRoot.toPath())) {
+        val offlineRoot = offlinePdfDirectory().canonicalFile
+        require(
+            file.isFile && file.length() > 0 &&
+                (file.toPath().startsWith(cacheRoot.toPath()) || file.toPath().startsWith(offlineRoot.toPath()))
+        ) {
             "找不到可分享的 PDF 缓存"
         }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
@@ -239,6 +411,13 @@ class DownloadStore(private val context: Context) {
             ?: 0L
     }
 
+    suspend fun offlinePdfBytes(): Long = withContext(Dispatchers.IO) {
+        offlinePdfDirectory().listFiles()
+            ?.filter { it.isFile && !it.name.endsWith(".part") && !it.name.endsWith(".known-good") }
+            ?.sumOf(File::length)
+            ?: 0L
+    }
+
     suspend fun clearPdfCache(): Long = withContext(Dispatchers.IO) {
         val files = pdfCacheDirectory().listFiles().orEmpty()
         var removed = 0L
@@ -246,7 +425,7 @@ class DownloadStore(private val context: Context) {
             val size = file.length()
             if (file.isFile && file.delete()) removed += size
         }
-        dao.clearPdfCacheIndex()
+        dao.clearTemporaryPdfCacheIndex()
         removed
     }
 
@@ -316,10 +495,11 @@ class DownloadStore(private val context: Context) {
 
     private fun pdfCacheDirectory(): File = File(context.cacheDir, "pdf-preview").apply { mkdirs() }
 
-    private fun pdfCacheName(cacheKey: String): String = cacheKey
-        .replace(Regex("[^A-Za-z0-9._-]"), "_")
-        .take(120)
-        .let { if (it.endsWith(".pdf", ignoreCase = true)) it else "$it.pdf" }
+    private fun offlinePdfDirectory(): File = File(context.filesDir, "offline-pdfs").apply { mkdirs() }
+
+    private fun pdfCacheName(cacheKey: String): String = stablePdfCacheFileName(cacheKey)
+
+    private fun offlineCacheKey(cacheKey: String): String = "offline:$cacheKey"
 
     private fun moveOrCopy(source: File, destination: File) {
         if (source.renameTo(destination)) return
@@ -393,8 +573,13 @@ class DownloadStore(private val context: Context) {
         }
     }
 
-    private fun trimPdfCache(directory: File, keep: File, maxCacheBytes: Long) {
+    private suspend fun trimPdfCache(directory: File, keep: File, maxCacheBytes: Long) {
         val limit = maxCacheBytes.coerceAtLeast(64L * 1024 * 1024)
+        val entriesByPath = dao.pdfCacheEntriesByClass(PdfStorageClass.TEMPORARY.name)
+            .mapNotNull { entry ->
+                runCatching { File(entry.localPath).canonicalPath to entry.cacheKey }.getOrNull()
+            }
+            .toMap()
         val files = directory.listFiles()
             ?.filter { it.isFile && !it.name.endsWith(".part") }
             ?.sortedBy { it.lastModified() }
@@ -404,7 +589,12 @@ class DownloadStore(private val context: Context) {
             if (total <= limit) break
             if (file == keep) continue
             val size = file.length()
-            if (file.delete()) total -= size
+            if (file.delete()) {
+                total -= size
+                runCatching { file.canonicalPath }.getOrNull()
+                    ?.let(entriesByPath::get)
+                    ?.let { cacheKey -> dao.deletePdfCache(cacheKey) }
+            }
         }
     }
 
@@ -544,4 +734,20 @@ class DownloadStore(private val context: Context) {
         const val DEFAULT_PDF_CACHE_BYTES = 512L * 1024 * 1024
         const val COPY_BUFFER_BYTES = 1024 * 1024
     }
+}
+
+/**
+ * Physical cache names must retain the immutable identity even when GitHub
+ * owner/repository names are long. A readable prefix alone can truncate the
+ * blob SHA and make two versions overwrite one another.
+ */
+internal fun stablePdfCacheFileName(cacheKey: String): String {
+    val readable = cacheKey.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .removeSuffix(".pdf")
+        .take(40)
+        .ifBlank { "document" }
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(cacheKey.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+    return "$readable-$digest.pdf"
 }

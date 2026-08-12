@@ -22,8 +22,6 @@ android {
         applicationId = "com.zqy.latexviewer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.11.1"
 
         val githubClientId = providers.gradleProperty("githubOAuthClientId")
             .orElse(providers.environmentVariable("GITHUB_OAUTH_CLIENT_ID"))
@@ -32,6 +30,23 @@ android {
             .replace("\\", "\\\\")
             .replace("\"", "\\\"")
         buildConfigField("String", "GITHUB_OAUTH_CLIENT_ID", "\"$githubClientId\"")
+    }
+
+    flavorDimensions += "releaseChannel"
+    productFlavors {
+        create("stable") {
+            dimension = "releaseChannel"
+            versionCode = 15
+            versionName = "0.11.1"
+            buildConfigField("String", "RELEASE_CHANNEL", "\"stable\"")
+        }
+        create("beta") {
+            dimension = "releaseChannel"
+            applicationIdSuffix = ".beta"
+            versionCode = 1_000_001
+            versionName = "1.0.0-beta.1"
+            buildConfigField("String", "RELEASE_CHANNEL", "\"beta\"")
+        }
     }
 
     val releaseStorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
@@ -71,6 +86,13 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    sourceSets.getByName("test").resources.srcDir("../../contracts")
+    sourceSets.getByName("androidTest").assets.srcDir("schemas")
+}
+
+ksp {
+    arg("room.schemaLocation", file("schemas").path)
 }
 
 dependencies {
@@ -106,6 +128,10 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     testImplementation("org.json:json:20250517")
+
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

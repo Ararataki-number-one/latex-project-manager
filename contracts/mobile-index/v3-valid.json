@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 3,
+  "projectId": "project-contract",
+  "name": "Contract project",
+  "updatedAt": "2026-08-12T00:00:00.000Z",
+  "defaultOutputId": "output-main",
+  "outputs": [
+    {
+      "id": "output-main",
+      "name": "Main PDF",
+      "targetId": "target-main",
+      "entry": "main.tex",
+      "profileId": "profile-full",
+      "pdfPath": "build/main.pdf",
+      "blobSha": "1111111111111111111111111111111111111111",
+      "size": 2048,
+      "generatedAt": "2026-08-11T23:00:00.000Z"
+    }
+  ],
+  "researchItems": [
+    {
+      "id": "research-paper",
+      "title": "A portable research paper",
+      "authors": ["A. Author", "B. Author"],
+      "year": 2026,
+      "language": "en",
+      "doi": "10.1000/example",
+      "attachments": [
+        {
+          "id": "attachment-pdf",
+          "name": "paper.pdf",
+          "relativePath": "references/paper.pdf",
+          "mediaType": "application/pdf",
+          "size": 1024,
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "gitBlobSha": "3333333333333333333333333333333333333333",
+          "availability": "repository",
+          "publicUploadApproved": true
+        },
+        {
+          "id": "attachment-notes",
+          "name": "private-notes.pdf",
+          "mediaType": "application/pdf",
+          "availability": "localOnly"
+        }
+      ],
+      "links": [
+        {
+          "targetId": "target-main",
+          "role": "primarySource",
+          "preferredAttachmentId": "attachment-pdf"
+        }
+      ],
+      "sortOrder": 0
+    }
+  ]
+}

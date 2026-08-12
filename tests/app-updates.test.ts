@@ -18,6 +18,55 @@ describe("application updates", () => {
     expect(compareVersions("0.3.1", "0.3.0")).toBe(1);
     expect(compareVersions("v1.0.0", "1.0.0")).toBe(0);
     expect(compareVersions("2.0.0", "10.0.0")).toBe(-1);
+    expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBe(1);
+    expect(compareVersions("1.0.0-beta.9", "1.0.0")).toBe(-1);
+  });
+
+  it("selects the newest beta prerelease without changing the stable channel", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "latex-manager-beta-updates-"));
+    temporaryDirectories.push(directory);
+    const commands: string[][] = [];
+    const runner: UpdateCommandRunner = async (_executable, _cwd, args) => {
+      commands.push(args);
+      if (args[0] === "--version") return { code: 0, stdout: "gh version 2.76.0\n", stderr: "" };
+      if (args[0] === "release" && args[1] === "list") {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            { tagName: "v1.0.0-beta.1", isDraft: false, isPrerelease: true },
+            { tagName: "v0.11.1", isDraft: false, isPrerelease: false },
+            { tagName: "v1.0.0-beta.3", isDraft: false, isPrerelease: true }
+          ]),
+          stderr: ""
+        };
+      }
+      if (args[0] === "release" && args[1] === "view") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            tagName: "v1.0.0-beta.3",
+            name: "Beta 3",
+            url: "https://example.invalid/beta-3",
+            isDraft: false,
+            isPrerelease: true,
+            assets: []
+          }),
+          stderr: ""
+        };
+      }
+      throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+    };
+    const service = new AppUpdateService(directory, {
+      currentVersion: "1.0.0-beta.1",
+      releaseChannel: "beta",
+      ghExecutable: "gh.exe",
+      runner
+    });
+
+    await service.check(false);
+
+    expect(commands.some((args) => args[0] === "release" && args[1] === "list")).toBe(true);
+    expect(commands.find((args) => args[0] === "release" && args[1] === "view")?.[2]).toBe("v1.0.0-beta.3");
   });
 
   it("checks, downloads and verifies a private GitHub release asset", async () => {

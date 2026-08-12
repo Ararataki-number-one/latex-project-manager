@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { scanSyncSecurity, scanSyncSecuritySnapshot } from "../src/main/services/sync-security";
+import { scanPublicResearchCopyright, scanSyncSecurity, scanSyncSecuritySnapshot } from "../src/main/services/sync-security";
 
 const temporaryDirectories: string[] = [];
 
@@ -56,5 +56,44 @@ describe("sync security preflight", () => {
       async () => Buffer.from("token=github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_secret\n", "utf8")
     );
     expect(findings).toContainEqual(expect.objectContaining({ path: "main.tex", kind: "secret", severity: "block" }));
+  });
+
+  it("blocks local-only research metadata that leaks a path into the Git candidate", async () => {
+    const bytes = Buffer.from(JSON.stringify({
+      schemaVersion: 3,
+      researchItems: [{ attachments: [{ id: "private", availability: "localOnly", relativePath: "references/private.pdf" }] }]
+    }), "utf8");
+    const findings = await scanSyncSecuritySnapshot(
+      [{ path: ".latex-project.json", status: "M " }], [], async () => bytes
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      path: ".latex-project.json", kind: "sensitiveFile", severity: "block"
+    }));
+  });
+
+  it("blocks repository research without explicit publication approval in a public candidate tree", () => {
+    const index = Buffer.from(JSON.stringify({
+      schemaVersion: 3,
+      researchItems: [{ attachments: [
+        { id: "blocked", name: "publisher.pdf", availability: "repository", relativePath: "references/publisher.pdf" },
+        { id: "approved", name: "open.pdf", availability: "repository", relativePath: "references/open.pdf", publicUploadApproved: true }
+      ] }]
+    }), "utf8");
+    const findings = scanPublicResearchCopyright(index, [".latex-project.json", "references/publisher.pdf", "references/open.pdf"]);
+    expect(findings).toEqual([expect.objectContaining({
+      path: "references/publisher.pdf",
+      kind: "researchCopyright",
+      severity: "block",
+      recoveryActions: ["keepResearchLocalOnly", "approveResearchUpload"]
+    })]);
+  });
+
+  it("blocks an unregistered references document before public auto-sync can race its metadata", () => {
+    const findings = scanPublicResearchCopyright(null, ["main.tex", "references/new-source.pdf"]);
+    expect(findings).toEqual([expect.objectContaining({
+      path: "references/new-source.pdf",
+      kind: "researchCopyright",
+      severity: "block"
+    })]);
   });
 });

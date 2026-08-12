@@ -144,16 +144,18 @@ private data class PdfiumDocumentHandle(
 internal fun PdfPreviewScreen(
     state: ViewerUiState,
     onBack: () -> Unit,
-    onDownload: (GitHubContent) -> Unit,
+    onDownload: () -> Unit,
     onRetry: () -> Unit,
     onOpenExternal: () -> Unit,
     onOpenGitHub: () -> Unit,
+    onKeepOffline: () -> Unit,
+    onRemoveOffline: () -> Unit,
     onPageChanged: (pageIndex: Int, pageCount: Int) -> Unit,
     bookmarks: List<PdfBookmark> = emptyList(),
     onToggleBookmark: (pageIndex: Int, pageCount: Int) -> Unit = { _, _ -> }
 ) {
     val source = state.pdfDocument ?: return
-    val sourceItem = state.contents.firstOrNull { it.path == source.path }
+    val sourceItem = state.currentPdfSource
     val context = LocalContext.current
     val hazeState = rememberHazeState()
     val documentKey = remember(source.repositoryFullName, source.path, source.sha, source.openedAt) {
@@ -298,6 +300,9 @@ internal fun PdfPreviewScreen(
                 onDownload = onDownload,
                 onOpenExternal = onOpenExternal,
                 onOpenGitHub = onOpenGitHub,
+                offline = state.currentPdfOffline,
+                onKeepOffline = onKeepOffline,
+                onRemoveOffline = onRemoveOffline,
                 hazeState = hazeState
             )
         }
@@ -424,9 +429,12 @@ private fun PdfFloatingToolbar(
     bookmarked: Boolean,
     onBack: () -> Unit,
     onToggleBookmark: () -> Unit,
-    onDownload: (GitHubContent) -> Unit,
+    onDownload: () -> Unit,
     onOpenExternal: () -> Unit,
     onOpenGitHub: () -> Unit,
+    offline: Boolean,
+    onKeepOffline: () -> Unit,
+    onRemoveOffline: () -> Unit,
     hazeState: HazeState
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -476,13 +484,23 @@ private fun PdfFloatingToolbar(
                         leadingIcon = { Icon(Icons.Outlined.PictureAsPdf, contentDescription = null) },
                         onClick = { menuExpanded = false; onOpenExternal() }
                     )
-                    sourceItem?.let { item ->
+                    sourceItem?.let {
                         DropdownMenuItem(
                             text = { Text("保存副本") },
                             leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
-                            onClick = { menuExpanded = false; onDownload(item) }
+                            onClick = { menuExpanded = false; onDownload() }
                         )
                     }
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (offline) "取消离线保留" else "离线保留")
+                        },
+                        leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            if (offline) onRemoveOffline() else onKeepOffline()
+                        }
+                    )
                 }
             }
         }

@@ -25,7 +25,9 @@ import { readProjectManifestIfExists, writeProjectManifest } from "./manifest";
 const EXCLUDED_DIRECTORIES = new Set([
   ".git",
   ".latex-workbench/build",
+  ".latex-workbench/local-research-recovered",
   ".latex-workbench/runtime",
+  ".latex-workbench/undo",
   ".latex-workbench/snapshots",
   ".latex-workbench/trash"
 ]);

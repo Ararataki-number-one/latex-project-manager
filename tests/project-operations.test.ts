@@ -110,6 +110,10 @@ describe("project management filesystem operations", () => {
     await writeFile(join(source, "index.ist"), "required index style", "utf8");
     await mkdir(join(source, ".latex-workbench", "build", "target-main", "profile-full"), { recursive: true });
     await writeFile(join(source, ".latex-workbench", "build", "target-main", "profile-full", "last-success.pdf"), "pdf");
+    await mkdir(join(source, ".latex-workbench", "undo", "private"), { recursive: true });
+    await writeFile(join(source, ".latex-workbench", "undo", "private", "deleted-source.tex"), "private undo snapshot");
+    await mkdir(join(source, ".latex-workbench", "local-research-recovered", "attachment-private"), { recursive: true });
+    await writeFile(join(source, ".latex-workbench", "local-research-recovered", "attachment-private", "paper.pdf"), "private research recovery");
 
     const service = new ProjectOperationsService();
     const copied = await service.copy(source, destinationParent, "副本");
@@ -123,6 +127,8 @@ describe("project management filesystem operations", () => {
     expect(await readFile(join(copied.rootPath, "references.bbl"), "utf8")).toBe("required bibliography");
     expect(await readFile(join(copied.rootPath, "index.ist"), "utf8")).toBe("required index style");
     await expect(stat(join(copied.rootPath, ".latex-workbench", "build"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(copied.rootPath, ".latex-workbench", "undo"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(copied.rootPath, ".latex-workbench", "local-research-recovered"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("streams a Unicode ZIP archive and preserves ordinary project files", async () => {
@@ -132,6 +138,10 @@ describe("project management filesystem operations", () => {
     await writeFile(join(source, "main.aux"), "generated", "utf8");
     await writeFile(join(source, "references.bbl"), "required bibliography", "utf8");
     await writeFile(join(source, "index.ist"), "required index style", "utf8");
+    await mkdir(join(source, ".latex-workbench", "undo", "private"), { recursive: true });
+    await writeFile(join(source, ".latex-workbench", "undo", "private", "deleted-source.tex"), "private undo snapshot");
+    await mkdir(join(source, ".latex-workbench", "local-research-recovered", "attachment-private"), { recursive: true });
+    await writeFile(join(source, ".latex-workbench", "local-research-recovered", "attachment-private", "paper.pdf"), "private research recovery");
     const destination = join(base, "导出.zip");
 
     await new ProjectOperationsService().exportZip(source, destination);
@@ -143,6 +153,8 @@ describe("project management filesystem operations", () => {
     expect(entries.get("main.aux")?.toString("utf8")).toBe("generated");
     expect(entries.get("references.bbl")?.toString("utf8")).toBe("required bibliography");
     expect(entries.get("index.ist")?.toString("utf8")).toBe("required index style");
+    expect([...entries.keys()].some((path) => path.startsWith(".latex-workbench/undo/"))).toBe(false);
+    expect([...entries.keys()].some((path) => path.startsWith(".latex-workbench/local-research-recovered/"))).toBe(false);
     if (process.platform === "win32") {
       const tarPath = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
       // GitHub's Windows runner can pass a Unicode command-line path to bsdtar

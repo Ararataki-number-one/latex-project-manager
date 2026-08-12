@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
@@ -27,12 +27,15 @@ import type {
   MigrationPreview,
   MobileProjectIndex,
   ProjectManifest,
+  ProjectBackupSettings,
   ProjectFileListOptions,
   ProjectFileOperationRequest,
   ProjectCollection,
   SmartView,
   ProjectPdfInfo,
+  ProjectSearchIndexStatus,
   ProjectSummary,
+  ResearchSaveRequest,
   ScanCandidate,
   ScanOptions
 } from "../shared/types";
@@ -55,6 +58,9 @@ import { createProjectId } from "./services/project-id";
 import { ProjectOperationsService } from "./services/project-operations";
 import { ProjectStorageService } from "./services/project-storage";
 import { ReferenceService } from "./services/references";
+import { ResearchService } from "./services/research";
+import { ProjectSearchIndexService } from "./services/search-index";
+import { ProjectBackupService } from "./services/project-backups";
 import { relinkCatalogProject } from "./services/project-relink";
 import { createProfileRuntime } from "./services/profile-runtime";
 import { scanLibrary } from "./services/scanner";
@@ -151,6 +157,12 @@ export function registerIpcHandlers(
 
   const userData = app.getPath("userData");
   const catalog = createProjectCatalog(join(userData, "library.sqlite"));
+  const initialSettings = catalog.runtimeSettings();
+  if (app.getVersion().includes("-beta.") && !initialSettings.onboardingCompleted && !initialSettings.syncPaused) {
+    // The parallel-install Beta starts in a safe observation mode. Users can
+    // explicitly resume synchronization after importing a copied test project.
+    catalog.setRuntimeSettings({ ...initialSettings, syncPaused: true });
+  }
   const access = new ProjectAccessController(
     catalog.list().filter((project) => !project.trashed).map((project) => project.rootPath)
   );
@@ -201,7 +213,11 @@ export function registerIpcHandlers(
       options.onSyncEvent?.(event);
     }
   });
-  const updates = new AppUpdateService(join(userData, "updates"), { currentVersion: app.getVersion() });
+  const currentVersion = app.getVersion();
+  const updates = new AppUpdateService(join(userData, "updates"), {
+    currentVersion,
+    releaseChannel: currentVersion.includes("-beta.") ? "beta" : "stable"
+  });
   const references = new ReferenceService({
     openPath: (path) => shell.openPath(path),
     trashItem: (path) => shell.trashItem(path)
@@ -212,12 +228,69 @@ export function registerIpcHandlers(
   const cleanup = new TemporaryCleanupService();
   const storage = new ProjectStorageService();
   const mobileIndex = new MobileIndexService();
+  const research = new ResearchService(catalog, mobileIndex);
+  const researchSearch = new ProjectSearchIndexService(catalog);
+  let researchIndexAllPromise: Promise<ProjectSearchIndexStatus[]> | null = null;
+  const indexAllResearchProjects = (): Promise<ProjectSearchIndexStatus[]> => {
+    if (researchIndexAllPromise) return researchIndexAllPromise;
+    const projects = catalog.list().filter((item) => !item.trashed && !item.archived && item.pathAvailable);
+    const output: ProjectSearchIndexStatus[] = [];
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < projects.length) {
+        const project = projects[cursor++];
+        try {
+          output.push(await researchSearch.index(project));
+        } catch {
+          // A missing or unreadable project must not prevent cached search or
+          // indexing the remaining workspace. Its prior index stays available.
+        }
+      }
+    };
+    researchIndexAllPromise = Promise.all([worker(), worker()])
+      .then(() => output)
+      .finally(() => { researchIndexAllPromise = null; });
+    return researchIndexAllPromise;
+  };
+  const projectBackups = new ProjectBackupService(join(userData, "project-backups"));
   if (catalog.runtimeSettings().syncPaused) void github.pauseAll();
   for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable)) {
     void github.attachProject(project.id, project.rootPath);
   }
   const updateTimer = setTimeout(() => { void updates.checkAutomatically(); }, 2_500);
   updateTimer.unref();
+  let scheduledBackupRunning = false;
+  const runScheduledBackups = async (): Promise<void> => {
+    if (scheduledBackupRunning) return;
+    scheduledBackupRunning = true;
+    try {
+      for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable && item.lifecycle !== "archived")) {
+        const snapshot = await projectBackups.runDue(project, catalog.researchItems(project.id)).catch((error: unknown) => {
+          catalog.appendSyncEvent({
+            id: randomUUID(),
+            projectId: project.id,
+            occurredAt: new Date().toISOString(),
+            state: "error",
+            level: "error",
+            message: `定期项目快照失败：${error instanceof Error ? error.message : "未知错误"}`
+          });
+          return null;
+        });
+        if (snapshot) {
+          const current = catalog.get(project.id);
+          if (current) catalog.update(project.id, {
+            protectionState: current.protectionState === "github" || current.protectionState === "both" ? "both" : "localBackup"
+          });
+        }
+      }
+    } finally {
+      scheduledBackupRunning = false;
+    }
+  };
+  const initialBackupTimer = setTimeout(() => { void runScheduledBackups(); }, 20_000);
+  initialBackupTimer.unref();
+  const scheduledBackupTimer = setInterval(() => { void runScheduledBackups(); }, 60 * 60 * 1_000);
+  scheduledBackupTimer.unref();
   const showSaveDialog = async (options: SaveDialogOptions): Promise<string | null> => {
     const owner = getWindow();
     const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
@@ -232,6 +305,60 @@ export function registerIpcHandlers(
 
   register(IPC.libraryList, () => catalog.list());
   register(IPC.libraryCatalogStatus, () => catalog.status());
+  register(IPC.catalogBackupsList, () => catalog.listBackups());
+  register(IPC.catalogBackupsCreate, async () => {
+    const destination = await showSaveDialog({
+      title: "Back up the local project catalog",
+      defaultPath: join(app.getPath("documents"), `latex-project-catalog-${new Date().toISOString().slice(0, 10)}.sqlite`),
+      filters: [{ name: "SQLite catalog", extensions: ["sqlite"] }],
+      properties: ["createDirectory", "showOverwriteConfirmation"]
+    });
+    return destination ? catalog.backupTo(destination) : null;
+  });
+  register(IPC.catalogBackupsStageRestore, async () => {
+    const owner = getWindow();
+    const options: OpenDialogOptions = { title: "Select a project catalog backup", properties: ["openFile"], filters: [{ name: "SQLite catalog", extensions: ["sqlite", "bak"] }] };
+    const selected = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    if (selected.canceled || selected.filePaths.length !== 1) return null;
+    return { backup: catalog.stageRestore(selected.filePaths[0]), restartRequired: true as const };
+  });
+  register(IPC.projectBackupsPreview, async (projectId: string) => {
+    const project = requireCatalogProject(projectId);
+    return projectBackups.preview(project, catalog.researchItems(projectId));
+  });
+  register(IPC.projectBackupsCreate, async (projectId: string) => {
+    const project = requireCatalogProject(projectId);
+    const snapshot = await projectBackups.create(project, catalog.researchItems(projectId));
+    const protectionState = project.protectionState === "github" || project.protectionState === "both" ? "both" : "localBackup";
+    catalog.update(projectId, { protectionState });
+    return snapshot;
+  });
+  register(IPC.projectBackupsList, (projectId: string) => {
+    requireCatalogProject(projectId, true);
+    return projectBackups.list(projectId);
+  });
+  register(IPC.projectBackupsVerify, (projectId: string, snapshotId: string) => {
+    requireCatalogProject(projectId, true);
+    return projectBackups.verify(projectId, snapshotId);
+  });
+  register(IPC.projectBackupsRestore, async (projectId: string, snapshotId: string) => {
+    const project = requireCatalogProject(projectId, true);
+    const destination = await showSaveDialog({
+      title: "将项目快照恢复到新目录",
+      defaultPath: join(app.getPath("documents"), `${exportFileName(project.name, ".zip").replace(/\.zip$/, "")}-恢复-${new Date().toISOString().slice(0, 10)}`),
+      properties: ["createDirectory", "showOverwriteConfirmation"]
+    });
+    if (!destination) return null;
+    return projectBackups.restore(projectId, snapshotId, destination);
+  });
+  register(IPC.projectBackupsSettings, (projectId: string) => {
+    requireCatalogProject(projectId, true);
+    return projectBackups.settings(projectId);
+  });
+  register(IPC.projectBackupsSetSettings, (projectId: string, settings: Pick<ProjectBackupSettings, "frequency" | "retainCount">) => {
+    requireCatalogProject(projectId, true);
+    return projectBackups.setSettings(projectId, settings);
+  });
   register(IPC.libraryScan, async (rootPath: string, options?: Partial<ScanOptions>) => {
     let selectedRoot: string;
     try {
@@ -299,11 +426,11 @@ export function registerIpcHandlers(
     IPC.libraryUpdate,
     async (
       projectId: string,
-      patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>
+      patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags" | "lifecycle" | "protectionState">>
     ) => {
       const current = requireCatalogProject(projectId, true);
       if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("A project update is required.");
-      const allowed = new Set(["name", "description", "favorite", "archived", "trashed", "tags"]);
+      const allowed = new Set(["name", "description", "favorite", "archived", "trashed", "tags", "lifecycle", "protectionState"]);
       if (Object.keys(patch).some((key) => !allowed.has(key))) throw new Error("The project update contains unsupported fields.");
       const has = (key: string): boolean => Object.prototype.hasOwnProperty.call(patch, key);
       if (has("name") && (typeof patch.name !== "string" || !patch.name.trim() || patch.name.length > 240)) {
@@ -317,6 +444,12 @@ export function registerIpcHandlers(
       }
       if (has("tags") && (!Array.isArray(patch.tags) || patch.tags.length > 100 || patch.tags.some((tag) => typeof tag !== "string" || !tag.trim() || tag.length > 100))) {
         throw new Error("Tags must be an array of at most 100 non-empty strings, each at most 100 characters.");
+      }
+      if (has("lifecycle") && !["active", "paused", "completed", "archived"].includes(patch.lifecycle ?? "")) {
+        throw new Error("Unsupported project lifecycle.");
+      }
+      if (has("protectionState") && !["unprotected", "localBackup", "github", "both"].includes(patch.protectionState ?? "")) {
+        throw new Error("Unsupported project protection state.");
       }
       if (patch.trashed === false && current.trashed && existsSync(current.rootPath)) {
         await access.addProjectRoot(current.rootPath);
@@ -461,7 +594,10 @@ export function registerIpcHandlers(
   register(IPC.githubConfigure, async (projectId: string, settings: GitHubSyncSettings) => {
     if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("GitHub 同步设置无效。");
     const { root } = await requireCatalogProjectRoot(projectId);
-    return github.configure(projectId, root, settings);
+    const status = await github.configure(projectId, root, settings);
+    const current = catalog.get(projectId);
+    if (status.configured && current) catalog.update(projectId, { protectionState: current.protectionState === "localBackup" || current.protectionState === "both" ? "both" : "github" });
+    return status;
   });
   register(IPC.githubSyncNow, async (projectId: string) => {
     const { root } = await requireCatalogProjectRoot(projectId);
@@ -480,7 +616,10 @@ export function registerIpcHandlers(
   register(IPC.githubBeginLogin, () => github.beginLogin(userData));
   register(IPC.githubCreateRepository, async (projectId: string, options: GitHubCreateRepositoryOptions) => {
     const { root } = await requireCatalogProjectRoot(projectId);
-    return github.createRepository(projectId, root, options);
+    const status = await github.createRepository(projectId, root, options);
+    const current = catalog.get(projectId);
+    if (current) catalog.update(projectId, { protectionState: current.protectionState === "localBackup" || current.protectionState === "both" ? "both" : "github" });
+    return status;
   });
   register(IPC.githubSetVisibility, async (projectId: string, visibility: GitHubRepositoryVisibility) => {
     const { root } = await requireCatalogProjectRoot(projectId);
@@ -564,16 +703,23 @@ export function registerIpcHandlers(
   register(IPC.referencesImport, async (projectId: string) => {
     const { project, root } = await requireCatalogProjectRoot(projectId);
     const options: OpenDialogOptions = {
-      title: "添加原始文稿",
+      title: "添加研究资料",
       properties: ["openFile", "multiSelections"],
       filters: [
-        { name: "原始文稿", extensions: ["pdf", "epub", "djvu", "mobi", "azw3", "doc", "docx", "odt", "rtf", "txt", "md", "html", "htm", "tex", "bib", "zip"] },
+        { name: "研究资料", extensions: ["pdf", "epub", "djvu", "mobi", "azw3", "doc", "docx", "odt", "rtf", "txt", "md", "html", "htm", "tex", "bib", "zip"] },
         { name: "PDF", extensions: ["pdf"] }
       ]
     };
     const owner = getWindow();
     const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
     if (result.canceled || result.filePaths.length === 0) return references.list(root);
+    const syncStatus = await github.status(project.id, root).catch(() => null);
+    if (syncStatus?.configured && syncStatus.visibility !== "private") {
+      const manifest = await readProjectManifest(root);
+      await research.importLocalOnlyFiles(project.id, root, manifest, result.filePaths);
+      await github.notifyProjectChanged(project.id, root);
+      return references.list(root);
+    }
     const items = await references.importFiles(root, result.filePaths);
     await github.notifyProjectChanged(project.id, root);
     return items;
@@ -591,6 +737,41 @@ export function registerIpcHandlers(
     const items = await references.remove(root, relativePath);
     await github.notifyProjectChanged(project.id, root);
     return items;
+  });
+  register(IPC.researchList, (projectId: string) => {
+    requireCatalogProject(projectId);
+    return research.list(projectId);
+  });
+  register(IPC.researchListGlobal, () => research.listGlobal());
+  register(IPC.researchDiscoverLegacy, async (projectId: string) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    return research.discoverLegacy(projectId, root);
+  });
+  register(IPC.researchSave, async (projectId: string, request: ResearchSaveRequest) => {
+    if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error("Research metadata is invalid.");
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const manifest = await readProjectManifest(root);
+    requireManifestIdentity(root, manifest);
+    const items = await research.save(projectId, root, manifest, request, await github.repositoryVisibility(projectId));
+    await researchSearch.index(project);
+    await github.notifyProjectChanged(project.id, root);
+    return items;
+  });
+  register(IPC.researchOpenAttachment, async (projectId: string, itemId: string, attachmentId: string) => {
+    if (typeof itemId !== "string" || typeof attachmentId !== "string") throw new Error("Research attachment identity is invalid.");
+    const { root } = await requireCatalogProjectRoot(projectId);
+    const path = await research.attachmentPath(projectId, root, itemId, attachmentId);
+    const error = await shell.openPath(path);
+    if (error) throw new Error(error);
+  });
+  register(IPC.researchSearchIndex, async (projectId: string) => researchSearch.index(requireCatalogProject(projectId)));
+  register(IPC.researchSearchIndexAll, indexAllResearchProjects);
+  register(IPC.researchSearchQuery, (query: string, projectIds?: string[], limit?: number) => {
+    if (typeof query !== "string") throw new Error("A search query is required.");
+    if (projectIds && (!Array.isArray(projectIds) || projectIds.some((id) => typeof id !== "string" || !catalog.get(id)))) {
+      throw new Error("The search project filter is invalid.");
+    }
+    return researchSearch.search(query, projectIds, limit);
   });
 
   register(IPC.manifestRead, async (projectRoot: string) => {
@@ -735,6 +916,10 @@ export function registerIpcHandlers(
     await github.notifyProjectChanged(project.id, root);
     return result;
   });
+  register(IPC.fileHistory, (projectId: string, limit?: number) => {
+    requireCatalogProject(projectId, true);
+    return catalog.fileOperationHistory(projectId, limit);
+  });
   register(IPC.fileOpen, async (projectId: string, path: string) => {
     const { root } = await requireCatalogProjectRoot(projectId);
     const absolutePath = resolve(root, path);
@@ -864,6 +1049,8 @@ export function registerIpcHandlers(
   const shutdown = (): Promise<void> => {
     if (!shutdownPromise) {
       shutdownPromise = (async () => {
+        clearTimeout(initialBackupTimer);
+        clearInterval(scheduledBackupTimer);
         try {
           await github.dispose();
         } finally {

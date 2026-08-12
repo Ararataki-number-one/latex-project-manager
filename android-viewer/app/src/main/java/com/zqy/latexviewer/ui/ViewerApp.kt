@@ -122,9 +122,14 @@ import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
+import com.zqy.latexviewer.model.OfflinePdfDocument
 import com.zqy.latexviewer.model.PersistentDownloadState
 import com.zqy.latexviewer.model.PersistentDownloadTask
+import com.zqy.latexviewer.model.ProjectResearchItem
 import com.zqy.latexviewer.model.ReadingProgress
+import com.zqy.latexviewer.model.ResearchAttachment
+import com.zqy.latexviewer.model.ResearchRole
+import com.zqy.latexviewer.model.TargetResearchLink
 import com.zqy.latexviewer.ui.theme.LaTeXViewerTheme
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.rememberHazeState
@@ -339,6 +344,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         listState = homeListState,
                         onOpenMobilePdf = viewModel::openMobilePdf,
                         onOpenRecentReading = viewModel::openRecentReading,
+                        onOpenOffline = viewModel::openOfflineDocument,
                         onOpenProjects = viewModel::openProjects
                     )
                     ViewerScreen.CONNECT -> ConnectScreen(
@@ -352,6 +358,9 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                             repository = selectedProject,
                             index = state.mobileIndexes[selectedProject.fullName.lowercase()],
                             onOpenPdf = { output -> viewModel.openMobilePdf(selectedProject, output) },
+                            onOpenResearchAttachment = { attachment ->
+                                viewModel.openResearchAttachment(selectedProject, attachment)
+                            },
                             onBrowseFiles = { viewModel.openRepository(selectedProject) },
                             onDownloadProject = { viewModel.downloadRepository(selectedProject) }
                         )
@@ -391,9 +400,11 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         state,
                         onBack = viewModel::goBack,
                         onOpenGitHub = viewModel::openCurrentOnGitHub,
-                        onDownload = viewModel::downloadFile,
+                        onDownload = viewModel::downloadCurrentPdf,
                         onRetry = viewModel::retryCurrentPdf,
                         onOpenExternal = viewModel::openCurrentPdfExternally,
+                        onKeepOffline = viewModel::keepCurrentPdfOffline,
+                        onRemoveOffline = viewModel::removeCurrentPdfOffline,
                         onPageChanged = viewModel::recordPdfPage,
                         bookmarks = state.pdfBookmarks,
                         onToggleBookmark = viewModel::togglePdfBookmark
@@ -735,15 +746,21 @@ private fun HomeScreen(
     listState: androidx.compose.foundation.lazy.LazyListState,
     onOpenMobilePdf: (GitHubRepository, MobilePdfOutput) -> Unit,
     onOpenRecentReading: (ReadingProgress) -> Unit,
+    onOpenOffline: (OfflinePdfDocument) -> Unit,
     onOpenProjects: () -> Unit
 ) {
     val latestPdfs = remember(state.repositories, state.mobileIndexes) {
         state.repositories
-            .sortedByDescending(GitHubRepository::updatedAt)
             .mapNotNull { repository ->
                 state.mobileIndexes[repository.fullName.lowercase()]?.defaultOutput?.let { repository to it }
             }
+            .sortedByDescending { (_, output) -> output.generatedAt.orEmpty() }
             .take(6)
+    }
+    val updatedPdfs = remember(latestPdfs, state.updatedPdfIds) {
+        latestPdfs.filter { (repository, output) ->
+            "${repository.fullName.lowercase()}:${output.id}" in state.updatedPdfIds
+        }
     }
     val recentReadings = remember(state.recentReadings, state.recentReading) {
         (state.recentReadings.ifEmpty { listOfNotNull(state.recentReading) })
@@ -787,6 +804,43 @@ private fun HomeScreen(
                 if (index != recentReadings.lastIndex) {
                     HorizontalDivider(
                         modifier = Modifier.padding(start = if (index == 0) 0.dp else 36.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+        }
+        if (updatedPdfs.isNotEmpty()) {
+            item { PaperSectionHeader("发现新版本", modifier = Modifier.padding(top = 22.dp)) }
+            itemsIndexed(
+                updatedPdfs,
+                key = { _, (repository, output) -> "updated:${repository.fullName}:${output.id}" }
+            ) { index, (repository, output) ->
+                MobilePdfHomeCard(
+                    repository = repository,
+                    output = output,
+                    progress = "发现新版本",
+                    progressFraction = null,
+                    emphasized = false,
+                    onOpen = { onOpenMobilePdf(repository, output) }
+                )
+                if (index != updatedPdfs.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 36.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+        }
+        if (state.offlineDocuments.isNotEmpty()) {
+            item { PaperSectionHeader("离线资料", modifier = Modifier.padding(top = 22.dp)) }
+            itemsIndexed(
+                state.offlineDocuments.take(6),
+                key = { _, document -> "offline:${document.cacheKey}" }
+            ) { index, document ->
+                OfflinePdfRow(document = document, onOpen = { onOpenOffline(document) })
+                if (index != state.offlineDocuments.take(6).lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 36.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
@@ -1473,6 +1527,7 @@ private fun ProjectLandingScreen(
     repository: GitHubRepository,
     index: MobileProjectIndex?,
     onOpenPdf: (MobilePdfOutput) -> Unit,
+    onOpenResearchAttachment: (ResearchAttachment) -> Unit,
     onBrowseFiles: () -> Unit,
     onDownloadProject: () -> Unit
 ) {
@@ -1480,6 +1535,7 @@ private fun ProjectLandingScreen(
     val otherOutputs = remember(index) {
         index?.outputs.orEmpty().filterNot { it.id == index?.defaultOutputId }
     }
+    val researchSections = remember(index) { buildResearchSections(index) }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -1568,6 +1624,44 @@ private fun ProjectLandingScreen(
             }
         }
 
+        if (researchSections.isNotEmpty()) {
+            item {
+                PaperSectionHeader("研究资料", modifier = Modifier.padding(top = 24.dp))
+                Text(
+                    "按文档目标整理的只读资料。仅电脑可用的附件不会从公开仓库下载。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+            researchSections.forEach { section ->
+                item(key = "research-section:${section.id}") {
+                    Text(
+                        section.label,
+                        modifier = Modifier.padding(top = 14.dp, bottom = 5.dp),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                itemsIndexed(
+                    section.entries,
+                    key = { _, entry -> "research:${section.id}:${entry.item.id}" }
+                ) { position, entry ->
+                    ResearchMaterialRow(
+                        item = entry.item,
+                        contextLink = entry.link,
+                        onOpen = onOpenResearchAttachment
+                    )
+                    if (position != section.entries.lastIndex) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 36.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant
+                        )
+                    }
+                }
+            }
+        }
+
         item {
             PaperSectionHeader("项目操作", modifier = Modifier.padding(top = 24.dp))
             Button(
@@ -1602,6 +1696,180 @@ private fun ProjectLandingScreen(
             )
         }
     }
+}
+
+@Composable
+private fun OfflinePdfRow(document: OfflinePdfDocument, onOpen: () -> Unit) {
+    Surface(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(0.dp),
+        color = Color.Transparent
+    ) {
+        Row(
+            modifier = Modifier.padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            PaperFileTypeIcon(type = PaperFileType.PDF, size = 23.dp)
+            Spacer(Modifier.width(13.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    document.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${document.repositoryFullName} · ${formatBytes(document.size)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(Icons.Outlined.ChevronRight, contentDescription = "打开 ${document.name}")
+        }
+    }
+}
+
+@Composable
+private fun ResearchMaterialRow(
+    item: ProjectResearchItem,
+    contextLink: TargetResearchLink?,
+    onOpen: (ResearchAttachment) -> Unit
+) {
+    val preferredIds = buildList {
+        contextLink?.preferredAttachmentId?.let(::add)
+        item.links.mapNotNullTo(this) { it.preferredAttachmentId }
+    }.distinct()
+    val attachment = preferredIds.firstNotNullOfOrNull { id ->
+        item.attachments.firstOrNull { it.id == id && it.canDownload }
+    }
+        ?: item.attachments.firstOrNull { it.canDownload }
+        ?: preferredIds.firstNotNullOfOrNull { id -> item.attachments.firstOrNull { it.id == id } }
+        ?: item.attachments.firstOrNull()
+    val available = attachment?.canDownload == true
+    Surface(
+        onClick = { attachment?.let(onOpen) },
+        enabled = attachment != null,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(0.dp),
+        color = Color.Transparent
+    ) {
+        Row(
+            modifier = Modifier.padding(vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            PaperFileTypeIcon(
+                type = if (attachment?.mediaType == "application/pdf" || attachment?.name?.endsWith(".pdf", true) == true) {
+                    PaperFileType.PDF
+                } else {
+                    PaperFileType.FILE
+                },
+                size = 23.dp,
+                tint = if (available) null else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.width(13.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    item.displayTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val authorLine = buildString {
+                    if (item.authors.isNotEmpty()) append(item.authors.take(2).joinToString("、"))
+                    item.year?.let { year ->
+                        if (isNotEmpty()) append(" · ")
+                        append(year)
+                    }
+                }
+                if (authorLine.isNotEmpty()) {
+                    Text(
+                        authorLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    if (item.links.isEmpty()) {
+                        if (available) "待关联" else "待关联 · 仅电脑可用"
+                    } else if (available) {
+                        researchRoleLabel(contextLink?.role ?: item.links.first().role)
+                    } else {
+                        "${researchRoleLabel(contextLink?.role ?: item.links.first().role)} · 仅电脑可用"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (available) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.tertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(
+                if (available) Icons.Outlined.ChevronRight else Icons.Outlined.Lock,
+                contentDescription = if (available) "打开 ${item.displayTitle}" else "仅电脑可用",
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+private data class ResearchMaterialEntry(
+    val item: ProjectResearchItem,
+    val link: TargetResearchLink?
+)
+
+private data class ResearchMaterialSection(
+    val id: String,
+    val label: String,
+    val entries: List<ResearchMaterialEntry>
+)
+
+private fun buildResearchSections(index: MobileProjectIndex?): List<ResearchMaterialSection> {
+    val items = index?.researchItems.orEmpty()
+        .sortedWith(compareBy(ProjectResearchItem::sortOrder, ProjectResearchItem::displayTitle))
+    if (items.isEmpty()) return emptyList()
+
+    val sections = mutableListOf<ResearchMaterialSection>()
+    val pending = items.filter { it.links.isEmpty() }
+        .map { ResearchMaterialEntry(it, null) }
+    if (pending.isNotEmpty()) sections += ResearchMaterialSection("pending", "待整理", pending)
+
+    val projectWide = items.mapNotNull { item ->
+        item.links.firstOrNull { it.targetId == null }?.let { ResearchMaterialEntry(item, it) }
+    }
+    if (projectWide.isNotEmpty()) sections += ResearchMaterialSection("project", "项目通用", projectWide)
+
+    val outputNames = index?.outputs.orEmpty().associate { output -> output.targetId to output.name }
+    val targetIds = buildList {
+        index?.outputs.orEmpty().forEach { if (it.targetId !in this) add(it.targetId) }
+        items.flatMap(ProjectResearchItem::links).mapNotNull(TargetResearchLink::targetId)
+            .forEach { if (it !in this) add(it) }
+    }
+    targetIds.forEach { targetId ->
+        val linked = items.mapNotNull { item ->
+            item.links.firstOrNull { it.targetId == targetId }?.let { ResearchMaterialEntry(item, it) }
+        }
+        if (linked.isNotEmpty()) {
+            sections += ResearchMaterialSection(
+                id = "target:$targetId",
+                label = outputNames[targetId]?.let { "$it · 文档目标" } ?: "$targetId · 文档目标",
+                entries = linked
+            )
+        }
+    }
+    return sections
+}
+
+private fun researchRoleLabel(role: ResearchRole): String = when (role) {
+    ResearchRole.PRIMARY_SOURCE -> "主要原稿"
+    ResearchRole.REFERENCE -> "参考"
+    ResearchRole.TRANSLATION_SOURCE -> "翻译原稿"
+    ResearchRole.DATA -> "数据"
+    ResearchRole.SUPPLEMENT -> "补充材料"
 }
 
 @Composable
@@ -2271,15 +2539,16 @@ private fun SettingsScreen(
                     Icon(Icons.Outlined.PictureAsPdf, contentDescription = null)
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("PDF 离线缓存", fontWeight = FontWeight.SemiBold)
+                        Text("PDF 存储", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "已使用 ${formatBytes(state.pdfCacheBytes)} / ${formatBytes(state.pdfCacheLimitBytes)} · 按最近使用自动清理",
+                            "临时缓存 ${formatBytes(state.pdfCacheBytes)} / ${formatBytes(state.pdfCacheLimitBytes)} · " +
+                                "离线保留 ${formatBytes(state.offlinePdfBytes)}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     TextButton(onClick = onClearPdfCache, enabled = state.pdfCacheBytes > 0 && state.transfer == null) {
-                        Text("清理")
+                        Text("清理临时缓存")
                     }
                 }
             }

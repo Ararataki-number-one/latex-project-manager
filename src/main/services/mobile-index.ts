@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { lstat, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 
@@ -49,14 +49,42 @@ function validateAgainstManifest(index: MobileProjectIndex, manifest: ProjectMan
       throw new Error(`移动输出引用了不存在的编译方案：${output.profileId}`);
     }
   }
+  for (const item of index.researchItems ?? []) {
+    for (const link of item.links) {
+      if (link.targetId && !targets.has(link.targetId)) {
+        throw new Error(`Research material ${item.title || item.id} references an unknown document target: ${link.targetId}`);
+      }
+    }
+  }
 }
 
 async function gitBlobSha(path: string): Promise<string> {
-  const bytes = await readFile(path);
-  return createHash("sha1")
-    .update(`blob ${bytes.length}\0`, "utf8")
-    .update(bytes)
-    .digest("hex");
+  const details = await stat(path);
+  const hash = createHash("sha1").update(`blob ${details.size}\0`, "utf8");
+  await updateHashFromFile(hash, path);
+  return hash.digest("hex");
+}
+
+async function sha256(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  await updateHashFromFile(hash, path);
+  return hash.digest("hex");
+}
+
+async function updateHashFromFile(hash: ReturnType<typeof createHash>, path: string): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    const stream = createReadStream(path, { highWaterMark: 1024 * 1024 });
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", resolvePromise);
+  });
+}
+
+function assertResearchPathAllowed(path: string): void {
+  const first = path.split("/", 1)[0]?.toLocaleLowerCase("en-US");
+  if (first === ".git" || first === ".latex-workbench") {
+    throw new Error(`Research attachments cannot use an internal project path: ${path}`);
+  }
 }
 
 export class MobileIndexService {
@@ -94,12 +122,49 @@ export class MobileIndexService {
       });
     }
 
+    const verifiedResearchItems: MobileProjectIndex["researchItems"] = [];
+    for (const item of parsed.researchItems ?? []) {
+      const attachments = [];
+      for (const attachment of item.attachments) {
+        if (attachment.availability === "localOnly") {
+          attachments.push({
+            id: attachment.id,
+            name: attachment.name,
+            mediaType: attachment.mediaType,
+            versionLabel: attachment.versionLabel,
+            availability: "localOnly" as const
+          });
+          continue;
+        }
+        const relativePath = attachment.relativePath!;
+        assertResearchPathAllowed(relativePath);
+        const absolute = resolve(root, ...relativePath.split("/"));
+        const portable = portableRelativePath(root, absolute);
+        if (portable !== relativePath) throw new Error(`Research attachment paths must be canonical project-relative paths: ${relativePath}`);
+        const metadata = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") throw new Error(`Research attachment is missing: ${relativePath}`);
+          throw error;
+        });
+        if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error(`Research attachments must be regular files: ${relativePath}`);
+        attachments.push({
+          ...attachment,
+          relativePath: portable,
+          size: metadata.size,
+          sha256: await sha256(absolute),
+          gitBlobSha: await gitBlobSha(absolute),
+          availability: "repository" as const
+        });
+      }
+      verifiedResearchItems.push({ ...item, attachments });
+    }
+
     const normalized: MobileProjectIndex = {
       ...parsed,
-      schemaVersion: 2,
+      schemaVersion: parsed.schemaVersion === 3 ? 3 : 2,
       name: parsed.name.trim(),
       updatedAt: new Date().toISOString(),
-      outputs: verifiedOutputs
+      outputs: verifiedOutputs,
+      ...(parsed.schemaVersion === 3 ? { researchItems: verifiedResearchItems } : {})
     };
     const destination = resolve(root, MOBILE_PROJECT_INDEX_FILE);
     const temporary = resolve(dirname(destination), `${MOBILE_PROJECT_INDEX_FILE}.${randomBytes(5).toString("hex")}.tmp`);

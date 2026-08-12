@@ -159,7 +159,7 @@ object ReleaseSecurity {
         return signers.map { sha256(it.toByteArray()) }.toSet()
     }
 
-    private val RELEASE_TAG = Regex("v([0-9]+\\.[0-9]+\\.[0-9]+)")
+    private val RELEASE_TAG = Regex("v([0-9]+\\.[0-9]+\\.[0-9]+(?:-beta\\.[0-9]+)?)")
     private val SHA256 = Regex("[a-f0-9]{64}")
     private const val ED25519_SIGNATURE_SIZE = 64
     private val ED25519_SPKI_PREFIX = byteArrayOf(

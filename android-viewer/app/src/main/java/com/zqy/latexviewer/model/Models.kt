@@ -61,7 +61,9 @@ data class GitHubContent(
     val commitSha: String? = null,
     val gitObjectSha: String = sha,
     val etag: String? = null,
-    val lfsOidSha256: String? = null
+    val lfsOidSha256: String? = null,
+    /** Optional portable SHA-256 declared by the managed project index. */
+    val contentSha256: String? = null
 )
 
 data class TextDocument(
@@ -92,16 +94,82 @@ data class MobilePdfOutput(
     val name: String,
     val entry: String,
     val profileId: String?,
-    val pdfPath: String
+    val pdfPath: String,
+    val blobSha: String? = null,
+    val size: Long? = null,
+    val generatedAt: String? = null
 )
+
+enum class ResearchRole(val wireValue: String) {
+    PRIMARY_SOURCE("primarySource"),
+    REFERENCE("reference"),
+    TRANSLATION_SOURCE("translationSource"),
+    DATA("data"),
+    SUPPLEMENT("supplement");
+
+    companion object {
+        fun fromWireValue(value: String): ResearchRole? = entries.firstOrNull { it.wireValue == value }
+    }
+}
+
+enum class ResearchAttachmentAvailability(val wireValue: String) {
+    REPOSITORY("repository"),
+    LOCAL_ONLY("localOnly");
+
+    companion object {
+        fun fromWireValue(value: String): ResearchAttachmentAvailability? =
+            entries.firstOrNull { it.wireValue == value }
+    }
+}
+
+data class ResearchAttachment(
+    val id: String,
+    val name: String,
+    val relativePath: String?,
+    val mediaType: String,
+    val size: Long?,
+    val sha256: String?,
+    val gitBlobSha: String?,
+    val versionLabel: String?,
+    val availability: ResearchAttachmentAvailability
+) {
+    val canDownload: Boolean
+        get() = availability == ResearchAttachmentAvailability.REPOSITORY && !relativePath.isNullOrBlank()
+}
+
+data class TargetResearchLink(
+    val targetId: String?,
+    val role: ResearchRole,
+    val preferredAttachmentId: String?
+)
+
+data class ProjectResearchItem(
+    val id: String,
+    val title: String?,
+    val authors: List<String>,
+    val year: Int?,
+    val language: String?,
+    val doi: String?,
+    val arxivId: String?,
+    val isbn: String?,
+    val attachments: List<ResearchAttachment>,
+    val links: List<TargetResearchLink>,
+    val sortOrder: Int = 0
+) {
+    val displayTitle: String
+        get() = title?.takeIf { it.isNotBlank() }
+            ?: attachments.firstOrNull()?.name
+            ?: "未命名资料"
+}
 
 data class MobileProjectIndex(
     val schemaVersion: Int,
     val projectId: String,
     val name: String,
     val updatedAt: String,
-    val defaultOutputId: String,
+    val defaultOutputId: String?,
     val outputs: List<MobilePdfOutput>,
+    val researchItems: List<ProjectResearchItem> = emptyList(),
     /** Commit from which both the index and every output path were resolved. */
     val commitSha: String? = null
 ) {
@@ -155,6 +223,35 @@ enum class GlassMode {
     AUTO,
     FULL,
     OFF
+}
+
+enum class PdfStorageClass {
+    TEMPORARY,
+    OFFLINE
+}
+
+data class OfflinePdfDocument(
+    /** Base cache key without the private storage prefix. */
+    val cacheKey: String,
+    val repositoryFullName: String,
+    val pdfPath: String,
+    val sha: String,
+    val localPath: String,
+    val size: Long,
+    val lastAccessAt: Long
+) {
+    val name: String
+        get() = pdfPath.replace('\\', '/').substringAfterLast('/').ifBlank { "离线 PDF" }
+}
+
+enum class OfflineDocumentState {
+    ONLINE_ONLY,
+    PREPARING,
+    TEMPORARY_CACHE,
+    OFFLINE,
+    UPDATE_AVAILABLE,
+    WAITING_FOR_NETWORK,
+    FAILED
 }
 
 data class PersistentDownloadTask(

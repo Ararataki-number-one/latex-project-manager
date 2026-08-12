@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import appIcon from "../../assets/app-icon.png";
 import {
   Archive,
   ArchiveRestore,
+  Activity,
   AlertTriangle,
   BookOpenText,
   Check,
@@ -20,10 +22,13 @@ import {
   FolderInput,
   FolderKanban,
   FolderOpen,
+  FolderTree,
   HardDrive,
   Heart,
   GitFork,
   Import,
+  Inbox,
+  Library,
   Menu,
   MoreHorizontal,
   LogIn,
@@ -35,14 +40,16 @@ import {
   Search,
   Settings2,
   ShieldCheck,
+  Sparkles,
   Star,
   Tags,
   Trash2,
   X
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { AppRuntimeSettings, AppUpdateStatus, CatalogStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
+import type { AppRuntimeSettings, AppUpdateStatus, CatalogProjectResearchItem, CatalogStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectCollection, ProjectStorageInfo, ProjectSummary, ResearchRole, ResearchSearchHit, ScanCandidate, SmartView, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
 import { createWorkbench } from "./demo";
+import { useProjectGitHubStatuses } from "./github-status-store";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { ProjectView } from "./ProjectView";
 
@@ -50,6 +57,13 @@ const runtime = createWorkbench();
 
 type LibraryFilter = "all" | "favorites" | "recent" | "archived";
 type ExtendedLibraryFilter = LibraryFilter | "trashed";
+type LibraryScope =
+  | { kind: "standard" }
+  | { kind: "research" }
+  | { kind: "organize" }
+  | { kind: "issue"; issue: "path" | "sync" | "pdf"; label: string }
+  | { kind: "collection"; id: string }
+  | { kind: "smart"; id: string };
 
 const TAG_COLORS = ["#e5484d", "#8e4ec6", "#3e63dd", "#0d9f6e", "#e5a000", "#00a2c7", "#cd2b31"];
 
@@ -137,9 +151,142 @@ interface LibraryViewProps {
   onNotify: (message: string) => void;
   isDemo: boolean;
   openImportNonce: number;
+  scopeTitle?: string;
+  scopeDescription?: string;
+  scopedProjectIds?: string[];
+  issueFilterOverride?: "all" | "path" | "sync" | "pdf";
 }
 
-function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsChange, onNotify, isDemo, openImportNonce }: LibraryViewProps) {
+const RESEARCH_ROLE_LABELS: Record<ResearchRole, string> = {
+  primarySource: "主要原稿",
+  reference: "普通参考",
+  translationSource: "翻译原稿",
+  data: "数据",
+  supplement: "补充材料"
+};
+
+type ResearchLibraryFilter = "all" | "pending" | "localOnly" | ResearchRole;
+
+function GlobalResearchLibrary({
+  api,
+  projects,
+  onOpenProject,
+  onNotify
+}: {
+  api: WorkbenchApi;
+  projects: ProjectSummary[];
+  onOpenProject: (project: ProjectSummary) => void;
+  onNotify: (message: string) => void;
+}) {
+  const [entries, setEntries] = useState<CatalogProjectResearchItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<ResearchLibraryFilter>("all");
+  const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
+  const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.research.listGlobal()
+      .then((next) => {
+        if (cancelled) return;
+        setEntries(next);
+        setSelectedWorkId((current) => current && next.some((entry) => entry.workId === current) ? current : (next[0]?.workId ?? null));
+      })
+      .catch((error: unknown) => !cancelled && onNotify(error instanceof Error ? error.message : "无法读取研究资料库"))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [api, onNotify]);
+
+  const groups = useMemo(() => {
+    const grouped = new Map<string, CatalogProjectResearchItem[]>();
+    for (const entry of entries) grouped.set(entry.workId, [...(grouped.get(entry.workId) ?? []), entry]);
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return Array.from(grouped.entries()).map(([workId, workEntries]) => ({
+      workId,
+      entries: workEntries,
+      item: workEntries[0].item
+    })).filter((group) => {
+      const allAttachments = group.entries.flatMap((entry) => entry.item.attachments);
+      const allLinks = group.entries.flatMap((entry) => entry.item.links);
+      if (filter === "pending" && !group.entries.some((entry) => entry.item.links.length === 0)) return false;
+      if (filter === "localOnly" && !allAttachments.some((attachment) => attachment.availability === "localOnly")) return false;
+      if (filter !== "all" && filter !== "pending" && filter !== "localOnly" && !allLinks.some((link) => link.role === filter)) return false;
+      if (!normalizedQuery) return true;
+      const searchText = group.entries.flatMap((entry) => {
+        const item = entry.item;
+        return [item.title, ...item.authors, item.year, item.doi, item.arxivId, item.isbn,
+          ...item.attachments.map((attachment) => attachment.name), projectsById.get(entry.projectId)?.name];
+      }).filter(Boolean).join(" ").toLocaleLowerCase();
+      return searchText.includes(normalizedQuery);
+    }).sort((left, right) => {
+      const leftTitle = left.item.title || left.item.attachments[0]?.name || left.workId;
+      const rightTitle = right.item.title || right.item.attachments[0]?.name || right.workId;
+      return leftTitle.localeCompare(rightTitle, "zh-CN");
+    });
+  }, [entries, filter, projectsById, query]);
+  const selected = groups.find((group) => group.workId === selectedWorkId) ?? groups[0];
+  const filterItems: Array<{ id: ResearchLibraryFilter; label: string; count: number }> = [
+    { id: "all", label: "全部资料", count: new Set(entries.map((entry) => entry.workId)).size },
+    { id: "pending", label: "待关联", count: new Set(entries.filter((entry) => entry.item.links.length === 0).map((entry) => entry.workId)).size },
+    { id: "localOnly", label: "仅本机", count: new Set(entries.filter((entry) => entry.item.attachments.some((attachment) => attachment.availability === "localOnly")).map((entry) => entry.workId)).size },
+    ...Object.entries(RESEARCH_ROLE_LABELS).map(([id, label]) => ({
+      id: id as ResearchRole,
+      label,
+      count: new Set(entries.filter((entry) => entry.item.links.some((link) => link.role === id)).map((entry) => entry.workId)).size
+    }))
+  ];
+
+  return (
+    <section className="global-research-page" aria-label="研究资料库">
+      <header className="page-heading global-research-heading">
+        <div><span className="page-heading-icon"><Library size={22} /></span><div><h1>研究资料</h1><p>在一个视图中查看论文、书籍、数据与它们关联的 LaTeX 项目。</p></div></div>
+        <label className="global-research-search"><Search size={17} /><input aria-label="搜索研究资料" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、作者、DOI、附件或项目" />{query && <IconButton label="清除搜索" onClick={() => setQuery("")}><X size={15} /></IconButton>}</label>
+      </header>
+      <div className="global-research-layout">
+        <nav className="global-research-filters" aria-label="研究资料筛选">
+          <strong>资料视图</strong>
+          {filterItems.map((item) => <button key={item.id} className={filter === item.id ? "active" : ""} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}><span>{item.label}</span><small>{item.count}</small></button>)}
+        </nav>
+        <div className="global-research-list" role="listbox" aria-label="研究资料列表">
+          {loading ? <div className="research-library-empty"><RefreshCw className="spin" size={22} /><p>正在整理本机资料索引…</p></div> : groups.length === 0 ? <div className="research-library-empty"><Library size={28} /><h2>{entries.length ? "没有符合条件的资料" : "还没有研究资料"}</h2><p>{entries.length ? "尝试清除搜索或切换资料视图。" : "进入任一项目的“研究资料”页，从 references 文件夹建立资料记录。"}</p></div> : groups.map((group) => {
+            const item = group.item;
+            const title = item.title || item.attachments[0]?.name || "未命名资料";
+            const projectCount = new Set(group.entries.map((entry) => entry.projectId)).size;
+            const attachments = group.entries.flatMap((entry) => entry.item.attachments);
+            const localOnly = attachments.some((attachment) => attachment.availability === "localOnly");
+            return <button key={group.workId} type="button" role="option" aria-selected={selected?.workId === group.workId} className={`global-research-row ${selected?.workId === group.workId ? "selected" : ""}`} onClick={() => setSelectedWorkId(group.workId)}><span className="research-type-icon"><BookOpenText size={19} /></span><span className="global-research-copy"><strong>{title}</strong><small>{[item.authors.slice(0, 3).join("、"), item.year, `${projectCount} 个项目`].filter(Boolean).join(" · ")}</small></span><span className={localOnly ? "research-availability local" : "research-availability repository"}>{localOnly ? "含仅本机附件" : "手机可用"}</span><ChevronRight size={16} /></button>;
+          })}
+        </div>
+        <aside className="global-research-inspector" aria-label="资料检查器">
+          {selected ? <>
+            <span className="inspector-eyebrow">资料检查器</span>
+            <h2>{selected.item.title || selected.item.attachments[0]?.name || "未命名资料"}</h2>
+            <p>{selected.item.authors.length ? selected.item.authors.join("、") : "尚未填写作者"}</p>
+            <dl>
+              <div><dt>年份</dt><dd>{selected.item.year ?? "—"}</dd></div>
+              <div><dt>DOI / arXiv</dt><dd>{selected.item.doi || selected.item.arxivId || "—"}</dd></div>
+              <div><dt>附件</dt><dd>{selected.entries.reduce((sum, entry) => sum + entry.item.attachments.length, 0)}</dd></div>
+              <div><dt>使用项目</dt><dd>{new Set(selected.entries.map((entry) => entry.projectId)).size}</dd></div>
+            </dl>
+            <div className="research-project-links">
+              <strong>关联项目</strong>
+              {selected.entries.map((entry) => {
+                const project = projectsById.get(entry.projectId);
+                if (!project) return null;
+                const roles = Array.from(new Set(entry.item.links.map((link) => RESEARCH_ROLE_LABELS[link.role])));
+                return <button key={`${entry.projectId}:${entry.item.id}`} onClick={() => onOpenProject(project)}><span><strong>{project.name}</strong><small>{roles.length ? roles.join("、") : "待关联"}</small></span><ChevronRight size={15} /></button>;
+              })}
+            </div>
+          </> : <div className="research-library-empty"><Library size={24} /><p>选择一份资料查看关联项目和附件状态。</p></div>}
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsChange, onNotify, isDemo, openImportNonce, scopeTitle, scopeDescription, scopedProjectIds, issueFilterOverride }: LibraryViewProps) {
   const [query, setQuery] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [candidates, setCandidates] = useState<ScanCandidate[]>([]);
@@ -153,7 +300,6 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [copying, setCopying] = useState(false);
   const [pdfAvailability, setPdfAvailability] = useState<Record<string, boolean>>({});
   const [projectStorage, setProjectStorage] = useState<Record<string, ProjectStorageInfo>>({});
-  const [syncStatuses, setSyncStatuses] = useState<Record<string, GitHubSyncStatus>>({});
   const [templateOpen, setTemplateOpen] = useState(false);
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
@@ -170,6 +316,20 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [sortMode, setSortMode] = useState<"recent" | "name" | "size" | "sync">("recent");
   const [issueFilter, setIssueFilter] = useState<"all" | "path" | "sync" | "pdf">("all");
   const [libraryDensity, setLibraryDensity] = useState<"comfortable" | "compact">("comfortable");
+  const statusProjects = useMemo(() => {
+    const available = projects.filter((project) => project.pathAvailable && !project.trashed);
+    if (issueFilter === "sync" || sortMode === "sync") return available;
+    const priority = new Set([focusedProjectId, ...selectedProjectIds].filter((value): value is string => Boolean(value)));
+    return [
+      ...available.filter((project) => priority.has(project.id)),
+      ...available.filter((project) => !priority.has(project.id)).slice(0, 40)
+    ];
+  }, [focusedProjectId, issueFilter, projects, selectedProjectIds, sortMode]);
+  const { statuses: syncStatuses } = useProjectGitHubStatuses(api, statusProjects);
+
+  useEffect(() => {
+    if (issueFilterOverride) setIssueFilter(issueFilterOverride);
+  }, [issueFilterOverride]);
 
   useEffect(() => {
     if (openImportNonce > 0) setImportOpen(true);
@@ -233,6 +393,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
           if (filter === "archived" && !project.archived) return false;
           if (filter !== "archived" && project.archived) return false;
         }
+        if (scopedProjectIds && !scopedProjectIds.includes(project.id)) return false;
         if (activeTag && !project.tags.includes(activeTag)) return false;
         if (normalized && ![project.name, project.rootPath, ...project.classNames, ...project.tags].join(" ").toLocaleLowerCase().includes(normalized)) return false;
         if (issueFilter === "path" && project.pathAvailable) return false;
@@ -260,80 +421,70 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
       }
       return (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? "") || a.name.localeCompare(b.name, "zh-CN");
     });
-  }, [projects, filter, query, activeTag, issueFilter, sortMode, pdfAvailability, projectStorage, syncStatuses]);
+  }, [projects, filter, query, activeTag, issueFilter, sortMode, pdfAvailability, projectStorage, syncStatuses, scopedProjectIds]);
 
   const focusedProject = visible.find((project) => project.id === focusedProjectId) ?? null;
 
   useEffect(() => {
-    setSelectedProjectIds((current) => current.filter((id) => visible.some((project) => project.id === id)));
+    setSelectedProjectIds((current) => {
+      const next = current.filter((id) => visible.some((project) => project.id === id));
+      return next.length === current.length ? current : next;
+    });
     setFocusedProjectId((current) => current && visible.some((project) => project.id === current) ? current : null);
   }, [visible]);
 
   useEffect(() => {
     let cancelled = false;
-    const candidates = projects.filter((project) => project.pathAvailable && !project.trashed);
+    const available = projects.filter((project) => project.pathAvailable && !project.trashed);
+    const priorityIds = new Set([focusedProjectId, ...selectedProjectIds].filter((value): value is string => Boolean(value)));
+    const defaultCandidates = [
+      ...available.filter((project) => priorityIds.has(project.id)),
+      ...available.filter((project) => !priorityIds.has(project.id)).slice(0, 40)
+    ];
+    // Opening a large library must not touch every project root. Full scans are
+    // reserved for the two explicit views that need complete disk-derived data.
+    const pdfCandidates = issueFilter === "pdf" ? available : defaultCandidates;
+    const storageCandidates = sortMode === "size" ? available : defaultCandidates;
     const entries: Array<readonly [string, boolean]> = [];
     const storageEntries: Array<readonly [string, ProjectStorageInfo]> = [];
-    let nextIndex = 0;
-    const worker = async () => {
-      while (!cancelled) {
-        const project = candidates[nextIndex++];
-        if (!project) return;
-        try {
-          entries.push([project.id, Boolean(await api.library.lastSuccessfulPdf(project.id))] as const);
-        } catch {
-          entries.push([project.id, false] as const);
-        }
-        try {
-          storageEntries.push([project.id, await api.library.storageInfo(project.id)] as const);
-        } catch {
-          // Keep the previous measurement when a project is temporarily unavailable.
-        }
-      }
-    };
-    void Promise.all(Array.from({ length: Math.min(4, candidates.length) }, () => worker())).then(() => {
-      if (!cancelled) {
-        setPdfAvailability((current) => ({ ...current, ...Object.fromEntries(entries) }));
-        setProjectStorage((current) => ({ ...current, ...Object.fromEntries(storageEntries) }));
-      }
-    });
-    return () => { cancelled = true; };
-  }, [api, isDemo, projects]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = async () => {
-      const candidates = projects.filter((project) => project.pathAvailable && !project.trashed);
-      const entries: Array<readonly [string, GitHubSyncStatus]> = [];
+    const scan = async <T,>(
+      candidates: ProjectSummary[],
+      read: (project: ProjectSummary) => Promise<T>,
+      output: Array<readonly [string, T]>,
+      fallback?: T
+    ) => {
       let nextIndex = 0;
       const worker = async () => {
         while (!cancelled) {
           const project = candidates[nextIndex++];
           if (!project) return;
           try {
-            entries.push([project.id, await api.github.status(project.id)] as const);
+            output.push([project.id, await read(project)] as const);
           } catch {
-            // The badge remains in its previous state if Git is busy or temporarily unavailable.
+            if (fallback !== undefined) output.push([project.id, fallback] as const);
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, () => worker()));
-      if (!cancelled) {
-        setSyncStatuses((current) => ({ ...current, ...Object.fromEntries(entries) }));
-        timer = setTimeout(() => { void refresh(); }, 8_000);
-      }
+      await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, () => worker()));
     };
-    void refresh();
-    return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [api, projects]);
+    void Promise.all([
+      scan(pdfCandidates, async (project) => Boolean(await api.library.lastSuccessfulPdf(project.id)), entries, false),
+      scan(storageCandidates, (project) => api.library.storageInfo(project.id), storageEntries)
+    ]).then(() => {
+      if (!cancelled) {
+        setPdfAvailability((current) => ({ ...current, ...Object.fromEntries(entries) }));
+        setProjectStorage((current) => ({ ...current, ...Object.fromEntries(storageEntries) }));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [api, focusedProjectId, isDemo, issueFilter, projects, selectedProjectIds, sortMode]);
 
   async function toggleFavorite(project: ProjectSummary) {
     const favorite = !project.favorite;
     await updateProject(project, { favorite });
   }
 
-  async function updateProject(project: ProjectSummary, patch: Partial<Pick<ProjectSummary, "name" | "favorite" | "archived" | "trashed" | "tags">>) {
+  async function updateProject(project: ProjectSummary, patch: Partial<Pick<ProjectSummary, "name" | "favorite" | "archived" | "trashed" | "tags" | "lifecycle" | "protectionState">>) {
     onProjectsChange((current) => current.map((item) => item.id === project.id ? { ...item, ...patch } : item));
     try {
       const updated = await api.library.update(project.id, patch);
@@ -668,8 +819,8 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
         <div className="page-heading">
           <span className="page-heading-icon" aria-hidden="true"><FolderKanban size={23} /></span>
           <div>
-            <h1>{filter === "favorites" ? "收藏项目" : filter === "recent" ? "最近使用" : filter === "archived" ? "已归档" : filter === "trashed" ? "已移除项目" : activeTag ? `标签：${activeTag}` : "你的项目"}</h1>
-            <p className="muted">{visible.length} 个项目 · 本地为主 · {Object.values(syncStatuses).filter((status) => status.configured).length} 项已连接 GitHub</p>
+            <h1>{scopeTitle ?? (filter === "favorites" ? "收藏项目" : filter === "recent" ? "最近使用" : filter === "archived" ? "已归档" : filter === "trashed" ? "已移除项目" : activeTag ? `标签：${activeTag}` : "项目库")}</h1>
+            <p className="muted">{scopeDescription ?? `${visible.length} 个项目 · 本地为主 · ${Object.values(syncStatuses).filter((status) => status.configured).length} 项已连接 GitHub`}</p>
           </div>
         </div>
         <div className="header-actions">
@@ -818,7 +969,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
         {focusedProject && <aside className="project-inspector" aria-label={`项目快速检查 ${focusedProject.name}`}>
           <header><span className="project-inspector-icon"><FolderKanban size={22} /></span><div><small>快速检查</small><h2>{focusedProject.name}</h2></div><IconButton label="关闭快速检查" onClick={() => setFocusedProjectId(null)}><X size={17} /></IconButton></header>
           <p className="project-inspector-description">{focusedProject.description?.trim() || "还没有项目说明。可在项目详情中补充研究主题、进度或下一步。"}</p>
-          <dl><div><dt>存储空间</dt><dd>{projectStorage[focusedProject.id] ? formatBytes(projectStorage[focusedProject.id].totalBytes) : "正在统计…"}</dd></div><div><dt>主 PDF</dt><dd>{pdfAvailability[focusedProject.id] ? "可用" : "尚未设置"}</dd></div><div><dt>同步</dt><dd><ProjectSyncBadge status={syncStatuses[focusedProject.id]} /></dd></div><div><dt>最近使用</dt><dd>{relativeTime(focusedProject.lastOpenedAt)}</dd></div></dl>
+          <dl><div><dt>项目阶段</dt><dd><select aria-label={`项目阶段 ${focusedProject.name}`} value={focusedProject.lifecycle ?? (focusedProject.archived ? "archived" : "active")} onChange={(event) => void updateProject(focusedProject, { lifecycle: event.target.value as ProjectSummary["lifecycle"] })}><option value="active">活跃</option><option value="paused">暂停</option><option value="completed">已完成</option><option value="archived">已归档</option></select></dd></div><div><dt>保护状态</dt><dd>{focusedProject.protectionState === "both" ? "GitHub + 本地备份" : focusedProject.protectionState === "github" ? "GitHub" : focusedProject.protectionState === "localBackup" ? "本地备份" : "未受保护"}</dd></div><div><dt>存储空间</dt><dd>{projectStorage[focusedProject.id] ? formatBytes(projectStorage[focusedProject.id].totalBytes) : "正在统计…"}</dd></div><div><dt>主 PDF</dt><dd>{pdfAvailability[focusedProject.id] ? "可用" : "尚未设置"}</dd></div><div><dt>同步</dt><dd><ProjectSyncBadge status={syncStatuses[focusedProject.id]} /></dd></div><div><dt>最近使用</dt><dd>{relativeTime(focusedProject.lastOpenedAt)}</dd></div></dl>
           <div className="project-inspector-actions"><button className="button primary" onClick={() => void openProjectFolder(focusedProject)} disabled={!focusedProject.pathAvailable}><FolderOpen size={16} />打开文件夹</button><button className="button secondary" onClick={() => onManage(focusedProject)} disabled={!focusedProject.pathAvailable}>项目详情</button><button className="button secondary" onClick={() => void openProjectInVsCode(focusedProject)} disabled={!focusedProject.pathAvailable}><Code2 size={16} />VS Code</button></div>
         </aside>}
         </div>
@@ -1145,7 +1296,7 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
         {isDemo && <p className="demo-note">浏览器演示模式不会访问 GitHub 或下载程序。</p>}
       </section>}
       {section === "about" && <section className="settings-card about-settings-card">
-        <header><div><h2>关于 LaTeX 项目管理器</h2><p>本地优先的 LaTeX 项目库、原始文稿与安全同步工具。</p></div><BookOpenText size={20} /></header>
+        <header><div><h2>关于 LaTeX 项目管理器</h2><p>本地优先的 LaTeX 项目、研究资料与安全同步工作台。</p></div><BookOpenText size={20} /></header>
         <div className="product-repository-address"><GitFork size={17} /><div><strong>开源项目地址</strong><code>github.com/Ararataki-number-one/latex-project-manager</code></div><button className="button secondary" onClick={() => void openProductPage()}><ExternalLink size={15} />打开 GitHub</button></div>
         <div className="about-version-row"><span>当前版本</span><strong>{status.currentVersion}</strong></div>
       </section>}
@@ -1161,24 +1312,9 @@ function SyncCenterView({ api, projects, paused, onPausedChange, onOpenProject, 
   onOpenProject: (project: ProjectSummary) => void;
   onNotify: (message: string) => void;
 }) {
-  const [statuses, setStatuses] = useState<Record<string, GitHubSyncStatus>>({});
   const [busy, setBusy] = useState<"sync" | "pause" | null>(null);
   const availableProjects = useMemo(() => projects.filter((project) => project.pathAvailable && !project.trashed), [projects]);
-
-  async function refresh() {
-    const entries = await Promise.all(availableProjects.map(async (project) => {
-      try { return [project.id, await api.github.status(project.id)] as const; }
-      catch { return null; }
-    }));
-    setStatuses((current) => ({ ...current, ...Object.fromEntries(entries.filter((entry): entry is readonly [string, GitHubSyncStatus] => entry !== null)) }));
-  }
-
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => { void refresh(); }, 8_000);
-    const unsubscribe = api.github.onEvent(() => { void refresh(); });
-    return () => { clearInterval(timer); unsubscribe(); };
-  }, [api, availableProjects]);
+  const { statuses, refresh } = useProjectGitHubStatuses(api, availableProjects);
 
   async function syncAll() {
     setBusy("sync");
@@ -1210,7 +1346,7 @@ function SyncCenterView({ api, projects, paused, onPausedChange, onOpenProject, 
 
   return <section className="sync-center-page">
     <header className="sync-center-heading">
-      <div><span className="page-heading-icon"><Cloud size={22} /></span><div><h1>同步中心</h1><p>{configured.length} 个项目已连接 GitHub · {attention.length ? `${attention.length} 个需要处理` : pending.length ? `${pending.length} 个等待同步` : active.length ? `${active.length} 个正在同步` : "全部已同步"}</p></div></div>
+      <div><span className="page-heading-icon"><Activity size={22} /></span><div><h1 aria-label="同步中心">活动中心</h1><p>同步与后台任务 · {configured.length} 个项目已连接 GitHub · {attention.length ? `${attention.length} 个需要处理` : pending.length ? `${pending.length} 个等待同步` : active.length ? `${active.length} 个正在同步` : "全部已同步"}</p></div></div>
       <div><button className="button secondary" disabled={busy !== null} onClick={() => void togglePaused()}>{paused ? <PlayCircle size={17} /> : <PauseCircle size={17} />}{paused ? "恢复自动同步" : "暂停自动同步"}</button><button className="button primary" disabled={busy !== null || paused} onClick={() => void syncAll()}><RefreshCw size={17} className={busy === "sync" ? "spin" : ""} />同步全部</button></div>
     </header>
     {paused && <div className="sync-center-paused"><PauseCircle size={18} /><div><strong>自动同步已暂停</strong><p>本地变化仍会保留，恢复后继续处理队列。</p></div></div>}
@@ -1232,6 +1368,120 @@ function SyncCenterView({ api, projects, paused, onPausedChange, onOpenProject, 
   </section>;
 }
 
+const SEARCH_KIND_LABELS: Record<ResearchSearchHit["kind"], string> = {
+  project: "项目",
+  file: "文件",
+  heading: "章节",
+  label: "标签",
+  citation: "引用",
+  bib: "文献条目",
+  research: "研究资料"
+};
+
+function GlobalSearchPalette({
+  api,
+  projects,
+  open,
+  onClose,
+  onOpenProject,
+  onNotify
+}: {
+  api: WorkbenchApi;
+  projects: ProjectSummary[];
+  open: boolean;
+  onClose: () => void;
+  onOpenProject: (project: ProjectSummary, tab: "overview" | "references") => void;
+  onNotify: (message: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<ResearchSearchHit[]>([]);
+  const [indexing, setIndexing] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [indexRevision, setIndexRevision] = useState(0);
+  const lastIndexAt = useRef(0);
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+
+  useEffect(() => {
+    if (!open) return;
+    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+    setActiveIndex(0);
+    if (Date.now() - lastIndexAt.current < 10 * 60 * 1000) {
+      return () => previousFocus.current?.focus();
+    }
+    lastIndexAt.current = Date.now();
+    setIndexing(true);
+    api.researchSearch.indexAll()
+      .catch((error: unknown) => onNotify(error instanceof Error ? error.message : "无法更新本地搜索索引"))
+      .finally(() => { setIndexing(false); setIndexRevision((value) => value + 1); });
+    return () => previousFocus.current?.focus();
+  }, [api, onNotify, open]);
+
+  useEffect(() => {
+    if (!open || !query.trim()) { setResults([]); setSearching(false); return; }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSearching(true);
+      api.researchSearch.query(query.trim(), undefined, 40)
+        .then((next) => { if (!cancelled) { setResults(next); setActiveIndex(0); } })
+        .catch((error: unknown) => !cancelled && onNotify(error instanceof Error ? error.message : "无法搜索本机资料"))
+        .finally(() => !cancelled && setSearching(false));
+    }, 160);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [api, indexRevision, onNotify, open, query]);
+
+  async function openResult(result: ResearchSearchHit) {
+    const project = projectsById.get(result.projectId);
+    if (!project) { onNotify("搜索结果对应的项目已不在项目库中"); return; }
+    onClose();
+    if (result.kind === "project" || result.kind === "research" || !result.relativePath) {
+      onOpenProject(project, result.kind === "research" ? "references" : "overview");
+      return;
+    }
+    try {
+      await api.vscode.openFile(project.rootPath, result.relativePath, result.line);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法在 VS Code 中打开搜索结果");
+    }
+  }
+
+  if (!open) return null;
+  return (
+    <div className="global-search-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section ref={dialogRef} className="global-search-dialog" role="dialog" aria-modal="true" aria-label="全局搜索" onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+        if (event.key !== "Tab") return;
+        const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>('input, button:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
+        if (focusable.length === 0) return;
+        const current = focusable.indexOf(document.activeElement as HTMLElement);
+        const next = event.shiftKey
+          ? (current <= 0 ? focusable.length - 1 : current - 1)
+          : (current >= focusable.length - 1 ? 0 : current + 1);
+        event.preventDefault();
+        focusable[next].focus();
+      }}>
+        <header><Search size={20} /><input ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="global-search-results" aria-activedescendant={results[activeIndex] ? `global-search-result-${results[activeIndex].id}` : undefined} aria-label="搜索项目、文件和研究资料" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "ArrowDown") { event.preventDefault(); setActiveIndex((current) => Math.min(Math.max(0, results.length - 1), current + 1)); }
+          else if (event.key === "ArrowUp") { event.preventDefault(); setActiveIndex((current) => Math.max(0, current - 1)); }
+          else if (event.key === "Enter" && results[activeIndex]) { event.preventDefault(); void openResult(results[activeIndex]); }
+        }} placeholder="搜索项目、章节、label、cite、BibTeX 或研究资料" /><kbd>Esc</kbd></header>
+        <div className="global-search-status">{indexing ? <><RefreshCw size={13} className="spin" />正在增量更新本机索引</> : searching ? <><RefreshCw size={13} className="spin" />正在搜索</> : query.trim() ? `${results.length} 个结果` : "只在本机搜索，不上传全文或路径"}</div>
+        <div id="global-search-results" className="global-search-results" role="listbox" aria-label="全局搜索结果">
+          {!query.trim() ? <div className="global-search-empty"><Search size={28} /><strong>快速定位整个研究工作区</strong><p>输入项目名、章节标题、LaTeX label、引用键或论文信息。</p></div> : !searching && results.length === 0 ? <div className="global-search-empty"><Search size={25} /><strong>没有找到结果</strong><p>检查关键词，或等待上方的本机索引更新完成。</p></div> : results.map((result, index) => {
+            const project = projectsById.get(result.projectId);
+            return <button id={`global-search-result-${result.id}`} key={result.id} role="option" aria-selected={index === activeIndex} className={index === activeIndex ? "active" : ""} onMouseEnter={() => setActiveIndex(index)} onClick={() => void openResult(result)}><span className="global-search-kind">{SEARCH_KIND_LABELS[result.kind]}</span><span className="global-search-result-copy"><strong>{result.title}</strong><small>{[project?.name, result.detail, result.relativePath && `${result.relativePath}${result.line ? `:${result.line}` : ""}`].filter(Boolean).join(" · ")}</small></span><ChevronRight size={16} /></button>;
+          })}
+        </div>
+        <footer><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>Enter</kbd> 打开</span><span>源码结果在 VS Code 中定位</span></footer>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selected, setSelected] = useState<ProjectSummary | null>(null);
@@ -1242,7 +1492,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
-  const [selectedProjectTab, setSelectedProjectTab] = useState<"overview" | "github">("overview");
+  const [selectedProjectTab, setSelectedProjectTab] = useState<"overview" | "files" | "references" | "github">("overview");
   const [runtimeSettings, setRuntimeSettings] = useState<AppRuntimeSettings>({
     closeToTray: true,
     onboardingCompleted: false,
@@ -1255,6 +1505,23 @@ export default function App() {
   const [showOnboardingHint, setShowOnboardingHint] = useState(false);
   const [openImportNonce, setOpenImportNonce] = useState(0);
   const [catalogStatus, setCatalogStatus] = useState<CatalogStatus | null>(null);
+  const [libraryScope, setLibraryScope] = useState<LibraryScope>({ kind: "standard" });
+  const [collections, setCollections] = useState<ProjectCollection[]>([]);
+  const [smartViews, setSmartViews] = useState<SmartView[]>([]);
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
+        event.preventDefault();
+        setGlobalSearchOpen(true);
+      } else if (event.key === "Escape") {
+        setGlobalSearchOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   function closeCompactNavigation() {
     if (window.matchMedia("(max-width: 780px)").matches) setNavOpen(false);
@@ -1274,6 +1541,13 @@ export default function App() {
         if (!settings.onboardingCompleted) {
           if (items.length === 0) setOnboardingOpen(true);
           else setShowOnboardingHint(true);
+        }
+        const optionalApi = runtime.api as Partial<WorkbenchApi>;
+        if (optionalApi.collections?.list) {
+          void optionalApi.collections.list().then(setCollections).catch(() => setCollections([]));
+        }
+        if (optionalApi.smartViews?.list) {
+          void optionalApi.smartViews.list().then(setSmartViews).catch(() => setSmartViews([]));
         }
       })
       .catch((error) => setToast(error instanceof Error ? error.message : "无法读取客户端设置"))
@@ -1333,6 +1607,42 @@ export default function App() {
   }, [toast]);
 
   const tags = useMemo(() => Array.from(new Set(projects.filter((project) => !project.trashed).flatMap((project) => project.tags))).sort((a, b) => a.localeCompare(b, "zh-CN")), [projects]);
+  const scopeMeta = useMemo(() => {
+    if (libraryScope.kind === "research") {
+      return { title: "研究资料", description: "按项目整理论文、PDF 与电子书；进入项目后查看和管理 references 文件夹。", ids: undefined, issue: "all" as const };
+    }
+    if (libraryScope.kind === "organize") {
+      const ids = projects.filter((project) => !project.archived && !project.trashed && (!project.tags.length || !project.description?.trim())).map((project) => project.id);
+      return { title: "待整理", description: "还没有标签或项目说明的项目，适合集中补充研究主题与进度。", ids, issue: "all" as const };
+    }
+    if (libraryScope.kind === "issue") {
+      return { title: libraryScope.label, description: "由本机状态实时生成的智能视图，不会移动项目文件。", ids: undefined, issue: libraryScope.issue };
+    }
+    if (libraryScope.kind === "collection") {
+      const collection = collections.find((item) => item.id === libraryScope.id);
+      return { title: collection?.name ?? "集合", description: "一个项目可以同时属于多个集合；集合不会改变磁盘目录。", ids: collection?.projectIds ?? [], issue: "all" as const };
+    }
+    if (libraryScope.kind === "smart") {
+      const view = smartViews.find((item) => item.id === libraryScope.id);
+      const ids = view ? projects.filter((project) => {
+        const rule = view.filter;
+        const haystack = `${project.name} ${project.rootPath} ${project.tags.join(" ")}`.toLocaleLowerCase();
+        if (rule.query && !haystack.includes(rule.query.toLocaleLowerCase())) return false;
+        if (rule.tags?.length && !rule.tags.every((tag) => project.tags.includes(tag))) return false;
+        if (rule.favorite !== undefined && project.favorite !== rule.favorite) return false;
+        if (rule.archived !== undefined && project.archived !== rule.archived) return false;
+        if (rule.trashed !== undefined && project.trashed !== rule.trashed) return false;
+        if (rule.pathAvailable !== undefined && project.pathAvailable !== rule.pathAvailable) return false;
+        if (rule.openedWithinDays !== undefined) {
+          const opened = project.lastOpenedAt ? new Date(project.lastOpenedAt).getTime() : 0;
+          if (!opened || Date.now() - opened > rule.openedWithinDays * 86_400_000) return false;
+        }
+        return true;
+      }).map((project) => project.id) : [];
+      return { title: view?.name ?? "智能视图", description: "自动按照保存的条件筛选项目。", ids, issue: "all" as const };
+    }
+    return { title: undefined, description: undefined, ids: undefined, issue: "all" as const };
+  }, [collections, libraryScope, projects, smartViews]);
   const navItems: Array<{ id: ExtendedLibraryFilter; label: string; icon: typeof BookOpenText; count?: number }> = [
     { id: "all", label: "项目库", icon: BookOpenText, count: projects.filter((item) => !item.archived && !item.trashed).length },
     { id: "favorites", label: "收藏", icon: Heart, count: projects.filter((item) => item.favorite && !item.archived && !item.trashed).length },
@@ -1340,9 +1650,11 @@ export default function App() {
     { id: "archived", label: "已归档", icon: Archive, count: projects.filter((item) => item.archived && !item.trashed).length },
     { id: "trashed", label: "已移除", icon: Trash2, count: projects.filter((item) => item.trashed).length }
   ];
+  const libraryVisible = !selected && !settingsOpen && !syncCenterOpen;
 
   function goLibrary(nextFilter: ExtendedLibraryFilter = filter) {
     setFilter(nextFilter);
+    setLibraryScope({ kind: "standard" });
     setActiveTag(null);
     setSelected(null);
     setSettingsOpen(false);
@@ -1353,33 +1665,58 @@ export default function App() {
     });
   }
 
+  function goScopedLibrary(scope: LibraryScope) {
+    setFilter("all");
+    setActiveTag(null);
+    setLibraryScope(scope);
+    setSelected(null);
+    setSettingsOpen(false);
+    setSyncCenterOpen(false);
+    closeCompactNavigation();
+  }
+
   if (loading) {
-    return <div className="app-loading"><div className="brand-mark">T<sub>E</sub>X</div><p>正在读取本地项目库…</p></div>;
+    return <div className="app-loading"><img className="brand-icon loading-brand-icon" src={appIcon} alt="" aria-hidden="true" /><p>正在读取本地项目库…</p></div>;
   }
 
   return (
     <div className={`app-shell ${navOpen ? "nav-open" : "nav-closed"}`}>
       <aside className="app-sidebar" aria-label="应用侧栏">
         <div className="brand-row">
-          <div className="brand-mark">T<sub>E</sub>X</div>
+          <img className="brand-icon" src={appIcon} alt="" aria-hidden="true" />
           <div className="brand-copy"><strong>LaTeX 管理器</strong><span>Project Manager</span></div>
           <IconButton label="收起侧栏" onClick={() => setNavOpen(false)}><PanelLeftClose size={17} /></IconButton>
         </div>
-        <p className="sidebar-section-label">工作区</p>
         <nav className="main-nav" aria-label="资料库导航">
-          {navItems.map((item) => {
+          <p className="sidebar-section-label">资料库</p>
+          {navItems.filter((item) => new Set(["all", "recent", "favorites"]).has(item.id)).map((item) => {
             const Icon = item.icon;
-            return (
-              <button key={item.id} className={!selected && !settingsOpen && !syncCenterOpen && filter === item.id ? "active" : ""} aria-current={!selected && !settingsOpen && !syncCenterOpen && filter === item.id ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}>
-                <Icon size={18} /><span>{item.label}</span>{item.count !== undefined && <small>{item.count}</small>}
-              </button>
-            );
+            const active = !selected && !settingsOpen && !syncCenterOpen && libraryScope.kind === "standard" && filter === item.id;
+            return <button key={item.id} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}><Icon size={18} /><span>{item.label}</span>{item.count !== undefined && <small>{item.count}</small>}</button>;
+          })}
+          <button className={libraryVisible && libraryScope.kind === "research" ? "active" : ""} aria-current={libraryVisible && libraryScope.kind === "research" ? "page" : undefined} onClick={() => goScopedLibrary({ kind: "research" })}><Library size={18} /><span>研究资料</span></button>
+          <button className={libraryVisible && libraryScope.kind === "organize" ? "active" : ""} aria-current={libraryVisible && libraryScope.kind === "organize" ? "page" : undefined} onClick={() => goScopedLibrary({ kind: "organize" })}><Inbox size={18} /><span>待整理</span><small>{projects.filter((project) => !project.archived && !project.trashed && (!project.tags.length || !project.description?.trim())).length}</small></button>
+
+          <p className="sidebar-section-label">智能视图</p>
+          <button className={libraryVisible && libraryScope.kind === "issue" && libraryScope.issue === "sync" ? "active" : ""} onClick={() => goScopedLibrary({ kind: "issue", issue: "sync", label: "同步需处理" })}><Sparkles size={18} /><span>同步需处理</span></button>
+          <button className={libraryVisible && libraryScope.kind === "issue" && libraryScope.issue === "path" ? "active" : ""} onClick={() => goScopedLibrary({ kind: "issue", issue: "path", label: "路径失效" })}><FolderTree size={18} /><span>路径失效</span></button>
+          <button className={libraryVisible && libraryScope.kind === "issue" && libraryScope.issue === "pdf" ? "active" : ""} onClick={() => goScopedLibrary({ kind: "issue", issue: "pdf", label: "未设置主 PDF" })}><FileDown size={18} /><span>未设置主 PDF</span></button>
+          {smartViews.map((view) => <button key={view.id} className={libraryVisible && libraryScope.kind === "smart" && libraryScope.id === view.id ? "active" : ""} onClick={() => goScopedLibrary({ kind: "smart", id: view.id })}><Sparkles size={18} /><span>{view.name}</span></button>)}
+
+          <p className="sidebar-section-label">集合</p>
+          {collections.length ? collections.map((collection) => <button key={collection.id} className={libraryVisible && libraryScope.kind === "collection" && libraryScope.id === collection.id ? "active" : ""} onClick={() => goScopedLibrary({ kind: "collection", id: collection.id })}><FolderKanban size={18} /><span>{collection.name}</span><small>{collection.projectIds.length}</small></button>) : <div className="sidebar-empty-row"><FolderKanban size={16} /><span>暂无集合</span></div>}
+
+          <p className="sidebar-section-label">管理</p>
+          {navItems.filter((item) => new Set(["archived", "trashed"]).has(item.id)).map((item) => {
+            const Icon = item.icon;
+            const active = !selected && !settingsOpen && !syncCenterOpen && libraryScope.kind === "standard" && filter === item.id;
+            return <button key={item.id} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => goLibrary(item.id)} title={item.label}><Icon size={18} /><span>{item.label}</span>{item.count !== undefined && <small>{item.count}</small>}</button>;
           })}
         </nav>
         <section className="sidebar-tags">
           <header><Tags size={15} /><strong>项目标签</strong></header>
           <nav aria-label="标签筛选">
-            <button className={!selected && !settingsOpen && !syncCenterOpen && filter === "all" && activeTag === null ? "active" : ""} aria-label="显示全部标签" aria-pressed={!selected && !settingsOpen && !syncCenterOpen && filter === "all" && activeTag === null} onClick={() => goLibrary("all")}>
+            <button className={!selected && !settingsOpen && !syncCenterOpen && libraryScope.kind === "standard" && filter === "all" && activeTag === null ? "active" : ""} aria-label="显示全部标签" aria-pressed={!selected && !settingsOpen && !syncCenterOpen && libraryScope.kind === "standard" && filter === "all" && activeTag === null} onClick={() => goLibrary("all")}>
               <span className="tag-color all-tags" /><span>全部标签</span><small>{projects.filter((project) => !project.archived && !project.trashed).length}</small>
             </button>
             {tags.map((tag, index) => (
@@ -1388,7 +1725,7 @@ export default function App() {
                 aria-label={`筛选标签：${tag}`}
                 aria-pressed={!selected && !settingsOpen && activeTag === tag}
                 key={tag}
-                onClick={() => { setActiveTag(tag); setFilter("all"); setSelected(null); setSettingsOpen(false); setSyncCenterOpen(false); closeCompactNavigation(); }}
+                onClick={() => { setLibraryScope({ kind: "standard" }); setActiveTag(tag); setFilter("all"); setSelected(null); setSettingsOpen(false); setSyncCenterOpen(false); closeCompactNavigation(); }}
               >
                 <span className="tag-color" style={{ backgroundColor: TAG_COLORS[index % TAG_COLORS.length] }} /><span>{tag}</span><small>{projects.filter((project) => !project.archived && !project.trashed && project.tags.includes(tag)).length}</small>
               </button>
@@ -1397,7 +1734,7 @@ export default function App() {
         </section>
         <div className="sidebar-spacer" />
         <nav className="sidebar-settings-nav" aria-label="应用导航">
-          <button className={syncCenterOpen ? "active" : ""} aria-current={syncCenterOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); closeCompactNavigation(); }}><Cloud size={18} /><span>同步中心</span></button>
+          <button className={syncCenterOpen ? "active" : ""} aria-label="同步中心" aria-current={syncCenterOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); closeCompactNavigation(); }}><Activity size={18} /><span>活动中心</span></button>
           <button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSyncCenterOpen(false); setSettingsOpen(true); closeCompactNavigation(); }}><Settings2 size={18} /><span>设置</span></button>
         </nav>
         <div className={`toolchain-card ${catalogStatus && !catalogStatus.persistent ? "catalog-temporary" : ""}`}>
@@ -1412,9 +1749,10 @@ export default function App() {
       <main className="app-main">
         <div className="window-strip">
           {!navOpen && <IconButton label="打开侧栏" onClick={() => setNavOpen(true)}><Menu size={19} /></IconButton>}
-          {!selected && <span className="window-title">{settingsOpen ? "设置" : syncCenterOpen ? "同步中心" : "LaTeX 项目管理器"}</span>}
+          {!selected && <span className="window-title">{settingsOpen ? "设置" : syncCenterOpen ? "活动中心" : "LaTeX 项目管理器"}</span>}
           {selected && <button className="breadcrumb-home" onClick={() => goLibrary()}><BookOpenText size={15} />项目库</button>}
           {selected && <><span className="breadcrumb-separator">/</span><span className="breadcrumb-current">{selected.name}</span></>}
+          <button className="global-search-trigger" aria-label="全局搜索" onClick={() => setGlobalSearchOpen(true)}><Search size={15} /><span>全局搜索</span><kbd>Ctrl K</kbd></button>
           <span className="window-drag-space" />
           <span className={`local-only ${runtimeSettings.syncPaused ? "sync-paused" : ""}`}>{runtimeSettings.syncPaused ? <PauseCircle size={13} /> : <ShieldCheck size={13} />}{runtimeSettings.syncPaused ? "同步已暂停" : "本地优先"}</span>
         </div>
@@ -1436,10 +1774,11 @@ export default function App() {
         ) : (
           <>
             {showOnboardingHint && <aside className="onboarding-hint" aria-label="新手向导提示"><div><BookOpenText size={18} /><span><strong>首次使用向导</strong><small>检查 Git、GitHub、VS Code，并完成第一个安全同步项目。</small></span></div><button className="button secondary" onClick={() => setOnboardingOpen(true)}>开始</button><IconButton label="不再提示" onClick={() => void completeOnboarding(false)}><X size={16} /></IconButton></aside>}
-            <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} onManage={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />
+            {libraryScope.kind === "research" ? <GlobalResearchLibrary api={runtime.api} projects={projects} onNotify={setToast} onOpenProject={(project) => { setSelectedProjectTab("references"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} scopeTitle={scopeMeta.title} scopeDescription={scopeMeta.description} scopedProjectIds={scopeMeta.ids} issueFilterOverride={scopeMeta.issue} onManage={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />}
           </>
         )}
       </main>
+      <GlobalSearchPalette api={runtime.api} projects={projects} open={globalSearchOpen} onClose={() => setGlobalSearchOpen(false)} onNotify={setToast} onOpenProject={(project, tab) => { setSelectedProjectTab(tab); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} />
       {onboardingOpen && <OnboardingWizard api={runtime.api} onComplete={(openImport) => void completeOnboarding(openImport)} onNotify={setToast} />}
       {toast && <div className="toast" role="status">{toast}<IconButton label="关闭通知" onClick={() => setToast(null)}><X size={15} /></IconButton></div>}
     </div>

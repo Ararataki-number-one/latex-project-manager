@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { MobileProjectIndex, ProjectManifest } from "./types";
+import type { MobileProjectIndex, ProjectManifest, ProjectResearchItem } from "./types";
 
 const relativePathSchema = z
   .string()
@@ -181,14 +181,72 @@ export const mobilePdfOutputSchema = z
   })
   .strict();
 
+export const researchAttachmentSchema = z.object({
+  id: idSchema,
+  name: z.string().trim().min(1).max(500),
+  relativePath: relativePathSchema.optional(),
+  mediaType: z.string().trim().min(1).max(200),
+  size: z.number().int().nonnegative().optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  gitBlobSha: z.string().regex(/^[a-f0-9]{40,64}$/i).optional(),
+  versionLabel: z.string().trim().min(1).max(120).optional(),
+  availability: z.enum(["repository", "localOnly"]),
+  publicUploadApproved: z.boolean().optional()
+}).strict().superRefine((attachment, context) => {
+  if (attachment.availability === "repository" && !attachment.relativePath) {
+    context.addIssue({ code: "custom", message: "Repository research attachments need a project-relative path", path: ["relativePath"] });
+  }
+  if (attachment.availability === "localOnly" && (attachment.relativePath || attachment.gitBlobSha)) {
+    context.addIssue({ code: "custom", message: "Local-only research attachments cannot expose repository paths or Git blob IDs", path: ["availability"] });
+  }
+  if (attachment.availability === "localOnly" && attachment.publicUploadApproved) {
+    context.addIssue({ code: "custom", message: "Local-only research attachments do not need public-upload approval", path: ["publicUploadApproved"] });
+  }
+});
+
+export const researchTargetLinkSchema = z.object({
+  targetId: idSchema.nullable(),
+  role: z.enum(["primarySource", "reference", "translationSource", "data", "supplement"]),
+  preferredAttachmentId: idSchema.optional()
+}).strict();
+
+export const portableProjectResearchItemSchema = z.object({
+  id: idSchema,
+  title: z.string().trim().min(1).max(500).optional(),
+  authors: z.array(z.string().trim().min(1).max(200)).max(100),
+  year: z.number().int().min(1000).max(9999).optional(),
+  language: z.string().trim().min(1).max(80).optional(),
+  doi: z.string().trim().min(1).max(300).optional(),
+  arxivId: z.string().trim().min(1).max(100).optional(),
+  isbn: z.string().trim().min(1).max(40).optional(),
+  attachments: z.array(researchAttachmentSchema),
+  /** Empty means the material is in the independent pending-assignment inbox. */
+  links: z.array(researchTargetLinkSchema),
+  sortOrder: z.number().int().nonnegative().optional()
+}).strict().superRefine((item, context) => {
+  const attachmentIds = new Set<string>();
+  for (const [attachmentIndex, attachment] of item.attachments.entries()) {
+    if (attachmentIds.has(attachment.id)) {
+      context.addIssue({ code: "custom", message: `Research attachment ID is duplicated: ${attachment.id}`, path: ["attachments", attachmentIndex, "id"] });
+    }
+    attachmentIds.add(attachment.id);
+  }
+  for (const [linkIndex, link] of item.links.entries()) {
+    if (link.preferredAttachmentId && !attachmentIds.has(link.preferredAttachmentId)) {
+      context.addIssue({ code: "custom", message: "The preferred attachment does not belong to this research item", path: ["links", linkIndex, "preferredAttachmentId"] });
+    }
+  }
+});
+
 export const mobileProjectIndexSchema = z
   .object({
-    schemaVersion: z.union([z.literal(1), z.literal(2)]),
+    schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     projectId: idSchema,
     name: z.string().min(1).max(200),
     updatedAt: z.string().datetime({ offset: true }),
-    defaultOutputId: idSchema,
-    outputs: z.array(mobilePdfOutputSchema).min(1)
+    defaultOutputId: idSchema.optional(),
+    outputs: z.array(mobilePdfOutputSchema),
+    researchItems: z.array(portableProjectResearchItemSchema).optional()
   })
   .strict()
   .superRefine((index, context) => {
@@ -204,10 +262,10 @@ export const mobileProjectIndexSchema = z
       ids.add(output.id);
       targetIds.add(output.targetId);
     }
-    if (!ids.has(index.defaultOutputId)) {
+    if (index.defaultOutputId && !ids.has(index.defaultOutputId)) {
       context.addIssue({ code: "custom", message: "默认移动输出不存在", path: ["defaultOutputId"] });
     }
-    if (index.schemaVersion === 2) {
+    if (index.schemaVersion >= 2) {
       for (const [outputIndex, output] of index.outputs.entries()) {
         if (!output.blobSha || output.size === undefined || !output.generatedAt) {
           context.addIssue({
@@ -217,6 +275,25 @@ export const mobileProjectIndexSchema = z
           });
         }
       }
+    }
+    if (index.schemaVersion < 3 && (!index.defaultOutputId || index.outputs.length === 0)) {
+      context.addIssue({ code: "custom", message: "v1/v2 mobile indexes require a default output and at least one output", path: ["outputs"] });
+    }
+    if (index.schemaVersion === 3 && index.outputs.length > 0 && !index.defaultOutputId) {
+      context.addIssue({ code: "custom", message: "v3 mobile indexes with outputs require a defaultOutputId", path: ["defaultOutputId"] });
+    }
+    if (index.schemaVersion === 3 && !index.researchItems) {
+      context.addIssue({ code: "custom", message: "v3 mobile indexes must contain researchItems", path: ["researchItems"] });
+    }
+    if (index.schemaVersion < 3 && index.researchItems) {
+      context.addIssue({ code: "custom", message: "researchItems require mobile index schema v3", path: ["researchItems"] });
+    }
+    const researchIds = new Set<string>();
+    for (const [itemIndex, item] of (index.researchItems ?? []).entries()) {
+      if (researchIds.has(item.id)) {
+        context.addIssue({ code: "custom", message: `Research item ID is duplicated: ${item.id}`, path: ["researchItems", itemIndex, "id"] });
+      }
+      researchIds.add(item.id);
     }
   });
 
@@ -234,6 +311,10 @@ export function parseMobileProjectIndex(value: unknown): MobileProjectIndex {
 
 export function safeParseMobileProjectIndex(value: unknown) {
   return mobileProjectIndexSchema.safeParse(value);
+}
+
+export function parseProjectResearchItems(value: unknown): ProjectResearchItem[] {
+  return z.array(portableProjectResearchItemSchema).max(10_000).parse(value) as ProjectResearchItem[];
 }
 
 export { relativePathSchema };

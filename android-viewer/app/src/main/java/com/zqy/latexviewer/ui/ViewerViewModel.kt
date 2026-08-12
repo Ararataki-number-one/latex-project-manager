@@ -25,11 +25,13 @@ import com.zqy.latexviewer.model.GitHubRepository
 import com.zqy.latexviewer.model.GlassMode
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
+import com.zqy.latexviewer.model.OfflinePdfDocument
 import com.zqy.latexviewer.model.PdfDocument
 import com.zqy.latexviewer.model.PdfBookmark
 import com.zqy.latexviewer.model.PersistentDownloadTask
 import com.zqy.latexviewer.model.ReadingProgress
 import com.zqy.latexviewer.model.RepositoryRefreshFailure
+import com.zqy.latexviewer.model.ResearchAttachment
 import com.zqy.latexviewer.model.TextDocument
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -68,6 +70,7 @@ data class ViewerUiState(
     val tokenStored: Boolean = false,
     val repositories: List<GitHubRepository> = emptyList(),
     val mobileIndexes: Map<String, MobileProjectIndex> = emptyMap(),
+    val updatedPdfIds: Set<String> = emptySet(),
     val recentReading: ReadingProgress? = null,
     val recentReadings: List<ReadingProgress> = emptyList(),
     val repositoriesStale: Boolean = false,
@@ -79,7 +82,9 @@ data class ViewerUiState(
     val fileQuery: String = "",
     val document: TextDocument? = null,
     val pdfDocument: PdfDocument? = null,
+    val currentPdfSource: GitHubContent? = null,
     val pdfBookmarks: List<PdfBookmark> = emptyList(),
+    val currentPdfOffline: Boolean = false,
     val completedDownload: DownloadedFile? = null,
     val completedDownloadWorkId: String? = null,
     val downloadedFiles: List<DownloadedFile> = emptyList(),
@@ -102,6 +107,8 @@ data class ViewerUiState(
     val updateMessage: String = "尚未检查更新",
     val downloadedApkPath: String? = null,
     val pdfCacheBytes: Long = 0,
+    val offlinePdfBytes: Long = 0,
+    val offlineDocuments: List<OfflinePdfDocument> = emptyList(),
     val pdfCacheLimitBytes: Long = 512L * 1024 * 1024,
     val glassMode: GlassMode = GlassMode.AUTO,
     val githubLoginSupported: Boolean = false,
@@ -366,13 +373,16 @@ class ViewerViewModel(
     }
 
     fun openMobilePdf(repository: GitHubRepository, output: MobilePdfOutput) {
+        _state.update {
+            it.copy(updatedPdfIds = it.updatedPdfIds - mobilePdfId(repository.fullName, output.id))
+        }
         pendingPdfOpenKey = pdfOpenKey(repository.fullName, output.pdfPath)
         if (_state.value.screen != ViewerScreen.PDF) viewerReturnScreen = _state.value.screen
         val previous = preferences.readingProgress(repository.fullName, output.pdfPath)
         viewModelScope.launch {
-            val cached = previous?.let {
-                downloadStore.findPdfPreview("${repository.owner}-${repository.name}-${it.sha}.pdf")
-            }
+            val cacheKey = previous?.let { pdfCacheKey(repository, it.sha) }
+            val offline = cacheKey?.let { downloadStore.findOfflinePdf(it) }
+            val cached = offline ?: cacheKey?.let { downloadStore.findPdfPreview(it) }
             if (cached != null && previous != null) {
                 _state.update {
                     it.copy(
@@ -389,7 +399,9 @@ class ViewerViewModel(
                             blobSha = previous.sha,
                             initialPage = previous.pageIndex.coerceAtLeast(0)
                         ),
-                        pdfBookmarks = preferences.bookmarks(repository.fullName, output.pdfPath)
+                        currentPdfSource = null,
+                        pdfBookmarks = preferences.bookmarks(repository.fullName, output.pdfPath),
+                        currentPdfOffline = offline != null
                     )
                 }
                 showNotice("已打开离线缓存，正在后台检查最新版")
@@ -399,6 +411,7 @@ class ViewerViewModel(
                         openOrQueuePdfLatest(pinned, latest, output.name)
                         showNotice("发现新版本，正在后台更新 ${output.name}")
                     } else {
+                        _state.update { it.copy(currentPdfSource = latest) }
                         pendingPdfOpenKey = null
                     }
                 }.onFailure {
@@ -411,6 +424,78 @@ class ViewerViewModel(
                     openOrQueuePdfLatest(pinned, latest, output.name)
                 }
             }
+        }
+    }
+
+    fun openResearchAttachment(repository: GitHubRepository, attachment: ResearchAttachment) {
+        val path = attachment.relativePath
+        if (!attachment.canDownload || path.isNullOrBlank()) {
+            showNotice("这份资料仅保存在电脑上，未上传到 GitHub。")
+            return
+        }
+        viewerReturnScreen = ViewerScreen.REPOSITORIES
+        launchRequest {
+            val index = _state.value.mobileIndexes[repository.fullName.lowercase()]
+                ?: error("研究资料索引尚未缓存，请刷新项目后重试")
+            val commitSha = index.commitSha?.takeIf(String::isNotBlank)
+                ?: error("研究资料缺少固定提交信息，请在桌面端重新同步项目索引")
+            val resolved = api.getContentAtCommit(repository, path, commitSha, tokenStore.read())
+            if (resolved.lfsOidSha256 != null) {
+                attachment.sha256?.takeIf(String::isNotBlank)?.let { expected ->
+                    require(resolved.lfsOidSha256.equals(expected, ignoreCase = true)) {
+                        "Git LFS 资料与索引不一致，请在桌面端重新同步后再试"
+                    }
+                }
+            } else {
+                attachment.gitBlobSha?.takeIf(String::isNotBlank)?.let { expected ->
+                    require(resolved.gitObjectSha.equals(expected, ignoreCase = true)) {
+                        "资料索引与仓库文件不一致，请在桌面端重新同步后再试"
+                    }
+                }
+            }
+            attachment.size?.takeIf { it >= 0 }?.let { expected ->
+                require(resolved.size == expected) {
+                    "资料大小与索引不一致，请在桌面端重新同步后再试"
+                }
+            }
+            val latest = resolved.copy(contentSha256 = attachment.sha256)
+            if (latest.name.endsWith(".pdf", ignoreCase = true) || attachment.mediaType == "application/pdf") {
+                openOrQueuePdfLatest(repository, latest, attachment.name)
+            } else {
+                backgroundDownloads.enqueueFile(repository, latest, attachment.mediaType.ifBlank { mimeTypeFor(latest.name) })
+                showNotice("${attachment.name} 已加入后台下载，可在下载页打开或分享。")
+            }
+        }
+    }
+
+    fun openOfflineDocument(document: OfflinePdfDocument) {
+        viewerReturnScreen = ViewerScreen.HOME
+        viewModelScope.launch {
+            runCatching {
+                val file = downloadStore.findOfflinePdf(document.cacheKey)
+                    ?: error("离线副本已经丢失或损坏，可以从项目中重新下载")
+                val progress = preferences.readingProgress(document.repositoryFullName, document.pdfPath)
+                _state.update {
+                    it.copy(
+                        screen = ViewerScreen.PDF,
+                        document = null,
+                        pdfDocument = PdfDocument(
+                            name = document.name,
+                            path = document.pdfPath,
+                            htmlUrl = null,
+                            localPath = file.absolutePath,
+                            repositoryFullName = document.repositoryFullName,
+                            sha = document.sha,
+                            blobSha = document.sha,
+                            initialPage = progress?.pageIndex?.coerceAtLeast(0) ?: 0
+                        ),
+                        currentPdfSource = null,
+                        pdfBookmarks = preferences.bookmarks(document.repositoryFullName, document.pdfPath),
+                        currentPdfOffline = true
+                    )
+                }
+                refreshCacheUsage()
+            }.onFailure { showError(it.message ?: "无法打开离线资料") }
         }
     }
 
@@ -457,15 +542,36 @@ class ViewerViewModel(
         val repository = _state.value.currentRepository ?: return
         if (item.kind != GitHubContentKind.FILE) return
         launchRequest {
-            val latest = api.getContent(repository, item.path, tokenStore.read())
-            backgroundDownloads.enqueueFile(repository, latest, mimeTypeFor(latest.name))
-            showNotice("${latest.name} 已加入后台下载，息屏后仍会继续")
+            val resolved = item.commitSha?.takeIf(String::isNotBlank)?.let { commit ->
+                api.getContentAtCommit(repository, item.path, commit, tokenStore.read())
+                    .copy(contentSha256 = item.contentSha256)
+            } ?: api.getContent(repository, item.path, tokenStore.read())
+            backgroundDownloads.enqueueFile(repository, resolved, mimeTypeFor(resolved.name))
+            showNotice("${resolved.name} 已加入后台下载，息屏后仍会继续")
         }
     }
 
     fun downloadRepository(repository: GitHubRepository) {
         backgroundDownloads.enqueueRepository(repository)
         showNotice("${repository.name} 已加入后台下载，息屏后仍会继续")
+    }
+
+    fun downloadCurrentPdf() {
+        val source = _state.value.currentPdfSource ?: run {
+            showError("当前离线文档缺少可导出的远端版本")
+            return
+        }
+        val repositoryName = _state.value.pdfDocument?.repositoryFullName
+        val repository = _state.value.repositories.firstOrNull {
+            it.fullName.equals(repositoryName, ignoreCase = true)
+        } ?: _state.value.currentRepository?.takeIf {
+            it.fullName.equals(repositoryName, ignoreCase = true)
+        } ?: run {
+            showError("找不到这个 PDF 对应的项目")
+            return
+        }
+        backgroundDownloads.enqueueFile(repository, source, "application/pdf")
+        showNotice("${source.name} 已加入导出下载，完成后可分享和定位")
     }
 
     fun dismissCompletedDownload() {
@@ -499,7 +605,8 @@ class ViewerViewModel(
                             htmlUrl = null,
                             localPath = local.absolutePath,
                             contentUri = downloaded.contentUri
-                        )
+                        ),
+                        currentPdfSource = null
                     )
                 }
                 refreshCacheUsage()
@@ -600,10 +707,9 @@ class ViewerViewModel(
             pendingPdfOpenKey = pdfOpenKey(repository.fullName, document.path)
             viewModelScope.launch {
                 runCatching {
-                    downloadStore.deleteCachedPdf(document.localPath)
                     val latest = api.getContent(repository, document.path, tokenStore.read())
                     backgroundDownloads.enqueuePdf(repository, latest, document.name, preferences.pdfCacheLimitBytes)
-                    showNotice("正在重新下载 ${document.name}，可以隐藏进度并继续使用应用")
+                    showNotice("正在重新下载 ${document.name}；成功校验前会保留当前版本")
                 }.onFailure { showError(it.message ?: "无法重新下载 PDF") }
             }
             return
@@ -617,10 +723,10 @@ class ViewerViewModel(
         viewModelScope.launch {
             val previousSize = document.localPath?.let { File(it).takeIf(File::isFile)?.length() } ?: 0L
             runCatching {
-                downloadStore.deleteCachedPdf(document.localPath)
                 val local = downloadStore.materializePdfForViewer(
                     DownloadedFile(document.name, sourceUri, document.path, "application/pdf", previousSize),
-                    preferences.pdfCacheLimitBytes
+                    preferences.pdfCacheLimitBytes,
+                    replaceExisting = true
                 )
                 _state.update {
                     it.copy(pdfDocument = document.copy(localPath = local.absolutePath, openedAt = System.nanoTime()))
@@ -660,6 +766,72 @@ class ViewerViewModel(
                     showNotice("已清理 ${formatByteCount(removed)} PDF 缓存")
                 }
                 .onFailure { showError(it.message ?: "无法清理 PDF 缓存") }
+        }
+    }
+
+    fun keepCurrentPdfOffline() {
+        val document = _state.value.pdfDocument ?: return
+        val repository = document.repositoryFullName?.let { fullName ->
+            _state.value.repositories.firstOrNull { it.fullName.equals(fullName, ignoreCase = true) }
+                ?: _state.value.currentRepository?.takeIf { it.fullName.equals(fullName, ignoreCase = true) }
+        } ?: run {
+            showError("只有 GitHub 项目中的 PDF 可以加入离线资料")
+            return
+        }
+        val sha = document.sha ?: run {
+            showError("当前 PDF 缺少版本信息，无法安全离线保留")
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                val cacheKey = pdfCacheKey(repository, sha)
+                val offline = downloadStore.findOfflinePdf(cacheKey)
+                    ?: downloadStore.promotePdfPreviewToOffline(
+                        cacheKey = cacheKey,
+                        repositoryFullName = repository.fullName,
+                        pdfPath = document.path,
+                        sha = sha
+                    )
+                _state.update {
+                    it.copy(
+                        pdfDocument = document.copy(localPath = offline.absolutePath, openedAt = System.nanoTime()),
+                        currentPdfOffline = true
+                    )
+                }
+                refreshCacheUsage()
+                showNotice("已离线保留 ${document.name}，清理临时缓存不会删除它")
+            }.onFailure { showError(it.message ?: "无法离线保留 PDF") }
+        }
+    }
+
+    fun removeCurrentPdfOffline() {
+        val document = _state.value.pdfDocument ?: return
+        val repository = document.repositoryFullName?.let { fullName ->
+            _state.value.repositories.firstOrNull { it.fullName.equals(fullName, ignoreCase = true) }
+                ?: _state.value.currentRepository?.takeIf { it.fullName.equals(fullName, ignoreCase = true) }
+        } ?: return
+        val sha = document.sha ?: return
+        viewModelScope.launch {
+            runCatching {
+                val cacheKey = pdfCacheKey(repository, sha)
+                downloadStore.removeOfflinePdf(cacheKey)
+                val preview = downloadStore.findPdfPreview(cacheKey)
+                _state.update {
+                    it.copy(
+                        pdfDocument = if (preview == null) null else document.copy(
+                            localPath = preview.absolutePath,
+                            openedAt = System.nanoTime()
+                        ),
+                        currentPdfOffline = false,
+                        screen = if (preview == null) viewerReturnScreen else it.screen
+                    )
+                }
+                refreshCacheUsage()
+                showNotice(
+                    if (preview == null) "已移除离线副本，需要时可重新下载"
+                    else "已取消离线保留，临时阅读缓存仍可使用"
+                )
+            }.onFailure { showError(it.message ?: "无法移除离线副本") }
         }
     }
 
@@ -944,14 +1116,15 @@ class ViewerViewModel(
     private suspend fun openOrQueuePdfLatest(repository: GitHubRepository, latest: GitHubContent, displayName: String) {
         pendingPdfOpenKey = pdfOpenKey(repository.fullName, latest.path)
         val previous = preferences.readingProgress(repository.fullName, latest.path)
-        val cacheKey = "${repository.owner}-${repository.name}-${latest.sha}.pdf"
-        val file = downloadStore.findPdfPreview(cacheKey)
+        val cacheKey = pdfCacheKey(repository, latest.sha)
+        val offline = downloadStore.findOfflinePdf(cacheKey)
+        val file = offline ?: downloadStore.findPdfPreview(cacheKey)
         if (file == null) {
             backgroundDownloads.enqueuePdf(repository, latest, displayName, preferences.pdfCacheLimitBytes)
             showNotice("${displayName.ifBlank { latest.name }} 已加入后台下载，息屏后仍会继续")
             return
         }
-        openPdfDocument(repository, latest, displayName, file.absolutePath, previous)
+        openPdfDocument(repository, latest, displayName, file.absolutePath, previous, offline != null)
         pendingPdfOpenKey = null
     }
 
@@ -960,7 +1133,8 @@ class ViewerViewModel(
         latest: GitHubContent,
         displayName: String,
         localPath: String,
-        previous: ReadingProgress? = preferences.readingProgress(repository.fullName, latest.path)
+        previous: ReadingProgress? = preferences.readingProgress(repository.fullName, latest.path),
+        isOffline: Boolean = false
     ) {
         val initialPage = previous?.pageIndex?.coerceAtLeast(0) ?: 0
         _state.update {
@@ -979,7 +1153,9 @@ class ViewerViewModel(
                     expectedSize = latest.size.takeIf { size -> size > 0 },
                     initialPage = initialPage
                 ),
-                pdfBookmarks = preferences.bookmarks(repository.fullName, latest.path)
+                currentPdfSource = latest,
+                pdfBookmarks = preferences.bookmarks(repository.fullName, latest.path),
+                currentPdfOffline = isOffline
             )
         }
         refreshCacheUsage()
@@ -988,6 +1164,7 @@ class ViewerViewModel(
     private suspend fun refreshMobileIndexes(repositories: List<GitHubRepository>) {
         val token = tokenStore.read()
         val discovered = preferences.cachedMobileIndexes().toMutableMap()
+        val changed = _state.value.updatedPdfIds.toMutableSet()
         repositories.chunked(4).forEach { batch ->
             coroutineScope {
                 batch.map { repository ->
@@ -1001,6 +1178,15 @@ class ViewerViewModel(
                 result.onSuccess { fetch ->
                     when (fetch) {
                         is MobileIndexFetchResult.Found -> {
+                            val previous = discovered[repository]
+                            fetch.index.outputs.forEach { output ->
+                                val previousOutput = previous?.outputs?.firstOrNull { it.id == output.id }
+                                if (previousOutput?.blobSha != null && output.blobSha != null &&
+                                    !previousOutput.blobSha.equals(output.blobSha, ignoreCase = true)
+                                ) {
+                                    changed += mobilePdfId(repository, output.id)
+                                }
+                            }
                             preferences.saveMobileIndex(repository, fetch.index)
                             discovered[repository] = fetch.index
                         }
@@ -1013,15 +1199,30 @@ class ViewerViewModel(
                 }
             }
         }
-        _state.update { it.copy(mobileIndexes = discovered) }
+        _state.update { it.copy(mobileIndexes = discovered, updatedPdfIds = changed) }
     }
 
     private fun refreshCacheUsage() {
         viewModelScope.launch {
             runCatching { downloadStore.pdfCacheBytes() }
                 .onSuccess { bytes -> _state.update { it.copy(pdfCacheBytes = bytes) } }
+            runCatching { downloadStore.offlinePdfDocuments() }
+                .onSuccess { documents ->
+                    _state.update {
+                        it.copy(
+                            offlinePdfBytes = documents.sumOf(OfflinePdfDocument::size),
+                            offlineDocuments = documents
+                        )
+                    }
+                }
         }
     }
+
+    private fun pdfCacheKey(repository: GitHubRepository, sha: String): String =
+        "${repository.owner}-${repository.name}-${sha}.pdf"
+
+    private fun mobilePdfId(repositoryFullName: String, outputId: String): String =
+        "${repositoryFullName.lowercase()}:$outputId"
 
     private fun refreshDownloadHistoryAvailability() {
         val history = _state.value.downloadedFiles
@@ -1235,17 +1436,12 @@ class ViewerViewModel(
                         size = snapshot.output.getLong(BackgroundDownloadManager.KEY_OUTPUT_SIZE, snapshot.task.size),
                         sha = sha,
                         htmlUrl = "${repository.htmlUrl}/blob/${repository.defaultBranch}/$path",
-                        downloadUrl = snapshot.task.downloadUrl
+                        downloadUrl = snapshot.task.downloadUrl,
+                        commitSha = snapshot.task.commitSha,
+                        gitObjectSha = sha,
+                        lfsOidSha256 = snapshot.task.lfsOidSha256,
+                        contentSha256 = snapshot.task.contentSha256
                     )
-                    runCatching {
-                        downloadStore.cachedPdfAsDownloadedFile(localPath, snapshot.task.name).copy(
-                            kind = DownloadHistoryKind.PDF,
-                            sourceRepository = repository.fullName,
-                            sourcePath = path
-                        )
-                    }.onSuccess { historyItem ->
-                        recordDownload(historyItem, workId, announce = false)
-                    }
                     val key = pdfOpenKey(repository.fullName, path)
                     if (pendingPdfOpenKey == key) {
                         openPdfDocument(repository, item, snapshot.task.name, localPath)
@@ -1358,19 +1554,23 @@ class ViewerViewModel(
         }
 
         fun isNewerVersion(candidate: String, current: String): Boolean {
-            fun parts(value: String): List<Int> = value
-                .trim()
-                .removePrefix("v")
-                .substringBefore('-')
-                .split('.')
-                .map { it.toIntOrNull() ?: 0 }
-            val left = parts(candidate)
-            val right = parts(current)
-            for (index in 0 until maxOf(left.size, right.size)) {
-                val comparison = (left.getOrElse(index) { 0 }).compareTo(right.getOrElse(index) { 0 })
+            fun parse(value: String): Pair<List<Int>, Int?>? {
+                val match = Regex("v?([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-beta\\.([0-9]+))?")
+                    .matchEntire(value.trim()) ?: return null
+                return Pair(
+                    match.groupValues.slice(1..3).map(String::toInt),
+                    match.groupValues[4].takeIf(String::isNotEmpty)?.toInt()
+                )
+            }
+            val left = parse(candidate) ?: return false
+            val right = parse(current) ?: return false
+            for (index in left.first.indices) {
+                val comparison = left.first[index].compareTo(right.first[index])
                 if (comparison != 0) return comparison > 0
             }
-            return false
+            if (left.second == null && right.second != null) return true
+            if (left.second != null && right.second == null) return false
+            return (left.second ?: 0) > (right.second ?: 0)
         }
 
         fun isPdfFile(name: String): Boolean = name.endsWith(".pdf", ignoreCase = true)

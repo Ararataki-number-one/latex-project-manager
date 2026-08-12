@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit",
     "package:portable": "pnpm build && electron-builder --win portable --publish never",
     "package:windows": "pnpm build && electron-builder --win nsis portable --publish never",
+    "package:windows:beta": "pnpm build && electron-builder --config electron-builder.beta.cjs --win nsis portable --publish never",
     "release:keygen": "node scripts/generate-release-signing-key.mjs",
     "release:manifest": "node scripts/sign-release-manifest.mjs"
   },
@@ -49,6 +50,9 @@
     "vite": "8.1.5",
     "vitest": "4.1.10"
   },
+  "config": {
+    "betaVersion": "1.0.0-beta.1"
+  },
   "build": {
     "appId": "local.latex.workbench",
     "productName": "LaTeX 项目管理器",
@@ -60,6 +64,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "assets/app-icon.png",
       "target": [
         "nsis",
         "portable"

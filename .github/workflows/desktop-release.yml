@@ -2,6 +2,15 @@ name: Build Windows client
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Build the installed stable app or the parallel-install Beta app
+        required: true
+        default: beta
+        type: choice
+        options:
+          - beta
+          - stable
 
 permissions:
   contents: write
@@ -13,6 +22,15 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - id: release_channel
+        name: Select release channel
+        shell: pwsh
+        run: |
+          $channel = '${{ inputs.channel }}'
+          if ($channel -notin @('stable', 'beta')) { throw 'Unknown release channel.' }
+          "BUILD_CHANNEL=$channel" >> $env:GITHUB_ENV
+          "channel=$channel" >> $env:GITHUB_OUTPUT
 
       - name: Use canonical runner temp directory
         shell: pwsh
@@ -40,13 +58,35 @@ jobs:
           pnpm test
 
       - name: Build Windows installer and portable client
+        shell: pwsh
         run: |
           pnpm build
-          pnpm exec electron-builder --win nsis portable --publish never
+          if ($env:BUILD_CHANNEL -eq 'beta') {
+            pnpm exec electron-builder --config electron-builder.beta.cjs --win nsis portable --publish never
+          } else {
+            pnpm exec electron-builder --win nsis portable --publish never
+          }
+
+      - name: Stage channel-specific assets
+        shell: pwsh
+        run: |
+          $source = if ($env:BUILD_CHANNEL -eq 'beta') { 'dist-beta' } else { 'dist' }
+          $version = if ($env:BUILD_CHANNEL -eq 'beta') {
+            (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).config.betaVersion
+          } else {
+            (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          }
+          $destination = "dist-channel/$env:BUILD_CHANNEL"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Get-ChildItem -LiteralPath $source -Filter '*.exe' | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $destination
+          }
+          if (-not (Get-ChildItem -LiteralPath $destination -Filter '*.exe')) { throw 'Windows assets were not produced.' }
+          Set-Content -LiteralPath "$destination/version.txt" -Value $version -NoNewline -Encoding ascii
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LaTeX-Project-Manager-Windows
-          path: dist/*.exe
+          name: LaTeX-Project-Manager-Windows-${{ steps.release_channel.outputs.channel }}
+          path: dist-channel/${{ steps.release_channel.outputs.channel }}/*
           if-no-files-found: error

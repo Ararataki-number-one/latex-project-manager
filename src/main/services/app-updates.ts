@@ -77,6 +77,7 @@ interface StoredUpdateSettings extends AppUpdateSettings {
 
 export interface AppUpdateServiceOptions {
   currentVersion: string;
+  releaseChannel?: "stable" | "beta";
   env?: NodeJS.ProcessEnv;
   ghExecutable?: string;
   runner?: UpdateCommandRunner;
@@ -141,9 +142,17 @@ function defaultRunner(executable: string, cwd: string, args: string[], timeoutM
   });
 }
 
-function parseVersion(value: string): number[] | null {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
-  return match ? match.slice(1).map((part) => Number.parseInt(part, 10)) : null;
+interface ParsedVersion {
+  core: number[];
+  beta: number | null;
+}
+
+function parseVersion(value: string): ParsedVersion | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(value.trim());
+  return match ? {
+    core: match.slice(1, 4).map((part) => Number.parseInt(part, 10)),
+    beta: match[4] === undefined ? null : Number.parseInt(match[4], 10)
+  } : null;
 }
 
 export function compareVersions(left: string, right: string): number {
@@ -151,9 +160,22 @@ export function compareVersions(left: string, right: string): number {
   const b = parseVersion(right);
   if (!a || !b) throw new Error("Release 版本号格式无效。");
   for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+    if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
   }
+  if (a.beta === null && b.beta !== null) return 1;
+  if (a.beta !== null && b.beta === null) return -1;
+  if (a.beta !== b.beta) return (a.beta ?? 0) > (b.beta ?? 0) ? 1 : -1;
   return 0;
+}
+
+function betaReleaseTag(output: string): string {
+  const releases = JSON.parse(output) as Array<Pick<GitHubRelease, "tagName" | "isDraft" | "isPrerelease">>;
+  if (!Array.isArray(releases)) throw new Error("GitHub 返回的 Beta Release 列表无效。");
+  const candidates = releases.filter((release) => release && !release.isDraft && release.isPrerelease
+    && /^v?\d+\.\d+\.\d+-beta\.\d+$/.test(release.tagName));
+  candidates.sort((left, right) => compareVersions(right.tagName, left.tagName));
+  if (!candidates[0]) throw new Error("尚未找到可用的 Beta Release。");
+  return candidates[0].tagName;
 }
 
 function isInside(root: string, candidate: string): boolean {
@@ -348,14 +370,24 @@ export class AppUpdateService {
     const executable = await this.resolveGh();
     if (!executable) return this.status();
     try {
+      const releaseChannel = this.options.releaseChannel ?? "stable";
+      let requestedTag: string | null = null;
+      if (releaseChannel === "beta") {
+        const list = await this.runner(executable, this.directory, [
+          "release", "list", "--repo", UPDATE_REPOSITORY, "--limit", "100",
+          "--json", "tagName,isDraft,isPrerelease,publishedAt"
+        ], 120_000);
+        if (list.code !== 0) throw new Error(conciseError(list));
+        requestedTag = betaReleaseTag(list.stdout);
+      }
       const result = await this.runner(executable, this.directory, [
-        "release", "view", "--repo", UPDATE_REPOSITORY,
+        "release", "view", ...(requestedTag ? [requestedTag] : []), "--repo", UPDATE_REPOSITORY,
         "--json", "tagName,name,url,publishedAt,isDraft,isPrerelease,assets"
       ], 120_000);
       if (result.code !== 0) throw new Error(conciseError(result));
       const release = JSON.parse(result.stdout) as GitHubRelease;
       if (!release || typeof release.tagName !== "string" || typeof release.url !== "string" || !Array.isArray(release.assets)
-        || release.isDraft || release.isPrerelease) {
+        || release.isDraft || Boolean(release.isPrerelease) !== (releaseChannel === "beta")) {
         throw new Error("GitHub 返回的 Release 信息无效。");
       }
       const manifestAsset = release.assets.find((asset) => asset.name === RELEASE_MANIFEST_NAME);

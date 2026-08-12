@@ -28,6 +28,20 @@ const api: WorkbenchApi = {
     update: (id, patch) => ipcRenderer.invoke(IPC.collectionsUpdate, id, patch),
     delete: (id) => ipcRenderer.invoke(IPC.collectionsDelete, id)
   },
+  catalogBackups: {
+    list: () => ipcRenderer.invoke(IPC.catalogBackupsList),
+    create: () => ipcRenderer.invoke(IPC.catalogBackupsCreate),
+    stageRestore: () => ipcRenderer.invoke(IPC.catalogBackupsStageRestore)
+  },
+  projectBackups: {
+    preview: (projectId) => ipcRenderer.invoke(IPC.projectBackupsPreview, projectId),
+    create: (projectId) => ipcRenderer.invoke(IPC.projectBackupsCreate, projectId),
+    list: (projectId) => ipcRenderer.invoke(IPC.projectBackupsList, projectId),
+    verify: (projectId, snapshotId) => ipcRenderer.invoke(IPC.projectBackupsVerify, projectId, snapshotId),
+    restore: (projectId, snapshotId) => ipcRenderer.invoke(IPC.projectBackupsRestore, projectId, snapshotId),
+    settings: (projectId) => ipcRenderer.invoke(IPC.projectBackupsSettings, projectId),
+    setSettings: (projectId, settings) => ipcRenderer.invoke(IPC.projectBackupsSetSettings, projectId, settings)
+  },
   smartViews: {
     list: () => ipcRenderer.invoke(IPC.smartViewsList),
     create: (input) => ipcRenderer.invoke(IPC.smartViewsCreate, input),
@@ -84,6 +98,18 @@ const api: WorkbenchApi = {
     openFolder: (projectId) => ipcRenderer.invoke(IPC.referencesOpenFolder, projectId),
     remove: (projectId, relativePath) => ipcRenderer.invoke(IPC.referencesRemove, projectId, relativePath)
   },
+    research: {
+      list: (projectId) => ipcRenderer.invoke(IPC.researchList, projectId),
+      listGlobal: () => ipcRenderer.invoke(IPC.researchListGlobal),
+      discoverLegacy: (projectId) => ipcRenderer.invoke(IPC.researchDiscoverLegacy, projectId),
+      save: (projectId, request) => ipcRenderer.invoke(IPC.researchSave, projectId, request),
+      openAttachment: (projectId, itemId, attachmentId) => ipcRenderer.invoke(IPC.researchOpenAttachment, projectId, itemId, attachmentId)
+  },
+  researchSearch: {
+    index: (projectId) => ipcRenderer.invoke(IPC.researchSearchIndex, projectId),
+    indexAll: () => ipcRenderer.invoke(IPC.researchSearchIndexAll),
+    query: (query, projectIds, limit) => ipcRenderer.invoke(IPC.researchSearchQuery, query, projectIds, limit)
+  },
   manifest: {
     read: (projectRoot) => ipcRenderer.invoke(IPC.manifestRead, projectRoot),
     write: (projectRoot, manifest) => ipcRenderer.invoke(IPC.manifestWrite, projectRoot, manifest)
@@ -99,6 +125,7 @@ const api: WorkbenchApi = {
     plan: (projectId, request) => ipcRenderer.invoke(IPC.filePlan, projectId, request),
     apply: (projectId, planId) => ipcRenderer.invoke(IPC.fileApply, projectId, planId),
     undo: (projectId, undoId) => ipcRenderer.invoke(IPC.fileUndo, projectId, undoId),
+    history: (projectId, limit) => ipcRenderer.invoke(IPC.fileHistory, projectId, limit),
     open: (projectId, path) => ipcRenderer.invoke(IPC.fileOpen, projectId, path),
     reveal: (projectId, path) => ipcRenderer.invoke(IPC.fileReveal, projectId, path),
     rename: (projectRoot, fromPath, toPath, expectedHash) => ipcRenderer.invoke(IPC.fileRename, projectRoot, fromPath, toPath, expectedHash),

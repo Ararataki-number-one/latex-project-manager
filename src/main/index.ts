@@ -11,6 +11,16 @@ let tray: Tray | null = null;
 let runtime: IpcRuntimeController | null = null;
 let quitting = false;
 const isDevelopment = !app.isPackaged;
+const releaseChannel = process.env.LATEX_WORKBENCH_RELEASE_CHANNEL === "beta" || app.getVersion().includes("-beta.")
+  ? "beta"
+  : "stable";
+const productName = releaseChannel === "beta" ? "LaTeX 项目管理器 Beta" : "LaTeX 项目管理器";
+const appUserModelId = releaseChannel === "beta" ? "local.latex.workbench.beta" : "local.latex.workbench";
+
+if (releaseChannel === "beta") {
+  app.setName(productName);
+  app.setPath("userData", join(app.getPath("appData"), "latex-workbench-beta"));
+}
 
 function rendererDocumentUrl(): string {
   if (isDevelopment && process.env.ELECTRON_RENDERER_URL) {
@@ -31,7 +41,7 @@ function createWindow(allowedUrl: string): BrowserWindow {
     minHeight: Math.min(680, initialHeight),
     show: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#17191c" : "#f5f6f7",
-    title: "LaTeX 项目管理器",
+    title: productName,
     autoHideMenuBar: true,
     ...(supportsSystemGlass ? { backgroundMaterial: "mica" as const } : {}),
     webPreferences: {
@@ -105,9 +115,9 @@ function trayImage() {
 
 function rebuildTrayMenu(settings: AppRuntimeSettings): void {
   if (!tray || !runtime) return;
-  tray.setToolTip(settings.syncPaused ? "LaTeX 项目管理器 · 同步已暂停" : "LaTeX 项目管理器 · 后台同步中");
+  tray.setToolTip(settings.syncPaused ? `${productName} · 同步已暂停` : `${productName} · 后台同步中`);
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: "打开 LaTeX 项目管理器", click: showMainWindow },
+    { label: `打开 ${productName}`, click: showMainWindow },
     { type: "separator" },
     { label: "立即同步全部项目", enabled: !settings.syncPaused, click: () => void runtime?.syncAll() },
     settings.syncPaused
@@ -120,7 +130,7 @@ function rebuildTrayMenu(settings: AppRuntimeSettings): void {
 
 function notifySyncProblem(event: GitHubSyncEvent): void {
   if (!new Set(["blocked", "needsPull", "error"]).has(event.state) || !Notification.isSupported()) return;
-  new Notification({ title: "LaTeX 项目同步需要处理", body: event.message, silent: false }).show();
+  new Notification({ title: `${productName} · 同步需要处理`, body: event.message, silent: false }).show();
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -131,7 +141,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
-    app.setAppUserModelId("local.latex.workbench");
+    app.setAppUserModelId(appUserModelId);
     const allowedUrl = rendererDocumentUrl();
     const rendererSession = session.defaultSession;
     rendererSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));

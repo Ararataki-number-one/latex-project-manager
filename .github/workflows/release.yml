@@ -2,6 +2,15 @@ name: Release desktop and Android
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Build stable assets or the parallel-install Beta assets
+        required: true
+        default: beta
+        type: choice
+        options:
+          - beta
+          - stable
   push:
     tags:
       - "v*"
@@ -12,21 +21,30 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-      - name: Verify release versions agree
+      - id: release
+        name: Resolve and verify release channel
         shell: bash
         run: |
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          ANDROID_VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android-viewer/app/build.gradle.kts | head -n 1)"
+          BETA_VERSION="$(node -p "require('./package.json').config.betaVersion")"
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "$TAG_VERSION" == *-beta.* ]]; then CHANNEL=beta; else CHANNEL=stable; fi
           else
-            TAG_VERSION="$PACKAGE_VERSION"
+            CHANNEL="${{ inputs.channel }}"
+            TAG_VERSION=""
           fi
-          test -n "$PACKAGE_VERSION"
-          test "$PACKAGE_VERSION" = "$ANDROID_VERSION"
-          test "$PACKAGE_VERSION" = "$TAG_VERSION"
+          if [[ "$CHANNEL" == "beta" ]]; then EXPECTED_VERSION="$BETA_VERSION"; else EXPECTED_VERSION="$PACKAGE_VERSION"; fi
+          test -n "$EXPECTED_VERSION"
+          grep -F "versionName = \"$EXPECTED_VERSION\"" android-viewer/app/build.gradle.kts
+          if [[ -n "$TAG_VERSION" ]]; then test "$TAG_VERSION" = "$EXPECTED_VERSION"; fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "version=$EXPECTED_VERSION" >> "$GITHUB_OUTPUT"
 
   windows:
     needs: validate
@@ -45,11 +63,23 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm test
       - run: pnpm build
-      - run: pnpm exec electron-builder --win nsis portable --publish never
+      - name: Build channel-specific Windows clients
+        shell: pwsh
+        env:
+          BUILD_CHANNEL: ${{ needs.validate.outputs.channel }}
+        run: |
+          if ($env:BUILD_CHANNEL -eq 'beta') {
+            pnpm exec electron-builder --config electron-builder.beta.cjs --win nsis portable --publish never
+          } else {
+            pnpm exec electron-builder --win nsis portable --publish never
+          }
       - name: Record Windows publisher certificate when present
         shell: pwsh
+        env:
+          BUILD_CHANNEL: ${{ needs.validate.outputs.channel }}
         run: |
-          $setup = Get-ChildItem -LiteralPath dist -Filter '*.exe' | Where-Object { $_.Name -match 'setup' } | Select-Object -First 1
+          $source = if ($env:BUILD_CHANNEL -eq 'beta') { 'dist-beta' } else { 'dist' }
+          $setup = Get-ChildItem -LiteralPath $source -Filter '*.exe' | Where-Object { $_.Name -match 'setup' } | Select-Object -First 1
           if (-not $setup) { throw 'Windows setup asset was not produced.' }
           $signature = Get-AuthenticodeSignature -LiteralPath $setup.FullName
           $digest = ''
@@ -58,21 +88,25 @@ jobs:
             try { $digest = ([BitConverter]::ToString($hasher.ComputeHash($signature.SignerCertificate.RawData))).Replace('-', '').ToLowerInvariant() }
             finally { $hasher.Dispose() }
           }
-          Set-Content -LiteralPath dist/windows-certificate-sha256.txt -Value $digest -NoNewline -Encoding ascii
-      - name: Prepare stable Windows attachment names
+          Set-Content -LiteralPath windows-certificate-sha256.txt -Value $digest -NoNewline -Encoding ascii
+      - name: Prepare immutable Windows attachment names
         shell: pwsh
+        env:
+          BUILD_CHANNEL: ${{ needs.validate.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
-          $setup = Get-ChildItem -LiteralPath dist -Filter '*.exe' | Where-Object { $_.Name -match 'setup' } | Select-Object -First 1
-          $portable = Get-ChildItem -LiteralPath dist -Filter '*.exe' | Where-Object { $_.Name -notmatch 'setup' } | Select-Object -First 1
+          $source = if ($env:BUILD_CHANNEL -eq 'beta') { 'dist-beta' } else { 'dist' }
+          $setup = Get-ChildItem -LiteralPath $source -Filter '*.exe' | Where-Object { $_.Name -match 'setup' } | Select-Object -First 1
+          $portable = Get-ChildItem -LiteralPath $source -Filter '*.exe' | Where-Object { $_.Name -notmatch 'setup' } | Select-Object -First 1
           if (-not $setup -or -not $portable) { throw 'Windows release assets were not produced.' }
           New-Item -ItemType Directory -Force -Path dist/release-windows | Out-Null
-          Copy-Item -LiteralPath $setup.FullName -Destination "dist/release-windows/LaTeX.Setup.$version.exe"
-          Copy-Item -LiteralPath $portable.FullName -Destination "dist/release-windows/LaTeX.$version.exe"
-          Copy-Item -LiteralPath dist/windows-certificate-sha256.txt -Destination dist/release-windows/windows-certificate-sha256.txt
+          $prefix = if ($env:BUILD_CHANNEL -eq 'beta') { 'LaTeX.Beta' } else { 'LaTeX' }
+          Copy-Item -LiteralPath $setup.FullName -Destination "dist/release-windows/$prefix.Setup.$env:RELEASE_VERSION.exe"
+          Copy-Item -LiteralPath $portable.FullName -Destination "dist/release-windows/$prefix.$env:RELEASE_VERSION.exe"
+          Copy-Item -LiteralPath windows-certificate-sha256.txt -Destination dist/release-windows/windows-certificate-sha256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: release-windows
+          name: release-windows-${{ needs.validate.outputs.channel }}
           path: dist/release-windows/*
           if-no-files-found: error
 
@@ -109,34 +143,36 @@ jobs:
         shell: bash
         env:
           GITHUB_OAUTH_CLIENT_ID: ${{ secrets.ANDROID_GITHUB_CLIENT_ID }}
+          BUILD_CHANNEL: ${{ needs.validate.outputs.channel }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            test -n "$GITHUB_OAUTH_CLIENT_ID"
-          fi
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then test -n "$GITHUB_OAUTH_CLIENT_ID"; fi
+          if [[ "$BUILD_CHANNEL" == "beta" ]]; then VARIANT=Beta; else VARIANT=Stable; fi
           chmod +x gradlew
-          ./gradlew --no-daemon testDebugUnitTest
-          ./gradlew --no-daemon assembleRelease
+          ./gradlew --no-daemon "test${VARIANT}DebugUnitTest"
+          ./gradlew --no-daemon "assemble${VARIANT}Release"
       - name: Verify APK and prepare attachment
         shell: bash
+        env:
+          BUILD_CHANNEL: ${{ needs.validate.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          APK=android-viewer/app/build/outputs/apk/release/app-release.apk
+          APK="android-viewer/app/build/outputs/apk/${BUILD_CHANNEL}/release/app-${BUILD_CHANNEL}-release.apk"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" | tee "$RUNNER_TEMP/apksigner.txt"
-          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android-viewer/app/build.gradle.kts | head -n 1)"
           DIGEST="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | head -n 1 | tr -d ':[:space:]')"
-          test -n "$VERSION"
           test "${#DIGEST}" -eq 64
           mkdir -p dist/android
-          cp "$APK" "dist/android/LaTeX.Android.$VERSION.apk"
+          if [[ "$BUILD_CHANNEL" == "beta" ]]; then LABEL=Beta; else LABEL=Stable; fi
+          cp "$APK" "dist/android/LaTeX.Android.$LABEL.$RELEASE_VERSION.apk"
           printf '%s\n' "$DIGEST" > dist/android/android-certificate-sha256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: release-android
+          name: release-android-${{ needs.validate.outputs.channel }}
           path: dist/android/*
           if-no-files-found: error
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [windows, android]
+    needs: [validate, windows, android]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -147,11 +183,11 @@ jobs:
           package-manager-cache: false
       - uses: actions/download-artifact@v4
         with:
-          name: release-windows
+          name: release-windows-${{ needs.validate.outputs.channel }}
           path: release-assets/windows
       - uses: actions/download-artifact@v4
         with:
-          name: release-android
+          name: release-android-${{ needs.validate.outputs.channel }}
           path: release-assets/android
       - name: Restore release-manifest signing key
         shell: bash
@@ -163,8 +199,9 @@ jobs:
           chmod 600 "$RUNNER_TEMP/release-manifest-private.pem"
       - name: Sign immutable release manifest
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           SETUP="$(find release-assets/windows -maxdepth 1 -type f -iname '*setup*.exe' -print -quit)"
           PORTABLE="$(find release-assets/windows -maxdepth 1 -type f -iname '*.exe' ! -iname '*setup*' -print -quit)"
           APK="$(find release-assets/android -maxdepth 1 -type f -iname '*.apk' -print -quit)"
@@ -174,7 +211,7 @@ jobs:
           export ANDROID_CERTIFICATE_SHA256="$(tr -d ':[:space:]' < release-assets/android/android-certificate-sha256.txt)"
           export WINDOWS_CERTIFICATE_SHA256="$(tr -d ':[:space:]' < release-assets/windows/windows-certificate-sha256.txt)"
           node scripts/sign-release-manifest.mjs \
-            --version "$VERSION" \
+            --version "$RELEASE_VERSION" \
             --tag "$GITHUB_REF_NAME" \
             --private-key "$RUNNER_TEMP/release-manifest-private.pem" \
             --output release-assets/release-manifest.json \
@@ -184,6 +221,10 @@ jobs:
       - name: Publish verified assets
         uses: softprops/action-gh-release@v2
         with:
+          name: LaTeX Project Manager ${{ needs.validate.outputs.version }}
+          prerelease: ${{ needs.validate.outputs.channel == 'beta' }}
+          make_latest: ${{ needs.validate.outputs.channel == 'stable' }}
+          generate_release_notes: true
           files: |
             release-assets/windows/*.exe
             release-assets/android/*.apk

@@ -5,7 +5,6 @@ import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.GitHubRepository
 import com.zqy.latexviewer.model.GlassMode
-import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
 import com.zqy.latexviewer.model.PdfBookmark
 import com.zqy.latexviewer.model.PersistentDownloadKind
@@ -218,7 +217,8 @@ class AppPreferences(context: Context) {
 
     fun removePdfCacheEntry(cacheKey: String) = blocking { dao.deletePdfCache(cacheKey) }
 
-    fun clearPdfCacheIndex() = blocking { dao.clearPdfCacheIndex() }
+    /** Temporary reader cache only. Offline-retained documents are user data. */
+    fun clearPdfCacheIndex() = blocking { dao.clearTemporaryPdfCacheIndex() }
 
     private fun migrateLegacyPreferencesOnce() {
         if (preferences.getBoolean(KEY_ROOM_MIGRATED, false)) return
@@ -327,73 +327,15 @@ class AppPreferences(context: Context) {
     }.getOrNull()
 
     companion object {
-        fun parseMobileIndex(raw: String, commitSha: String? = null): MobileProjectIndex? = runCatching {
-            val value = JSONObject(raw)
-            val schemaVersion = value.optInt("schemaVersion", 1)
-            if (schemaVersion !in 1..2) return@runCatching null
-            val outputsValue = value.optJSONArray("outputs")
-                ?: value.optJSONArray("pdfOutputs")
-                ?: return@runCatching null
-            val outputs = buildList {
-                for (index in 0 until outputsValue.length()) {
-                    val output = outputsValue.getJSONObject(index)
-                    val pdfPath = normalizePath(output.optString("pdfPath", output.optString("path")))
-                    if (!isSafePdfPath(pdfPath)) return@runCatching null
-                    add(
-                        MobilePdfOutput(
-                            id = output.optString("id").ifBlank { "output-$index" },
-                            targetId = output.optString("targetId", output.optString("target")).ifBlank { "default" },
-                            name = output.optString("name").ifBlank { pdfPath.substringAfterLast('/') },
-                            entry = output.optString("entry"),
-                            profileId = output.optionalString("profileId"),
-                            pdfPath = pdfPath
-                        )
-                    )
-                }
-            }
-            val defaultId = value.optString("defaultOutputId", value.optString("defaultPdfId"))
-                .ifBlank { outputs.firstOrNull()?.id.orEmpty() }
-            MobileProjectIndex(
-                schemaVersion = schemaVersion,
-                projectId = value.optString("projectId").ifBlank { value.optString("id") },
-                name = value.optString("name").ifBlank { value.optString("displayName") },
-                updatedAt = value.optString("updatedAt"),
-                defaultOutputId = defaultId,
-                outputs = outputs,
-                commitSha = commitSha ?: value.optionalString("commitSha")
-            ).takeIf { it.outputs.isNotEmpty() && it.defaultOutput != null }
-        }.getOrNull()
+        fun parseMobileIndex(raw: String, commitSha: String? = null): MobileProjectIndex? =
+        MobileIndexCodec.decodeCached(raw, commitSha)
 
-        fun encodeMobileIndex(index: MobileProjectIndex): String {
-            val outputs = JSONArray()
-            index.outputs.forEach { output ->
-                outputs.put(
-                    JSONObject()
-                        .put("id", output.id)
-                        .put("targetId", output.targetId)
-                        .put("name", output.name)
-                        .put("entry", output.entry)
-                        .put("profileId", output.profileId)
-                        .put("pdfPath", normalizePath(output.pdfPath))
-                )
-            }
-            return JSONObject()
-                .put("schemaVersion", index.schemaVersion)
-                .put("projectId", index.projectId)
-                .put("name", index.name)
-                .put("updatedAt", index.updatedAt)
-                .put("defaultOutputId", index.defaultOutputId)
-                .put("outputs", outputs)
-                .put("commitSha", index.commitSha)
-                .toString()
-        }
+        fun encodeMobileIndex(index: MobileProjectIndex): String = MobileIndexCodec.encode(index)
 
-        fun normalizePath(path: String): String = path.replace('\\', '/').trimStart('/')
+        fun normalizePath(path: String): String = MobileIndexCodec.normalizePath(path)
 
         fun isSafePdfPath(path: String): Boolean {
-            if (path.isBlank() || path.startsWith('/') || path.startsWith('\\') || WINDOWS_DRIVE.matches(path)) return false
-            val parts = path.replace('\\', '/').split('/')
-            return parts.none { it.isBlank() || it == "." || it == ".." } && path.endsWith(".pdf", true)
+            return MobileIndexCodec.isSafePdfPath(path)
         }
 
         fun documentId(repositoryFullName: String, pdfPath: String): String =
@@ -415,7 +357,6 @@ class AppPreferences(context: Context) {
         private const val MIN_PDF_CACHE_LIMIT_BYTES = 64L * 1024 * 1024
         private const val MAX_PDF_CACHE_LIMIT_BYTES = 4L * 1024 * 1024 * 1024
         private const val MAX_DOWNLOAD_HISTORY = 200
-        private val WINDOWS_DRIVE = Regex("^[A-Za-z]:[/\\\\].*")
     }
 
     private fun <T> blocking(block: suspend () -> T): T = runBlocking(Dispatchers.IO) { block() }

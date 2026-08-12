@@ -17,7 +17,9 @@ import {
 import type { WorkbenchApi } from "@/shared/ipc";
 import type {
   BuildProfile,
+  BackupSnapshot,
   DocumentTarget,
+  ProjectBackupSettings,
   ProjectManifest,
   ProjectPdfInfo,
   ProjectSummary,
@@ -34,7 +36,7 @@ interface ProjectViewProps {
   api: WorkbenchApi;
   project: ProjectSummary;
   isDemo: boolean;
-  initialTab?: "overview" | "github";
+  initialTab?: ProjectTab;
   onBack: () => void;
   onNotify: (message: string) => void;
   onProjectChange?: (project: ProjectSummary) => void;
@@ -186,13 +188,13 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
     ? [
         { id: "overview", label: "项目介绍", icon: BookOpen },
         { id: "files", label: "文件", icon: FolderOpen },
-        { id: "references", label: "原始文稿", icon: Files },
+        { id: "references", label: "研究资料", icon: Files },
         { id: "github", label: "同步", icon: GitFork }
       ]
     : [
         { id: "overview", label: "项目介绍", icon: BookOpen },
         { id: "files", label: "文件", icon: FolderOpen },
-        { id: "references", label: "原始文稿", icon: Files },
+        { id: "references", label: "研究资料", icon: Files },
         { id: "github", label: "同步", icon: GitFork }
       ];
 
@@ -213,7 +215,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       <nav className="project-tabs" aria-label="项目页面" role="tablist">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          return <button role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
+          return <button role="tab" aria-label={tab.id === "references" ? "原始文稿 · 研究资料" : tab.label} aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
         })}
       </nav>
 
@@ -347,6 +349,109 @@ function ProjectIntroductionTab({
         </section>
       </div>
       <MobilePdfCard api={api} project={project} manifest={manifest} isDemo={isDemo} onNotify={onNotify} />
+      <ProjectBackupCard api={api} project={project} onNotify={onNotify} onProjectChange={onProjectChange} />
     </main>
+  );
+}
+
+function ProjectBackupCard({
+  api,
+  project,
+  onNotify,
+  onProjectChange
+}: {
+  api: WorkbenchApi;
+  project: ProjectSummary;
+  onNotify: (message: string) => void;
+  onProjectChange?: (project: ProjectSummary) => void;
+}) {
+  const [snapshots, setSnapshots] = useState<BackupSnapshot[]>([]);
+  const [settings, setSettings] = useState<ProjectBackupSettings | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [showAllSnapshots, setShowAllSnapshots] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([api.projectBackups.list(project.id), api.projectBackups.settings(project.id)])
+      .then(([nextSnapshots, nextSettings]) => {
+        if (!cancelled) { setSnapshots(nextSnapshots); setSettings(nextSettings); }
+      })
+      .catch((error: unknown) => !cancelled && onNotify(error instanceof Error ? error.message : "无法读取项目快照"));
+    return () => { cancelled = true; };
+  }, [api, onNotify, project.id]);
+
+  async function createSnapshot() {
+    setBusy("create");
+    try {
+      const preview = await api.projectBackups.preview(project.id);
+      const snapshot = await api.projectBackups.create(project.id);
+      setSnapshots((current) => [snapshot, ...current.filter((item) => item.id !== snapshot.id)]);
+      onProjectChange?.({ ...project, protectionState: project.protectionState === "github" || project.protectionState === "both" ? "both" : "localBackup" });
+      onNotify(`项目快照已创建并校验：${preview.fileCount} 个文件，${(preview.totalBytes / 1024 / 1024).toFixed(1)} MB`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法创建项目快照");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveSettings(next: Pick<ProjectBackupSettings, "frequency" | "retainCount">) {
+    setBusy("settings");
+    try {
+      setSettings(await api.projectBackups.setSettings(project.id, next));
+      onNotify(next.frequency === "off" ? "已关闭定期项目快照" : `已开启${next.frequency === "daily" ? "每日" : "每周"}项目快照`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存备份设置");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function verify(snapshot: BackupSnapshot) {
+    setBusy(snapshot.id);
+    try {
+      const result = await api.projectBackups.verify(project.id, snapshot.id);
+      if (!result.valid) throw new Error(result.errors.join("；") || "快照校验失败");
+      setSnapshots((current) => current.map((item) => item.id === snapshot.id
+        ? { ...item, verified: true, verifiedAt: new Date().toISOString() }
+        : item));
+      onNotify(`快照校验通过：${result.checkedFiles} 个文件完整`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "快照校验失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function restore(snapshot: BackupSnapshot) {
+    setBusy(snapshot.id);
+    try {
+      const result = await api.projectBackups.restore(project.id, snapshot.id);
+      if (result) onNotify(
+        `已恢复到新目录：${result.destinationPath}${result.restoredLocalAttachments ? `（含 ${result.restoredLocalAttachments} 份仅本机资料）` : ""}`
+      );
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法恢复项目快照");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="overview-section project-backup-card">
+      <header>
+        <div><h3>项目保护</h3><p>快照保留源码和仅本机资料；排除 Git、构建缓存与撤销目录。恢复始终写入新目录。</p></div>
+        <button className="button primary" disabled={busy !== null} onClick={() => void createSnapshot()}><Files size={16} />{busy === "create" ? "正在校验…" : "立即创建快照"}</button>
+      </header>
+      <div className="backup-settings-row">
+        <label><span>定期快照</span><select value={settings?.frequency ?? "off"} disabled={!settings || busy !== null} onChange={(event) => void saveSettings({ frequency: event.target.value as ProjectBackupSettings["frequency"], retainCount: settings?.retainCount ?? 7 })}><option value="off">关闭</option><option value="daily">每日</option><option value="weekly">每周</option></select></label>
+        <label><span>保留份数</span><select value={settings?.retainCount ?? 7} disabled={!settings || busy !== null} onChange={(event) => void saveSettings({ frequency: settings?.frequency ?? "off", retainCount: Number(event.target.value) })}>{[3, 5, 7, 14, 30].map((value) => <option key={value} value={value}>{value} 份</option>)}</select></label>
+        <span className={`protection-state protection-${project.protectionState ?? "unprotected"}`}>{project.protectionState === "both" ? "GitHub + 本地快照" : project.protectionState === "github" ? "已连接 GitHub" : project.protectionState === "localBackup" ? "已有本地快照" : "尚未建立保护"}</span>
+      </div>
+      {snapshots.length > 0 ? <>
+        <div className="backup-snapshot-list">{(showAllSnapshots ? snapshots : snapshots.slice(0, 5)).map((snapshot) => <article key={snapshot.id}><div><strong>{new Date(snapshot.createdAt).toLocaleString("zh-CN")}</strong><small>{snapshot.fileCount} 个文件 · {(snapshot.size / 1024 / 1024).toFixed(1)} MB · {snapshot.kind === "scheduled" ? "定期" : "手动"}</small></div><span title={snapshot.verifiedAt ? `最近校验：${new Date(snapshot.verifiedAt).toLocaleString("zh-CN")}` : undefined}>{snapshot.verified ? "已校验" : "待复核"}</span><button className="button secondary" disabled={busy !== null} onClick={() => void verify(snapshot)}>校验</button><button className="button secondary" disabled={busy !== null} onClick={() => void restore(snapshot)}>恢复副本</button></article>)}</div>
+        {snapshots.length > 5 ? <button className="button tertiary backup-show-all" onClick={() => setShowAllSnapshots((value) => !value)}>{showAllSnapshots ? "收起快照" : `查看全部 ${snapshots.length} 份快照`}</button> : null}
+      </> : <p className="backup-empty">还没有项目快照。GitHub 同步与本地快照用途不同，建议至少启用一种保护方式。</p>}
+    </section>
   );
 }

@@ -2,6 +2,7 @@ import type { WorkbenchApi } from "@/shared/ipc";
 import type {
   AppUpdateStatus,
   AppRuntimeSettings,
+  CatalogProjectResearchItem,
   GitHubSyncEvent,
   GitHubSyncStatus,
   MigrationPreview,
@@ -9,6 +10,7 @@ import type {
   ProjectManifest,
   ProjectSummary,
   ReferenceDocumentInfo,
+  ResearchSearchHit,
   ScanCandidate,
   TemplateInfo
 } from "@/shared/types";
@@ -420,6 +422,79 @@ export function createWorkbench(): DemoWorkbench {
     { name: "Alon-Spencer-The-Probabilistic-Method.pdf", relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf", size: 18_724_811, modifiedAt: "2026-08-02T08:20:00.000Z", kind: "pdf", lfsRecommended: false },
     { name: "随机图中文讲义.pdf", relativePath: "references/随机图中文讲义.pdf", size: 62_104_322, modifiedAt: "2026-07-28T13:15:00.000Z", kind: "pdf", lfsRecommended: true }
   ];
+  let demoResearchItems: CatalogProjectResearchItem[] = [
+    {
+      projectId: "probability-method",
+      workId: "work-probabilistic-method",
+      item: {
+        id: "research-probabilistic-method",
+        title: "The Probabilistic Method",
+        authors: ["Noga Alon", "Joel H. Spencer"],
+        year: 2016,
+        language: "en",
+        isbn: "9781119061953",
+        attachments: [{
+          id: "attachment-probabilistic-method",
+          name: "Alon-Spencer-The-Probabilistic-Method.pdf",
+          relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf",
+          mediaType: "application/pdf",
+          size: 18_724_811,
+          sha256: "a".repeat(64),
+          availability: "repository"
+        }],
+        links: [{ targetId: null, role: "primarySource", preferredAttachmentId: "attachment-probabilistic-method" }]
+      },
+      createdAt: "2026-08-02T08:20:00.000Z",
+      updatedAt: "2026-08-02T08:20:00.000Z",
+      localAttachmentPaths: {}
+    },
+    {
+      projectId: "ramsey",
+      workId: "work-probabilistic-method",
+      item: {
+        id: "research-probabilistic-method-ramsey",
+        title: "The Probabilistic Method",
+        authors: ["Noga Alon", "Joel H. Spencer"],
+        year: 2016,
+        language: "en",
+        isbn: "9781119061953",
+        attachments: [{
+          id: "attachment-probabilistic-method-ramsey",
+          name: "Alon-Spencer-The-Probabilistic-Method.pdf",
+          relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf",
+          mediaType: "application/pdf",
+          size: 18_724_811,
+          sha256: "a".repeat(64),
+          availability: "repository"
+        }],
+        links: [{ targetId: null, role: "reference" }]
+      },
+      createdAt: "2026-08-03T09:00:00.000Z",
+      updatedAt: "2026-08-03T09:00:00.000Z",
+      localAttachmentPaths: {}
+    },
+    {
+      projectId: "probability-method",
+      workId: "work-random-graphs-notes",
+      item: {
+        id: "research-random-graphs-notes",
+        title: "随机图中文讲义",
+        authors: [],
+        language: "zh-CN",
+        attachments: [{
+          id: "attachment-random-graphs-notes",
+          name: "随机图中文讲义.pdf",
+          mediaType: "application/pdf",
+          size: 62_104_322,
+          availability: "localOnly"
+        }],
+        links: []
+      },
+      createdAt: "2026-07-28T13:15:00.000Z",
+      updatedAt: "2026-07-28T13:15:00.000Z",
+      localAttachmentPaths: { "attachment-random-graphs-notes": `${DEMO_ROOT}\\references\\随机图中文讲义.pdf` }
+    }
+  ];
   let updateStatus: AppUpdateStatus = {
     currentVersion: "0.11.0",
     latestVersion: "0.11.0",
@@ -435,7 +510,7 @@ export function createWorkbench(): DemoWorkbench {
   const api: WorkbenchApi = {
     library: {
       list: async () => structuredClone(projects),
-      catalogStatus: async () => ({ schemaVersion: 3, persistent: true, databasePath: "演示索引", warnings: [] }),
+      catalogStatus: async () => ({ schemaVersion: 4, persistent: true, databasePath: "演示索引", warnings: [] }),
       scan: async () => structuredClone(candidates),
       import: async (candidate) => {
         const imported: ProjectSummary = {
@@ -562,6 +637,28 @@ export function createWorkbench(): DemoWorkbench {
       update: async (id, patch) => ({ id, name: patch.name ?? "演示集合", color: patch.color, projectIds: patch.projectIds ?? [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
       delete: async () => undefined
     },
+    catalogBackups: {
+      list: async () => [],
+      create: async () => null,
+      stageRestore: async () => ({
+        backup: {
+          path: "D:\\LaTeX资料库\\backups\\catalog-demo.db",
+          createdAt: new Date().toISOString(),
+          size: 1024,
+          kind: "manual" as const
+        },
+        restartRequired: true as const
+      })
+    },
+    projectBackups: {
+      preview: async (projectId) => ({ projectId, fileCount: 42, totalBytes: 12_000_000, localOnlyAttachmentCount: 0, excludedPaths: [".git", ".latex-workbench/build"] }),
+      create: async (projectId) => ({ id: "demo-snapshot", projectId, projectName: projects.find((item) => item.id === projectId)?.name ?? "演示项目", path: "D:\\LaTeX备份\\demo-snapshot", createdAt: new Date().toISOString(), size: 12_000_000, fileCount: 42, kind: "manual", verified: true }),
+      list: async () => [],
+      verify: async (_projectId, snapshotId) => ({ snapshotId, valid: true, checkedFiles: 42, errors: [] }),
+      restore: async (_projectId, snapshotId) => ({ snapshotId, destinationPath: "D:\\LaTeX恢复\\演示项目", restoredFiles: 42 }),
+      settings: async (projectId) => ({ projectId, frequency: "off", retainCount: 7, updatedAt: new Date(0).toISOString() }),
+      setSettings: async (projectId, settings) => ({ projectId, ...settings, updatedAt: new Date().toISOString() })
+    },
     smartViews: {
       list: async () => [],
       create: async (input) => ({ id: `view-${Date.now()}`, ...input, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
@@ -667,6 +764,61 @@ export function createWorkbench(): DemoWorkbench {
         return structuredClone(referenceDocuments);
       }
     },
+    research: {
+      list: async (projectId) => structuredClone(demoResearchItems.filter((entry) => entry.projectId === projectId)),
+      listGlobal: async () => structuredClone(demoResearchItems),
+      discoverLegacy: async () => [],
+      save: async (projectId, request) => {
+        const now = new Date().toISOString();
+        const previous = demoResearchItems.filter((entry) => entry.projectId === projectId);
+        const next = request.items.map((item) => {
+          const existing = previous.find((entry) => entry.item.id === item.id);
+          const matchingWork = demoResearchItems.find((entry) => item.attachments.some((attachment) => attachment.sha256 && entry.item.attachments.some((candidate) => candidate.sha256 === attachment.sha256)));
+          return {
+            projectId,
+            workId: existing?.workId ?? matchingWork?.workId ?? `work-${item.id}`,
+            item: structuredClone(item),
+            createdAt: existing?.createdAt ?? now,
+            updatedAt: now,
+            localAttachmentPaths: Object.fromEntries(Object.entries(request.localAttachmentPaths ?? {}).filter(([id]) => item.attachments.some((attachment) => attachment.id === id)))
+          } satisfies CatalogProjectResearchItem;
+        });
+        demoResearchItems = [...demoResearchItems.filter((entry) => entry.projectId !== projectId), ...next];
+        return structuredClone(next);
+      },
+      openAttachment: async () => undefined
+    },
+    researchSearch: {
+      index: async (projectId) => ({
+        projectId,
+        indexedFiles: 0,
+        skippedFiles: 0,
+        removedFiles: 0,
+        indexedAt: new Date().toISOString()
+      }),
+      indexAll: async () => [],
+      query: async (query, projectIds, limit = 40) => {
+        const normalized = query.trim().toLocaleLowerCase();
+        const allowed = projectIds ? new Set(projectIds) : null;
+        const hits: ResearchSearchHit[] = [];
+        for (const project of demoProjects) {
+          if (allowed && !allowed.has(project.id)) continue;
+          if (`${project.name} ${project.rootPath} ${project.tags.join(" ")}`.toLocaleLowerCase().includes(normalized)) {
+            hits.push({ id: `project:${project.id}`, projectId: project.id, kind: "project", title: project.name, detail: project.tags.join(" · "), score: 100 });
+          }
+        }
+        for (const entry of demoResearchItems) {
+          if (allowed && !allowed.has(entry.projectId)) continue;
+          const item = entry.item;
+          const text = `${item.title ?? ""} ${item.authors.join(" ")} ${item.doi ?? ""} ${item.arxivId ?? ""} ${item.attachments.map((attachment) => attachment.name).join(" ")}`.toLocaleLowerCase();
+          if (text.includes(normalized)) hits.push({ id: `research:${entry.projectId}:${item.id}`, projectId: entry.projectId, kind: "research", title: item.title || item.attachments[0]?.name || item.id, detail: item.authors.join("、"), score: 90 });
+        }
+        if (`概率方法 main.tex documentclass`.toLocaleLowerCase().includes(normalized) && (!allowed || allowed.has("probability-method"))) {
+          hits.push({ id: "file:probability-method:main.tex", projectId: "probability-method", kind: "file", title: "main.tex", detail: "主文档入口", relativePath: "main.tex", line: 1, score: 80 });
+        }
+        return structuredClone(hits.slice(0, limit));
+      }
+    },
     manifest: {
       read: async () => structuredClone(demoManifest),
       write: async () => readonlyError()
@@ -686,6 +838,7 @@ export function createWorkbench(): DemoWorkbench {
       plan: async () => readonlyError(),
       apply: async () => readonlyError(),
       undo: async () => readonlyError(),
+      history: async () => [],
       open: async () => undefined,
       reveal: async () => undefined,
       rename: async () => readonlyError(),

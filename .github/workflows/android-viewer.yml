@@ -2,8 +2,19 @@ name: Build Android viewer
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Build the installed stable app or the parallel-install Beta app
+        required: true
+        default: beta
+        type: choice
+        options:
+          - beta
+          - stable
   push:
-    branches: [main]
+    branches:
+      - main
+      - "beta/**"
     paths:
       - "android-viewer/**"
       - ".github/workflows/android-viewer.yml"
@@ -18,6 +29,19 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - id: release_channel
+        name: Select release channel
+        shell: bash
+        run: |
+          CHANNEL="${{ inputs.channel }}"
+          if [[ -z "$CHANNEL" ]]; then
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then CHANNEL=stable; else CHANNEL=beta; fi
+          fi
+          if [[ "$CHANNEL" != "stable" && "$CHANNEL" != "beta" ]]; then exit 1; fi
+          echo "BUILD_CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          if [[ "$CHANNEL" == "beta" ]]; then echo "ANDROID_VARIANT=Beta" >> "$GITHUB_ENV"; else echo "ANDROID_VARIANT=Stable" >> "$GITHUB_ENV"; fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -42,20 +66,29 @@ jobs:
           GITHUB_OAUTH_CLIENT_ID: ${{ secrets.ANDROID_GITHUB_CLIENT_ID }}
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon testDebugUnitTest
-          ./gradlew --no-daemon assembleDebug
+          ./gradlew --no-daemon "test${ANDROID_VARIANT}DebugUnitTest"
+          ./gradlew --no-daemon "assemble${ANDROID_VARIANT}Debug"
 
       - name: Prepare APK attachment
         shell: bash
         run: |
           mkdir -p dist/android
-          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android-viewer/app/build.gradle.kts | head -n 1)"
+          FLAVOR="${BUILD_CHANNEL}"
+          APK="android-viewer/app/build/outputs/apk/${FLAVOR}/debug/app-${FLAVOR}-debug.apk"
+          if [[ "$BUILD_CHANNEL" == "beta" ]]; then
+            VERSION="$(node -p "require('./package.json').config.betaVersion")"
+            LABEL=Beta
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+            LABEL=Stable
+          fi
           test -n "$VERSION"
-          cp android-viewer/app/build/outputs/apk/debug/app-debug.apk "dist/android/LaTeX.Android.$VERSION-debug.apk"
+          test -f "$APK"
+          cp "$APK" "dist/android/LaTeX.Android.$LABEL.$VERSION-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LaTeX-Project-Viewer-Android
+          name: LaTeX-Project-Viewer-Android-${{ steps.release_channel.outputs.channel }}
           path: dist/android/*.apk
           if-no-files-found: error
