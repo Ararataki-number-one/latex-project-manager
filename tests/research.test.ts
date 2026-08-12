@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -72,8 +72,10 @@ describe("research material catalog", () => {
     expect(portable.researchItems[0].attachments.find((attachment: { id: string }) => attachment.id === "private-file")).toEqual({
       id: "private-file", name: "private.pdf", mediaType: "application/pdf", availability: "localOnly"
     });
-    await expect(service.attachmentPath("project-a", root, "paper-a", "paper-a-file")).resolves.toBe(join(root, "references", "paper.pdf"));
-    await expect(service.attachmentPath("project-a", root, "paper-a", "private-file")).resolves.toBe(privatePdf);
+    await expect(service.attachmentPath("project-a", root, "paper-a", "paper-a-file")).resolves.toBe(
+      await realpath(join(root, "references", "paper.pdf"))
+    );
+    await expect(service.attachmentPath("project-a", root, "paper-a", "private-file")).resolves.toBe(await realpath(privatePdf));
     catalog.close();
   });
 
@@ -148,7 +150,7 @@ describe("research material catalog", () => {
     expect(saved).toHaveLength(1);
     expect(saved[0].item).toMatchObject({ title: "Publisher Copy 2026", links: [] });
     expect(saved[0].item.attachments[0]).toMatchObject({ availability: "localOnly", name: "Publisher_Copy-2026.pdf" });
-    expect(saved[0].localAttachmentPaths[saved[0].item.attachments[0].id]).toBe(external);
+    expect(saved[0].localAttachmentPaths[saved[0].item.attachments[0].id]).toBe(await realpath(external));
     await expect(lstat(join(root, "references"))).rejects.toMatchObject({ code: "ENOENT" });
     const portable = JSON.parse(await readFile(join(root, ".latex-project.json"), "utf8"));
     expect(portable.researchItems[0].attachments[0]).not.toHaveProperty("relativePath");
