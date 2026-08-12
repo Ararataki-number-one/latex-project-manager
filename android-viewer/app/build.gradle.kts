@@ -16,7 +16,7 @@ fun firstPrivateKeyAlias(path: String, password: String): String {
 
 android {
     namespace = "com.zqy.latexviewer"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.zqy.latexviewer"
