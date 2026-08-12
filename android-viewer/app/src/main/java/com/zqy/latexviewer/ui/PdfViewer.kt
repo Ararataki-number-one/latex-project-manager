@@ -371,7 +371,9 @@ private fun openPdfiumDocument(
             require(pageCount > 0) { "PDF 文档没有页面" }
             val sizes = runCatching {
                 List(pageCount) { pageIndex ->
-                    document.openPage(pageIndex).use { page ->
+                    requireNotNull(document.openPage(pageIndex)) {
+                        "PDF page ${pageIndex + 1} could not be opened"
+                    }.use { page ->
                         page.getPageSize(PDFIUM_LAYOUT_DPI)
                     }
                 }
