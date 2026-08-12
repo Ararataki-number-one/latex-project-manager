@@ -243,6 +243,11 @@ class BackgroundDownloadManager(context: Context) {
     )
 
     fun cancel(workId: UUID) {
+        // An explicit user cancellation should release its partial file. Worker
+        // cancellation is handled separately because WorkManager also uses it for
+        // temporary constraint/process stops that must remain resumable.
+        val store = DownloadStore(appContext)
+        store.discardStaging(store.stagingFile(workId.toString()))
         workManager.cancelWorkById(workId)
     }
 
@@ -380,9 +385,16 @@ class DownloadWorker(
                         "更新缺少有效签名发布清单，已拒绝下载"
                     }
                     api.downloadAndroidUpdate(asset, staging, onProgress)
-                    val file = store.commitUpdateFromFile(asset, staging)
-                    ReleaseSecurity.verifyDownloadedApk(applicationContext, file,
-                        VerifiedAndroidReleaseAsset(asset.name, asset.size, asset.sha256, asset.certificateSha256))
+                    val expected = VerifiedAndroidReleaseAsset(
+                        asset.version,
+                        asset.name,
+                        asset.size,
+                        asset.sha256,
+                        asset.certificateSha256
+                    )
+                    val file = store.commitUpdateFromFile(asset, staging) { candidate ->
+                        ReleaseSecurity.verifyDownloadedApk(applicationContext, candidate, expected)
+                    }
                     workDataOf(
                         BackgroundDownloadManager.KEY_OUTPUT_NAME to task.name,
                         BackgroundDownloadManager.KEY_OUTPUT_PATH to file.absolutePath,
@@ -403,9 +415,10 @@ class DownloadWorker(
             )
             Result.success(output)
         } catch (cancelled: CancellationException) {
-            DownloadStore(applicationContext).discardStaging(
-                DownloadStore(applicationContext).stagingFile(id.toString())
-            )
+            // Preserve the immutable commit-bound partial. WorkManager can cancel
+            // this coroutine when network constraints change or the worker is
+            // stopped for rescheduling; the next attempt can safely resume it via
+            // Range/If-Range. Explicit UI cancellation cleans it in cancel().
             preferences.saveDownloadTask(
                 task.toPersistent(id.toString(), PersistentDownloadState.CANCELLED, error = "已取消"),
                 task.toJson().toString()

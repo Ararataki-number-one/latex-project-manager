@@ -587,7 +587,10 @@ export class GitHubSyncService {
   }
 
   async dispose(): Promise<void> {
-    await Promise.all([...this.watchers.values()].map((watcher) => watcher.close()));
+    // Stop every source of new work before the first await.  In particular,
+    // active Git/Git-LFS process trees must receive their abort signal even if
+    // closing a filesystem watcher takes time.
+    const watcherClosures = [...this.watchers.values()].map((watcher) => watcher.close());
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const timer of this.pollTimers.values()) clearInterval(timer);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
@@ -595,14 +598,14 @@ export class GitHubSyncService {
     this.timers.clear();
     this.pollTimers.clear();
     this.retryTimers.clear();
-    for (const queued of this.queue.splice(0)) {
-      this.settleQueued(queued, await this.cancelledStatus(queued.projectId, queued.root));
-    }
     const activeJobs = [...this.activeControllers.entries()].map(([projectId, controller]) => {
       controller.abort();
       return this.jobs.get(projectId);
     }).filter((job): job is Promise<GitHubSyncStatus> => Boolean(job));
-    await Promise.allSettled(activeJobs);
+    for (const queued of this.queue.splice(0)) {
+      this.settleQueued(queued, await this.cancelledStatus(queued.projectId, queued.root));
+    }
+    await Promise.allSettled([...watcherClosures, ...activeJobs]);
     this.activeControllers.clear();
     this.activeSignalsByRoot.clear();
   }

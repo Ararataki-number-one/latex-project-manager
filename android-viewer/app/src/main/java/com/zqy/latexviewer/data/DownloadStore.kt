@@ -79,7 +79,11 @@ class DownloadStore(private val context: Context) {
         }
     }
 
-    suspend fun commitUpdateFromFile(asset: AndroidReleaseAsset, source: File): File = withContext(Dispatchers.IO) {
+    suspend fun commitUpdateFromFile(
+        asset: AndroidReleaseAsset,
+        source: File,
+        validator: (File) -> Unit
+    ): File = withContext(Dispatchers.IO) {
         val directory = updateDirectory().apply { mkdirs() }
         val destination = File(directory, safeName(asset.name))
         try {
@@ -92,6 +96,7 @@ class DownloadStore(private val context: Context) {
                 require(candidate.length() > 0) { "更新包为空" }
                 if (asset.size > 0) require(candidate.length() == asset.size) { "更新包大小校验失败" }
                 verifyDigest(candidate, asset.sha256)
+                validator(candidate)
             }
             directory.listFiles()?.filter { it != destination }?.forEach { it.delete() }
             destination
@@ -337,9 +342,16 @@ class DownloadStore(private val context: Context) {
         validator: (File) -> Unit
     ) {
         destination.parentFile?.mkdirs()
-        val candidate = File(destination.parentFile, ".${destination.name}.${System.nanoTime()}.candidate")
+        val candidateExtension = destination.extension.takeIf(String::isNotBlank)
+        val candidate = File(
+            destination.parentFile,
+            ".${destination.name}.${System.nanoTime()}.candidate${candidateExtension?.let { ".$it" }.orEmpty()}"
+        )
         val backup = File(destination.parentFile, ".${destination.name}.known-good")
         try {
+            if (!destination.isFile && backup.isFile) {
+                moveAtomically(backup, destination, replace = true)
+            }
             source.inputStream().use { input ->
                 FileOutputStream(candidate).use { output ->
                     input.copyTo(output, COPY_BUFFER_BYTES)

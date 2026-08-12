@@ -92,6 +92,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("dev.chrisbanes.haze:haze:1.7.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    // Use the lightweight Ed25519 implementation directly. Android's platform
+    // Signature provider only exposes Ed25519 from API 33, while this app
+    // supports API 26 and newer.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     // 2.0.2+ declares minCompileSdk 37, which is not yet available on the
     // stable Android SDK channel used by GitHub Actions. 2.0.1 exposes the
     // same v2 API used by the reader and declares minCompileSdk 36.
@@ -101,6 +105,7 @@ dependencies {
     testImplementation("androidx.room:room-testing:2.8.4")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("org.json:json:20250517")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

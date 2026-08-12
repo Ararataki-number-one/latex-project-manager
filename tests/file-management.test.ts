@@ -92,4 +92,59 @@ describe("managed project files", () => {
     expect(trashed).toContain(join(root, "chapters", "copy.tex"));
     await expect(stat(join(root, "chapters", "copy.tex"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("never overwrites or removes a copy destination that appears after preview", async () => {
+    const root = await projectRoot();
+    await writeFile(join(root, "chapters", "source.tex"), "source\n", "utf8");
+    const service = new ProjectFileService(async (path) => { await rm(path, { recursive: true, force: true }); });
+    const plan = await service.plan(root, {
+      kind: "copy",
+      sourcePath: "chapters/source.tex",
+      destinationPath: "chapters/copy.tex"
+    });
+
+    await writeFile(join(root, "chapters", "copy.tex"), "created by another program\n", "utf8");
+    await expect(service.apply(root, plan.id)).rejects.toMatchObject({ code: "DESTINATION_EXISTS" });
+    expect(await readFile(join(root, "chapters", "copy.tex"), "utf8")).toBe("created by another program\n");
+    expect(await readFile(join(root, "chapters", "source.tex"), "utf8")).toBe("source\n");
+  });
+
+  it("validates every rewritten reference before undo moves any payload", async () => {
+    const root = await projectRoot();
+    await writeFile(join(root, "main.tex"), "\\input{chapters/old}\n", "utf8");
+    await writeFile(join(root, "chapters", "old.tex"), "body\n", "utf8");
+    const service = new ProjectFileService(async () => undefined);
+    const plan = await service.plan(root, {
+      kind: "rename",
+      sourcePath: "chapters/old.tex",
+      destinationPath: "chapters/new.tex"
+    });
+    const result = await service.apply(root, plan.id);
+
+    await writeFile(join(root, "main.tex"), "external VS Code edit\n", "utf8");
+    await expect(service.undo(root, result.undoId)).rejects.toMatchObject({ code: "CONCURRENT_CHANGE" });
+    expect(await readFile(join(root, "main.tex"), "utf8")).toBe("external VS Code edit\n");
+    expect(await readFile(join(root, "chapters", "new.tex"), "utf8")).toBe("body\n");
+    await expect(stat(join(root, "chapters", "old.tex"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("validates recovery snapshots before undo moves any payload", async () => {
+    const root = await projectRoot();
+    await writeFile(join(root, "main.tex"), "\\input{chapters/old}\n", "utf8");
+    await writeFile(join(root, "chapters", "old.tex"), "body\n", "utf8");
+    const service = new ProjectFileService(async () => undefined);
+    const plan = await service.plan(root, {
+      kind: "rename",
+      sourcePath: "chapters/old.tex",
+      destinationPath: "chapters/new.tex"
+    });
+    const result = await service.apply(root, plan.id);
+    const backup = join(root, ".latex-workbench", "undo", result.undoId, "references", "main.tex");
+    await writeFile(backup, "corrupt recovery snapshot\n", "utf8");
+
+    await expect(service.undo(root, result.undoId)).rejects.toMatchObject({ code: "CONCURRENT_CHANGE" });
+    expect(await readFile(join(root, "main.tex"), "utf8")).toBe("\\input{chapters/new}\n");
+    expect(await readFile(join(root, "chapters", "new.tex"), "utf8")).toBe("body\n");
+    await expect(stat(join(root, "chapters", "old.tex"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });

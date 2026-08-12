@@ -390,7 +390,8 @@ interface UndoRecord {
   source: string;
   destination?: string;
   backupPath?: string;
-  referenceBackups: Array<{ path: string; backup: string; appliedHash: string }>;
+  payloadHash: string;
+  referenceBackups: Array<{ path: string; backup: string; backupHash: string; appliedHash: string }>;
 }
 
 const referencePattern = /(\\(?:input|include|subfile|includegraphics|bibliography|addbibresource)(?:\[[^\]]*\])?\s*\{)([^{}]+)(\})/g;
@@ -512,6 +513,11 @@ export class ProjectFileService {
       this.plans.delete(planId);
       throw new FileServiceError("The preview expired. Preview the operation again.", "PLAN_EXPIRED");
     }
+    await assertRealPathInside(root, stored.source);
+    if (stored.destination) {
+      await assertRealPathInside(root, dirname(stored.destination));
+      await destinationMustNotExist(stored.destination);
+    }
     const current = await snapshotPath(stored.source);
     if (!hashesMatch(stored.plan.sourceHash, current.hash)) throw new FileServiceError("The source changed after preview.", "CONCURRENT_CHANGE", stored.source);
     for (const edit of stored.edits) {
@@ -523,14 +529,22 @@ export class ProjectFileService {
     const undoRoot = join(root, ".latex-workbench", "undo", undoId);
     await mkdir(undoRoot, { recursive: true });
     const referenceBackups: UndoRecord["referenceBackups"] = [];
+    const referenceBackupHashes = new Map<string, string>();
     for (const edit of stored.edits) {
       const original = resolveProjectPath(root, edit.filePath);
       const backup = join(undoRoot, "references", edit.filePath);
       await mkdir(dirname(backup), { recursive: true });
       await copyFile(original, backup);
+      const backupHash = await hashFile(backup);
+      if (!hashesMatch(edit.expectedHash, backupHash)) {
+        await rm(undoRoot, { recursive: true, force: true });
+        throw new FileServiceError("A LaTeX file changed while its recovery snapshot was being created.", "CONCURRENT_CHANGE", edit.filePath);
+      }
+      referenceBackupHashes.set(edit.filePath, backupHash);
     }
     let backupPath: string | undefined;
     let payloadApplied = false;
+    let copyStagingPath: string | undefined;
     try {
       if (stored.plan.kind === "trash") {
         backupPath = join(undoRoot, "payload", basename(stored.source));
@@ -539,7 +553,27 @@ export class ProjectFileService {
         await this.trashItem(stored.source);
         payloadApplied = true;
       } else if (stored.plan.kind === "copy") {
-        await cp(stored.source, stored.destination!, { recursive: true, errorOnExist: true });
+        // Copy into a private sibling first.  `fs.cp` defaults to force=true,
+        // which can otherwise overwrite a destination that appeared after the
+        // preview.  Publishing the completed staging path with rename keeps a
+        // failed copy from ever deleting or altering somebody else's target.
+        copyStagingPath = join(
+          dirname(stored.destination!),
+          `.${basename(stored.destination!)}.${process.pid}.${randomBytes(6).toString("hex")}.copy-tmp`
+        );
+        await destinationMustNotExist(copyStagingPath);
+        await cp(stored.source, copyStagingPath, { recursive: true, errorOnExist: true, force: false });
+        const [sourceAfterCopy, stagedCopy] = await Promise.all([
+          snapshotPath(stored.source),
+          snapshotPath(copyStagingPath)
+        ]);
+        if (!hashesMatch(stored.plan.sourceHash, sourceAfterCopy.hash)
+          || !hashesMatch(stored.plan.sourceHash, stagedCopy.hash)) {
+          throw new FileServiceError("The source changed while it was being copied.", "CONCURRENT_CHANGE", stored.source);
+        }
+        await destinationMustNotExist(stored.destination!);
+        await rename(copyStagingPath, stored.destination!);
+        copyStagingPath = undefined;
         payloadApplied = true;
       } else {
         await mkdir(dirname(stored.destination!), { recursive: true });
@@ -548,38 +582,76 @@ export class ProjectFileService {
       }
       for (const edit of stored.edits) {
         const written = await writeProjectFile({ projectRoot: root, path: edit.filePath, content: edit.content, expectedHash: edit.expectedHash });
-        referenceBackups.push({ path: edit.filePath, backup: join(undoRoot, "references", edit.filePath), appliedHash: written.hash });
+        referenceBackups.push({
+          path: edit.filePath,
+          backup: join(undoRoot, "references", edit.filePath),
+          backupHash: referenceBackupHashes.get(edit.filePath)!,
+          appliedHash: written.hash
+        });
       }
     } catch (error) {
+      if (copyStagingPath) await rm(copyStagingPath, { recursive: true, force: true });
       const rollbackFailures: string[] = [];
-      for (const edit of [...stored.edits].reverse()) {
+      // Validate every path involved in rollback before changing any of them.
+      // If VS Code touched even one applied file, keep the recovery snapshot
+      // intact and make no rollback mutation rather than overwrite new work.
+      for (const reference of referenceBackups) {
         try {
-          await copyFile(join(undoRoot, "references", edit.filePath), resolveProjectPath(root, edit.filePath));
-        } catch (rollbackError) {
-          rollbackFailures.push(`${edit.filePath}: ${String(rollbackError)}`);
+          if (!hashesMatch(reference.appliedHash, await hashFile(resolveProjectPath(root, reference.path)))) {
+            rollbackFailures.push(`${reference.path}: changed after it was rewritten`);
+          }
+          if (!hashesMatch(reference.backupHash, await hashFile(reference.backup))) {
+            rollbackFailures.push(`${reference.path}: recovery snapshot changed`);
+          }
+        } catch (validationError) {
+          rollbackFailures.push(`${reference.path}: ${String(validationError)}`);
         }
       }
-      try {
-        if (stored.plan.kind === "trash" && payloadApplied && backupPath) {
-          await destinationMustNotExist(stored.source);
-          await cp(backupPath, stored.source, { recursive: true, errorOnExist: true });
-        } else if (stored.plan.kind === "copy" && stored.destination) {
-          await rm(stored.destination, { recursive: true, force: true });
-        } else if (payloadApplied && stored.destination) {
-          await destinationMustNotExist(stored.source);
-          await rename(stored.destination, stored.source);
+      if (payloadApplied) {
+        try {
+          if (stored.plan.kind === "trash") {
+            await destinationMustNotExist(stored.source);
+            if (!backupPath || !hashesMatch(stored.plan.sourceHash, (await snapshotPath(backupPath)).hash)) {
+              rollbackFailures.push("payload: recovery snapshot changed");
+            }
+          } else if (stored.destination) {
+            const destinationSnapshot = await snapshotPath(stored.destination);
+            if (!hashesMatch(stored.plan.sourceHash, destinationSnapshot.hash)) {
+              rollbackFailures.push("payload: destination changed after the operation");
+            }
+            if (stored.plan.kind !== "copy") await destinationMustNotExist(stored.source);
+          }
+        } catch (validationError) {
+          rollbackFailures.push(`payload: ${String(validationError)}`);
         }
-      } catch (rollbackError) {
-        rollbackFailures.push(`payload: ${String(rollbackError)}`);
       }
       this.plans.delete(planId);
       if (rollbackFailures.length) {
         throw new FileServiceError(`The operation failed and automatic rollback was incomplete: ${rollbackFailures.join("; ")}`, "CONCURRENT_CHANGE", stored.source);
       }
+
+      for (const reference of [...referenceBackups].reverse()) {
+        await copyFile(reference.backup, resolveProjectPath(root, reference.path));
+      }
+      if (stored.plan.kind === "trash" && payloadApplied && backupPath) {
+        await cp(backupPath, stored.source, { recursive: true, errorOnExist: true, force: false });
+      } else if (stored.plan.kind === "copy" && payloadApplied && stored.destination) {
+        await rm(stored.destination, { recursive: true, force: true });
+      } else if (payloadApplied && stored.destination) {
+        await rename(stored.destination, stored.source);
+      }
       await rm(undoRoot, { recursive: true, force: true });
       throw error;
     }
-    this.undoRecords.set(undoId, { root, kind: stored.plan.kind, source: stored.source, destination: stored.destination, backupPath, referenceBackups });
+    this.undoRecords.set(undoId, {
+      root,
+      kind: stored.plan.kind,
+      source: stored.source,
+      destination: stored.destination,
+      backupPath,
+      payloadHash: stored.plan.sourceHash,
+      referenceBackups
+    });
     this.plans.delete(planId);
     return {
       undoId,
@@ -596,21 +668,41 @@ export class ProjectFileService {
     const root = resolve(projectRoot);
     const record = this.undoRecords.get(undoId);
     if (!record || record.root !== root) throw new FileServiceError("This undo operation is no longer available.", "PLAN_EXPIRED");
+
+    // Undo is all-or-nothing with respect to external edits: validate every
+    // reference and payload before the first restore, move or recycle action.
+    for (const reference of record.referenceBackups) {
+      const destination = resolveProjectPath(root, reference.path);
+      if (!hashesMatch(reference.appliedHash, await hashFile(destination))) {
+        throw new FileServiceError("A rewritten LaTeX reference changed after the operation; undo stopped before changing anything.", "CONCURRENT_CHANGE", destination);
+      }
+      if (!hashesMatch(reference.backupHash, await hashFile(reference.backup))) {
+        throw new FileServiceError("A LaTeX recovery snapshot changed; undo stopped before changing anything.", "CONCURRENT_CHANGE", reference.backup);
+      }
+    }
     if (record.kind === "trash") {
       await destinationMustNotExist(record.source);
-      await cp(record.backupPath!, record.source, { recursive: true, errorOnExist: true });
+      if (!record.backupPath || !hashesMatch(record.payloadHash, (await snapshotPath(record.backupPath)).hash)) {
+        throw new FileServiceError("The recovery snapshot changed; undo stopped before changing anything.", "CONCURRENT_CHANGE", record.backupPath);
+      }
+    } else {
+      const destinationSnapshot = await snapshotPath(record.destination!);
+      if (!hashesMatch(record.payloadHash, destinationSnapshot.hash)) {
+        throw new FileServiceError("The operated file changed after the operation; undo stopped before changing anything.", "CONCURRENT_CHANGE", record.destination);
+      }
+      if (record.kind !== "copy") await destinationMustNotExist(record.source);
+    }
+
+    if (record.kind === "trash") {
+      await cp(record.backupPath!, record.source, { recursive: true, errorOnExist: true, force: false });
     } else if (record.kind === "copy") {
       await this.trashItem(record.destination!);
     } else {
-      await destinationMustNotExist(record.source);
       await rename(record.destination!, record.source);
     }
     const revertedReferenceFiles: string[] = [];
     for (const reference of record.referenceBackups) {
       const destination = resolveProjectPath(root, reference.path);
-      if (!hashesMatch(reference.appliedHash, await hashFile(destination))) {
-        throw new FileServiceError("A rewritten LaTeX reference changed after the operation; undo stopped.", "CONCURRENT_CHANGE", destination);
-      }
       await copyFile(reference.backup, destination);
       revertedReferenceFiles.push(reference.path);
     }

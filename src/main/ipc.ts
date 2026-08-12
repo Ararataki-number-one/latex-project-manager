@@ -70,6 +70,7 @@ export interface IpcRuntimeController {
   syncAll(): Promise<void>;
   pauseSync(): Promise<void>;
   resumeSync(): Promise<void>;
+  shutdown(): Promise<void>;
 }
 
 interface IpcRuntimeOptions {
@@ -859,6 +860,20 @@ export function registerIpcHandlers(
     if (error) throw new Error(error);
   });
 
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => {
+    if (!shutdownPromise) {
+      shutdownPromise = (async () => {
+        try {
+          await github.dispose();
+        } finally {
+          catalog.close();
+        }
+      })();
+    }
+    return shutdownPromise;
+  };
+
   runtimeController = {
     runtimeSettings: () => catalog.runtimeSettings(),
     syncAll: async () => { await github.syncAll(false); },
@@ -871,12 +886,8 @@ export function registerIpcHandlers(
       await github.resumeAll();
       const settings = catalog.setRuntimeSettings({ ...catalog.runtimeSettings(), syncPaused: false });
       options.onRuntimeSettingsChanged?.(settings);
-    }
+    },
+    shutdown
   };
-
-  app.once("before-quit", () => {
-    void github.dispose();
-    catalog.close();
-  });
   return runtimeController;
 }

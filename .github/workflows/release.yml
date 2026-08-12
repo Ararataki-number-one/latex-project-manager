@@ -10,7 +10,26 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify release versions agree
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          ANDROID_VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android-viewer/app/build.gradle.kts | head -n 1)"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            TAG_VERSION="$PACKAGE_VERSION"
+          fi
+          test -n "$PACKAGE_VERSION"
+          test "$PACKAGE_VERSION" = "$ANDROID_VERSION"
+          test "$PACKAGE_VERSION" = "$TAG_VERSION"
+
   windows:
+    needs: validate
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -49,6 +68,7 @@ jobs:
           if-no-files-found: error
 
   android:
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

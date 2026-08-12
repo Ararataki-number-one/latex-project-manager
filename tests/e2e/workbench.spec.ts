@@ -265,3 +265,13 @@ test("390px 下项目库和管理页都没有横向溢出", async ({ page }) => 
   await expect(page.getByRole("heading", { name: "原始文稿" })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
+
+test("跟随系统主题会响应系统深浅色变化", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-preference", "system");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});

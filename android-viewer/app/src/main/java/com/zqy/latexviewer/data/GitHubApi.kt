@@ -62,7 +62,10 @@ class GitHubApi(
         require(clientId.isNotBlank()) { "此构建尚未配置 GitHub 登录；仍可添加公开项目或使用高级令牌" }
         val response = postForm(
             "$githubRoot/login/device/code",
-            mapOf("client_id" to clientId, "scope" to "repo read:user")
+            // This client ID belongs to a GitHub App. Its installation controls
+            // the exact repository permissions (Metadata/Contents read-only), so
+            // requesting OAuth `repo` here would be both broader and misleading.
+            mapOf("client_id" to clientId)
         )
         val value = JSONObject(response)
         GitHubDeviceAuthorization(
@@ -283,15 +286,8 @@ class GitHubApi(
         )
         val release = JSONObject(payload)
         val assets = release.optJSONArray("assets") ?: JSONArray()
-        val asset = (0 until assets.length())
-            .map { assets.getJSONObject(it) }
-            .firstOrNull {
-                it.optString("name").endsWith(".apk", ignoreCase = true) &&
-                    it.optString("name").contains("android", ignoreCase = true)
-            }
-            ?: throw GitHubApiException("最新 Release 中没有 Android APK")
-        val name = asset.getString("name")
         val releaseTag = release.optString("tag_name")
+        require(releaseTag.isNotBlank()) { "最新 Release 缺少版本标签" }
         val manifestAsset = (0 until assets.length())
             .map { assets.getJSONObject(it) }
             .firstOrNull { it.optString("name") == ReleaseSecurity.MANIFEST_NAME }
@@ -299,19 +295,21 @@ class GitHubApi(
         val manifestRaw = request(
             manifestAsset.getString("url"),
             null,
-            RAW_ACCEPT,
+            BINARY_ACCEPT,
             MAX_RELEASE_MANIFEST_BYTES
         )
         val verified = runCatching { ReleaseSecurity.verifyManifest(manifestRaw, releaseTag) }
             .getOrElse { throw GitHubApiException(it.message ?: "更新清单签名验证失败", it) }
-        require(verified.name == name) { "签名发布清单指向了不同的 Android 安装包" }
-        val version = ANDROID_VERSION.find(name)?.groupValues?.get(1)
-            ?: releaseTag.removePrefix("v")
+        val asset = (0 until assets.length())
+            .map { assets.getJSONObject(it) }
+            .firstOrNull { it.optString("name") == verified.name }
+            ?: throw GitHubApiException("签名发布清单中的 Android 安装包不存在")
+        require(asset.optLong("size") == verified.size) { "Android 安装包大小与签名发布清单不一致" }
         AndroidReleaseAsset(
-            version = version,
+            version = verified.version,
             releaseTag = releaseTag,
             releaseUrl = release.optString("html_url", "https://github.com/$UPDATE_REPOSITORY/releases/latest"),
-            name = name,
+            name = verified.name,
             apiUrl = asset.getString("url"),
             downloadUrl = asset.getString("browser_download_url"),
             size = verified.size,
@@ -915,7 +913,6 @@ class GitHubApi(
         const val MAX_DOWNLOAD_BYTES = 4L * 1024 * 1024 * 1024
         const val MOBILE_INDEX_PATH = ".latex-project.json"
         const val UPDATE_REPOSITORY = "Ararataki-number-one/latex-project-manager"
-        val ANDROID_VERSION = Regex("(?i)([0-9]+\\.[0-9]+\\.[0-9]+)(?=\\.apk$)")
         val REPOSITORY_PART = Regex("[A-Za-z0-9_.-]+")
         val COMMIT_SHA = Regex("(?i)[0-9a-f]{40,64}")
         val GIT_OBJECT_SHA = Regex("(?i)[0-9a-f]{40}")

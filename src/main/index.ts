@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray } from "electron";
 import { registerIpcHandlers, type IpcRuntimeController } from "./ipc";
 import type { AppRuntimeSettings, GitHubSyncEvent } from "../shared/types";
+import { createAppShutdownController } from "./services/app-shutdown";
 import { isTrustedRendererUrl, rendererContentSecurityPolicy } from "./services/electron-security";
 
 let mainWindow: BrowserWindow | null = null;
@@ -169,5 +170,11 @@ if (!app.requestSingleInstanceLock()) {
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin" && (!runtime || !runtime.runtimeSettings().closeToTray)) app.quit();
   });
-  app.on("before-quit", () => { quitting = true; });
+  const shutdown = createAppShutdownController({
+    onBegin: () => { quitting = true; },
+    shutdown: async () => { await runtime?.shutdown(); },
+    onError: (error) => { console.error("Application shutdown did not complete cleanly.", error); },
+    exit: (exitCode) => app.exit(exitCode)
+  });
+  app.on("before-quit", (event) => shutdown.handleBeforeQuit(event));
 }

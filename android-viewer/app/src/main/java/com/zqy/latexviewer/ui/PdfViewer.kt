@@ -987,6 +987,12 @@ private class PdfPageBitmapCache(
     }
 
     private fun render(pageIndex: Int, requestedWidth: Int): Bitmap = synchronized(renderLock) {
+        // acquire() may have passed its first closed check before close() won the
+        // render lock. Recheck while holding the same lock used by close() before
+        // entering Pdfium native code.
+        synchronized(lock) {
+            check(!closed) { "PDF 页面缓存已关闭" }
+        }
         val page = document.openPage(pageIndex) ?: throw IOException("第 ${pageIndex + 1} 页无法加载")
         page.use {
             val (targetWidth, targetHeight) = calculateRenderSize(
@@ -1024,6 +1030,15 @@ private class PdfPageBitmapCache(
             val entry = entries[key]
             if (entry != null && entry.bitmap === bitmap) {
                 entry.references = (entry.references - 1).coerceAtLeast(0)
+                // A document can leave composition while a page Image still owns
+                // its final frame. Do not recycle that bitmap from close(); retire
+                // it when the last lease is actually released instead.
+                if (closed && entry.references == 0) {
+                    entries.remove(key)
+                    bytes -= entry.bitmap.allocationByteCount.toLong()
+                    entry.bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+                    return
+                }
             }
             trimLocked()
         }
@@ -1042,12 +1057,23 @@ private class PdfPageBitmapCache(
     }
 
     override fun close() {
-        synchronized(lock) {
-            if (closed) return
-            closed = true
-            entries.values.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
-            entries.clear()
-            bytes = 0L
+        // Pdfium is native code. Closing the PdfDocument while renderPageBitmap is
+        // running can crash the process rather than throw a Kotlin exception. Take
+        // the render lock first so PdfPreviewScreen may safely close the document
+        // immediately after this cache has drained active native rendering.
+        synchronized(renderLock) {
+            synchronized(lock) {
+                if (closed) return
+                closed = true
+                val iterator = entries.entries.iterator()
+                while (iterator.hasNext()) {
+                    val entry = iterator.next().value
+                    if (entry.references > 0) continue
+                    iterator.remove()
+                    bytes -= entry.bitmap.allocationByteCount.toLong()
+                    entry.bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+                }
+            }
         }
     }
 }

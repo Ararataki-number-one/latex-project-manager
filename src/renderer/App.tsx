@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
+  AlertTriangle,
   BookOpenText,
   Check,
   CheckCircle2,
@@ -40,7 +41,7 @@ import {
   X
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
-import type { AppRuntimeSettings, AppUpdateStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
+import type { AppRuntimeSettings, AppUpdateStatus, CatalogStatus, GitHubAccountStatus, GitHubRepositoryVisibility, GitHubSyncStatus, ProjectStorageInfo, ProjectSummary, ScanCandidate, TemplateInfo, TemporaryCleanupPreview } from "@/shared/types";
 import { createWorkbench } from "./demo";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { ProjectView } from "./ProjectView";
@@ -1253,6 +1254,7 @@ export default function App() {
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [showOnboardingHint, setShowOnboardingHint] = useState(false);
   const [openImportNonce, setOpenImportNonce] = useState(0);
+  const [catalogStatus, setCatalogStatus] = useState<CatalogStatus | null>(null);
 
   function closeCompactNavigation() {
     if (window.matchMedia("(max-width: 780px)").matches) setNavOpen(false);
@@ -1264,10 +1266,11 @@ export default function App() {
   }
 
   useEffect(() => {
-    Promise.all([runtime.api.library.list(), runtime.api.runtime.settings()])
-      .then(([items, settings]) => {
+    Promise.all([runtime.api.library.list(), runtime.api.runtime.settings(), runtime.api.library.catalogStatus()])
+      .then(([items, settings, nextCatalogStatus]) => {
         setProjects(items);
         setRuntimeSettings(settings);
+        setCatalogStatus(nextCatalogStatus);
         if (!settings.onboardingCompleted) {
           if (items.length === 0) setOnboardingOpen(true);
           else setShowOnboardingHint(true);
@@ -1285,11 +1288,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = runtimeSettings.theme;
+    const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      document.documentElement.dataset.theme = runtimeSettings.theme === "system"
+        ? (systemDark.matches ? "dark" : "light")
+        : runtimeSettings.theme;
+      document.documentElement.dataset.themePreference = runtimeSettings.theme;
+    };
+    applyTheme();
+    if (runtimeSettings.theme === "system") systemDark.addEventListener("change", applyTheme);
     document.documentElement.dataset.density = runtimeSettings.density;
     document.documentElement.dataset.glass = runtimeSettings.glassMode;
     return () => {
+      systemDark.removeEventListener("change", applyTheme);
       delete document.documentElement.dataset.theme;
+      delete document.documentElement.dataset.themePreference;
       delete document.documentElement.dataset.density;
       delete document.documentElement.dataset.glass;
     };
@@ -1387,10 +1400,10 @@ export default function App() {
           <button className={syncCenterOpen ? "active" : ""} aria-current={syncCenterOpen ? "page" : undefined} onClick={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); closeCompactNavigation(); }}><Cloud size={18} /><span>同步中心</span></button>
           <button className={settingsOpen ? "active" : ""} aria-current={settingsOpen ? "page" : undefined} onClick={() => { setSelected(null); setSyncCenterOpen(false); setSettingsOpen(true); closeCompactNavigation(); }}><Settings2 size={18} /><span>设置</span></button>
         </nav>
-        <div className="toolchain-card">
-          <span className="toolchain-indicator ready" />
-          <div><strong>本地项目索引</strong><span>GitHub 为可选同步</span></div>
-          <HardDrive size={16} />
+        <div className={`toolchain-card ${catalogStatus && !catalogStatus.persistent ? "catalog-temporary" : ""}`}>
+          <span className={`toolchain-indicator ${catalogStatus && !catalogStatus.persistent ? "warning" : "ready"}`} />
+          <div><strong>{catalogStatus && !catalogStatus.persistent ? "临时项目索引" : "本地项目索引"}</strong><span>{catalogStatus && !catalogStatus.persistent ? "关闭客户端后不会保存" : "GitHub 为可选同步"}</span></div>
+          {catalogStatus && !catalogStatus.persistent ? <AlertTriangle size={16} /> : <HardDrive size={16} />}
         </div>
         {runtime.isDemo && <div className="demo-badge">浏览器演示 · 只读数据</div>}
       </aside>
@@ -1405,6 +1418,15 @@ export default function App() {
           <span className="window-drag-space" />
           <span className={`local-only ${runtimeSettings.syncPaused ? "sync-paused" : ""}`}>{runtimeSettings.syncPaused ? <PauseCircle size={13} /> : <ShieldCheck size={13} />}{runtimeSettings.syncPaused ? "同步已暂停" : "本地优先"}</span>
         </div>
+        {catalogStatus && (!catalogStatus.persistent || catalogStatus.warnings.length > 0) && (
+          <aside className="catalog-persistence-warning" role="alert" aria-label="项目索引存储警告">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>{catalogStatus.persistent ? "项目索引需要注意" : "当前使用临时项目索引"}</strong>
+              <p>{catalogStatus.warnings.join("；") || "数据库不可用。本次添加的项目、标签和设置在关闭客户端后不会保留。"}</p>
+            </div>
+          </aside>
+        )}
         {selected ? (
           <ProjectView key={selected.id} api={runtime.api} project={selected} isDemo={runtime.isDemo} initialTab={selectedProjectTab} onBack={() => goLibrary()} onNotify={setToast} onProjectChange={(updated) => { setSelected(updated); setProjects((current) => current.map((project) => project.id === updated.id ? updated : project)); }} />
         ) : settingsOpen ? (

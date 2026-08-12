@@ -8019,6 +8019,43 @@ html[data-glass="off"] .dialog-card {
   backdrop-filter: none;
 }
 
+.catalog-persistence-warning {
+  align-items: flex-start;
+  background: color-mix(in srgb, var(--yellow-soft) 88%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--yellow) 35%, var(--border));
+  color: var(--text);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 11px 20px;
+}
+
+.catalog-persistence-warning > svg {
+  color: var(--yellow);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.catalog-persistence-warning p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 2px;
+}
+
+.toolchain-card.catalog-temporary {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+}
+
+.toolchain-card.catalog-temporary > svg,
+.toolchain-indicator.warning {
+  color: var(--yellow);
+}
+
+.toolchain-indicator.warning {
+  background: var(--yellow);
+}
+
 .library-toolbar {
   align-items: center;
   display: flex;
