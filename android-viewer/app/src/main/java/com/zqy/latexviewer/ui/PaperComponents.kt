@@ -240,7 +240,7 @@ internal fun PaperEmptyState(
             Button(
                 onClick = onAction,
                 modifier = Modifier
-                    .height(48.dp)
+                    .heightIn(min = 48.dp)
                     .widthIn(min = 128.dp)
             ) {
                 Text(actionLabel)
@@ -284,7 +284,7 @@ internal fun PaperBottomBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(68.dp)
+                    .heightIn(min = 68.dp)
             ) {
                 PaperBottomItem(
                     label = "阅读",

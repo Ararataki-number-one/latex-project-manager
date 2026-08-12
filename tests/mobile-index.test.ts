@@ -66,7 +66,11 @@ describe("mobile project index", () => {
 
     expect(saved.updatedAt).not.toBe(index().updatedAt);
     expect(bytes.includes(13)).toBe(false);
-    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({ defaultOutputId: "mobile-target-main" });
+    expect(JSON.parse(bytes.toString("utf8"))).toMatchObject({
+      schemaVersion: 2,
+      defaultOutputId: "mobile-target-main",
+      outputs: [{ size: 9, blobSha: expect.stringMatching(/^[a-f0-9]{40}$/), generatedAt: expect.any(String) }]
+    });
     await expect(service.read(root)).resolves.toMatchObject({ projectId: "project-mobile" });
   });
 
@@ -78,6 +82,21 @@ describe("mobile project index", () => {
     temporaryDirectories.push(root);
     await writeFile(join(root, ".latex-project.json"), "{broken", "utf8");
     await expect(new MobileIndexService().read(root)).rejects.toThrow(/有效的 JSON/);
+  });
+
+  it("reads both v1 and complete v2 indexes but rejects incomplete v2 metadata", () => {
+    expect(parseMobileProjectIndex(index()).schemaVersion).toBe(1);
+    expect(parseMobileProjectIndex({
+      ...index(),
+      schemaVersion: 2,
+      outputs: [{
+        ...index().outputs[0],
+        blobSha: "a".repeat(40),
+        size: 12,
+        generatedAt: "2026-08-11T00:00:00.000Z"
+      }]
+    }).schemaVersion).toBe(2);
+    expect(() => parseMobileProjectIndex({ ...index(), schemaVersion: 2 })).toThrow(/blobSha/);
   });
 
   it("does not suggest references or isolated build output", async () => {

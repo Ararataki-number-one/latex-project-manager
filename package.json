@@ -1,6 +1,6 @@
 {
   "name": "latex-workbench",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "private": true,
   "description": "Windows-first local LaTeX project manager",
   "main": "out/main/index.js",
@@ -19,7 +19,9 @@
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "package:portable": "pnpm build && electron-builder --win portable --publish never",
-    "package:windows": "pnpm build && electron-builder --win nsis portable --publish never"
+    "package:windows": "pnpm build && electron-builder --win nsis portable --publish never",
+    "release:keygen": "node scripts/generate-release-signing-key.mjs",
+    "release:manifest": "node scripts/sign-release-manifest.mjs"
   },
   "dependencies": {
     "chokidar": "5.0.0",

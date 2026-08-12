@@ -26,9 +26,13 @@ import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.PersistentDownloadKind
+import com.zqy.latexviewer.model.PersistentDownloadState
+import com.zqy.latexviewer.model.PersistentDownloadTask
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import org.json.JSONObject
 import java.util.Base64
 import java.util.UUID
@@ -53,6 +57,8 @@ data class BackgroundDownloadTask(
     val branch: String? = null,
     val path: String? = null,
     val sha: String? = null,
+    val commitSha: String? = null,
+    val lfsOidSha256: String? = null,
     val size: Long = -1,
     val downloadUrl: String? = null,
     val cacheKey: String? = null,
@@ -62,7 +68,9 @@ data class BackgroundDownloadTask(
     val releaseUrl: String? = null,
     val assetApiUrl: String? = null,
     val assetDownloadUrl: String? = null,
-    val assetSha256: String? = null
+    val assetSha256: String? = null,
+    val assetManifestVerified: Boolean = false,
+    val assetCertificateSha256: String? = null
 ) {
     val repositoryFullName: String?
         get() = if (owner.isNullOrBlank() || repository.isNullOrBlank()) null else "$owner/$repository"
@@ -85,6 +93,8 @@ data class BackgroundDownloadTask(
                         branch = value.optionalString("branch"),
                         path = value.optionalString("path"),
                         sha = value.optionalString("sha"),
+                        commitSha = value.optionalString("commitSha"),
+                        lfsOidSha256 = value.optionalString("lfsOidSha256"),
                         size = value.optLong("size", -1),
                         downloadUrl = value.optionalString("downloadUrl"),
                         cacheKey = value.optionalString("cacheKey"),
@@ -94,7 +104,9 @@ data class BackgroundDownloadTask(
                         releaseUrl = value.optionalString("releaseUrl"),
                         assetApiUrl = value.optionalString("assetApiUrl"),
                         assetDownloadUrl = value.optionalString("assetDownloadUrl"),
-                        assetSha256 = value.optionalString("assetSha256")
+                        assetSha256 = value.optionalString("assetSha256"),
+                        assetManifestVerified = value.optBoolean("assetManifestVerified", false),
+                        assetCertificateSha256 = value.optionalString("assetCertificateSha256")
                     )
                 }.getOrNull()
             }
@@ -112,12 +124,41 @@ data class BackgroundDownloadSnapshot(
 )
 
 class BackgroundDownloadManager(context: Context) {
-    private val workManager = WorkManager.getInstance(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val workManager = WorkManager.getInstance(appContext)
+    private val preferences = AppPreferences(appContext)
+    private val enqueueLock = Any()
 
     val snapshots: Flow<List<BackgroundDownloadSnapshot>> = workManager
         .getWorkInfosByTagFlow(DOWNLOAD_TAG)
         .map { workInfos ->
             workInfos.mapNotNull(::snapshotOf).sortedByDescending { it.task.createdAt }
+        }
+        .onEach { values ->
+            values.forEach { snapshot ->
+                val persistentState = when (snapshot.state) {
+                    WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> PersistentDownloadState.WAITING_FOR_NETWORK
+                    WorkInfo.State.RUNNING -> PersistentDownloadState.RUNNING
+                    WorkInfo.State.SUCCEEDED -> PersistentDownloadState.SUCCEEDED
+                    WorkInfo.State.FAILED -> PersistentDownloadState.FAILED
+                    WorkInfo.State.CANCELLED -> PersistentDownloadState.CANCELLED
+                }
+                preferences.saveDownloadTask(
+                    snapshot.task.toPersistent(
+                        snapshot.workId.toString(),
+                        persistentState,
+                        snapshot.downloaded,
+                        snapshot.total,
+                        snapshot.error
+                    ),
+                    snapshot.task.toJson().toString()
+                )
+            }
+        }
+
+    val persistentTasks: Flow<List<PersistentDownloadTask>> =
+        ViewerDatabase.get(appContext).viewerDao().observeDownloadTasks().map { values ->
+            values.map(DownloadTaskEntity::toPersistentModel)
         }
 
     fun enqueueFile(
@@ -136,6 +177,8 @@ class BackgroundDownloadManager(context: Context) {
             branch = repository.defaultBranch,
             path = item.path,
             sha = item.sha,
+            commitSha = item.commitSha ?: repository.commitSha,
+            lfsOidSha256 = item.lfsOidSha256,
             size = item.size,
             downloadUrl = item.downloadUrl
         )
@@ -150,7 +193,8 @@ class BackgroundDownloadManager(context: Context) {
             owner = repository.owner,
             repository = repository.name,
             isPrivate = repository.isPrivate,
-            branch = repository.defaultBranch
+            branch = repository.defaultBranch,
+            commitSha = repository.commitSha
         )
     )
 
@@ -171,6 +215,8 @@ class BackgroundDownloadManager(context: Context) {
             branch = repository.defaultBranch,
             path = item.path,
             sha = item.sha,
+            commitSha = item.commitSha ?: repository.commitSha,
+            lfsOidSha256 = item.lfsOidSha256,
             size = item.size,
             downloadUrl = item.downloadUrl,
             cacheKey = "${repository.owner}-${repository.name}-${item.sha}.pdf",
@@ -190,7 +236,9 @@ class BackgroundDownloadManager(context: Context) {
             releaseUrl = asset.releaseUrl,
             assetApiUrl = asset.apiUrl,
             assetDownloadUrl = asset.downloadUrl,
-            assetSha256 = asset.sha256
+            assetSha256 = asset.sha256,
+            assetManifestVerified = asset.manifestVerified,
+            assetCertificateSha256 = asset.certificateSha256
         )
     )
 
@@ -198,7 +246,18 @@ class BackgroundDownloadManager(context: Context) {
         workManager.cancelWorkById(workId)
     }
 
-    private fun enqueue(task: BackgroundDownloadTask): UUID {
+    fun retry(workId: String): UUID? {
+        val (_, payload) = preferences.downloadTask(workId) ?: return null
+        val task = BackgroundDownloadTask.fromJson(payload) ?: return null
+        return enqueue(task.copy(createdAt = System.currentTimeMillis()))
+    }
+
+    private fun enqueue(task: BackgroundDownloadTask): UUID = synchronized(enqueueLock) {
+        val uniqueKey = task.uniqueIdentity()
+        val existingId = preferences.activeDownloadTask(uniqueKey)?.first?.id
+        if (existingId != null) {
+            runCatching { UUID.fromString(existingId) }.getOrNull()?.let { return@synchronized it }
+        }
         val payload = task.toJson().toString()
         val request = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(workDataOf(KEY_TASK to payload))
@@ -207,6 +266,10 @@ class BackgroundDownloadManager(context: Context) {
             .addTag(DOWNLOAD_TAG)
             .addTag(metadataTag(payload))
             .build()
+        preferences.saveDownloadTask(
+            task.toPersistent(request.id.toString(), PersistentDownloadState.QUEUED),
+            payload
+        )
         workManager.enqueueUniqueWork(
             task.uniqueWorkName(),
             ExistingWorkPolicy.KEEP,
@@ -262,6 +325,11 @@ class DownloadWorker(
         val task = BackgroundDownloadTask.fromJson(inputData.getString(BackgroundDownloadManager.KEY_TASK))
             ?: return Result.failure(workDataOf(BackgroundDownloadManager.KEY_ERROR to "下载任务信息已损坏"))
         val expectedTotal = task.size.takeIf { it > 0 } ?: -1L
+        val preferences = AppPreferences(applicationContext)
+        preferences.saveDownloadTask(
+            task.toPersistent(id.toString(), PersistentDownloadState.RUNNING, total = expectedTotal),
+            task.toJson().toString()
+        )
         createNotificationChannel()
         setForeground(foregroundInfo(task, 0, expectedTotal))
         publishProgress(task, 0, expectedTotal, force = true)
@@ -308,8 +376,13 @@ class DownloadWorker(
                 }
                 BackgroundDownloadKind.APP_UPDATE -> {
                     val asset = task.releaseAsset()
+                    require(asset.manifestVerified && !asset.sha256.isNullOrBlank()) {
+                        "更新缺少有效签名发布清单，已拒绝下载"
+                    }
                     api.downloadAndroidUpdate(asset, staging, onProgress)
                     val file = store.commitUpdateFromFile(asset, staging)
+                    ReleaseSecurity.verifyDownloadedApk(applicationContext, file,
+                        VerifiedAndroidReleaseAsset(asset.name, asset.size, asset.sha256, asset.certificateSha256))
                     workDataOf(
                         BackgroundDownloadManager.KEY_OUTPUT_NAME to task.name,
                         BackgroundDownloadManager.KEY_OUTPUT_PATH to file.absolutePath,
@@ -319,18 +392,47 @@ class DownloadWorker(
                 }
             }
             notifyCompleted(task)
+            preferences.saveDownloadTask(
+                task.toPersistent(
+                    id.toString(),
+                    PersistentDownloadState.SUCCEEDED,
+                    downloaded = output.getLong(BackgroundDownloadManager.KEY_OUTPUT_SIZE, task.size.coerceAtLeast(0)),
+                    total = output.getLong(BackgroundDownloadManager.KEY_OUTPUT_SIZE, task.size)
+                ),
+                task.toJson().toString()
+            )
             Result.success(output)
         } catch (cancelled: CancellationException) {
             DownloadStore(applicationContext).discardStaging(
                 DownloadStore(applicationContext).stagingFile(id.toString())
             )
+            preferences.saveDownloadTask(
+                task.toPersistent(id.toString(), PersistentDownloadState.CANCELLED, error = "已取消"),
+                task.toJson().toString()
+            )
             throw cancelled
         } catch (failure: Throwable) {
             if (runAttemptCount < MAX_RETRY_ATTEMPTS && failure.isRetryableDownloadFailure()) {
+                preferences.saveDownloadTask(
+                    task.toPersistent(
+                        id.toString(),
+                        PersistentDownloadState.WAITING_FOR_NETWORK,
+                        error = failure.message
+                    ),
+                    task.toJson().toString()
+                )
                 Result.retry()
             } else {
                 val store = DownloadStore(applicationContext)
                 store.discardStaging(store.stagingFile(id.toString()))
+                preferences.saveDownloadTask(
+                    task.toPersistent(
+                        id.toString(),
+                        PersistentDownloadState.FAILED,
+                        error = failure.message ?: "下载失败，请稍后重试"
+                    ),
+                    task.toJson().toString()
+                )
                 Result.failure(workDataOf(
                     BackgroundDownloadManager.KEY_ERROR to (failure.message ?: "下载失败，请稍后重试")
                 ))
@@ -345,6 +447,17 @@ class DownloadWorker(
             BackgroundDownloadManager.KEY_TOTAL to total
         )
         runCatching { setProgressAsync(progress) }
+        runCatching {
+            AppPreferences(applicationContext).saveDownloadTask(
+                task.toPersistent(
+                    id.toString(),
+                    PersistentDownloadState.RUNNING,
+                    downloaded,
+                    total
+                ),
+                task.toJson().toString()
+            )
+        }
         runCatching { notificationManager.notify(notificationId, notification(task, downloaded, total, true)) }
     }
 
@@ -441,7 +554,8 @@ private fun BackgroundDownloadTask.repositoryModel(): GitHubRepository = GitHubR
     defaultBranch = branch ?: "main",
     updatedAt = "",
     htmlUrl = "https://github.com/${repositoryFullName}",
-    sizeKb = 0
+    sizeKb = 0,
+    commitSha = commitSha
 )
 
 private fun BackgroundDownloadTask.contentModel(): GitHubContent = GitHubContent(
@@ -451,7 +565,10 @@ private fun BackgroundDownloadTask.contentModel(): GitHubContent = GitHubContent
     size = size,
     sha = sha.orEmpty(),
     htmlUrl = repositoryFullName?.let { "https://github.com/$it/blob/${branch ?: "main"}/$path" },
-    downloadUrl = downloadUrl
+    downloadUrl = downloadUrl,
+    commitSha = commitSha,
+    gitObjectSha = sha.orEmpty(),
+    lfsOidSha256 = lfsOidSha256
 )
 
 private fun BackgroundDownloadTask.releaseAsset(): AndroidReleaseAsset = AndroidReleaseAsset(
@@ -462,7 +579,9 @@ private fun BackgroundDownloadTask.releaseAsset(): AndroidReleaseAsset = Android
     apiUrl = assetApiUrl ?: error("更新下载地址缺失"),
     downloadUrl = assetDownloadUrl.orEmpty(),
     size = size,
-    sha256 = assetSha256
+    sha256 = assetSha256,
+    manifestVerified = assetManifestVerified,
+    certificateSha256 = assetCertificateSha256
 )
 
 private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
@@ -477,6 +596,8 @@ private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
     .put("branch", branch)
     .put("path", path)
     .put("sha", sha)
+    .put("commitSha", commitSha)
+    .put("lfsOidSha256", lfsOidSha256)
     .put("size", size)
     .put("downloadUrl", downloadUrl)
     .put("cacheKey", cacheKey)
@@ -487,16 +608,64 @@ private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
     .put("assetApiUrl", assetApiUrl)
     .put("assetDownloadUrl", assetDownloadUrl)
     .put("assetSha256", assetSha256)
+    .put("assetManifestVerified", assetManifestVerified)
+    .put("assetCertificateSha256", assetCertificateSha256)
 
-private fun BackgroundDownloadTask.uniqueWorkName(): String {
-    val identity = when (kind) {
-        BackgroundDownloadKind.PUBLIC_FILE -> "${repositoryFullName}:${path}:${sha}"
-        BackgroundDownloadKind.REPOSITORY_ARCHIVE -> "${repositoryFullName}:${branch}"
-        BackgroundDownloadKind.PDF_PREVIEW -> cacheKey.orEmpty()
-        BackgroundDownloadKind.APP_UPDATE -> releaseVersion.orEmpty()
-    }
-    return "latex-download-${kind.name.lowercase()}-${identity.hashCode().toUInt().toString(16)}"
+private fun BackgroundDownloadTask.uniqueIdentity(): String = when (kind) {
+    BackgroundDownloadKind.PUBLIC_FILE -> "file:${repositoryFullName}:${path}:${commitSha}:${sha}"
+    BackgroundDownloadKind.REPOSITORY_ARCHIVE -> "archive:${repositoryFullName}:${commitSha ?: branch}"
+    BackgroundDownloadKind.PDF_PREVIEW -> "pdf:${cacheKey.orEmpty()}:${commitSha}:${sha}"
+    BackgroundDownloadKind.APP_UPDATE -> "update:${releaseVersion.orEmpty()}:${assetSha256.orEmpty()}"
 }
+
+private fun BackgroundDownloadTask.uniqueWorkName(): String =
+    "latex-download-${kind.name.lowercase()}-${uniqueIdentity().hashCode().toUInt().toString(16)}"
+
+private fun BackgroundDownloadTask.toPersistent(
+    id: String,
+    state: PersistentDownloadState,
+    downloaded: Long = 0L,
+    total: Long = size,
+    error: String? = null
+) = PersistentDownloadTask(
+    id = id,
+    uniqueKey = uniqueIdentity(),
+    name = name,
+    kind = when (kind) {
+        BackgroundDownloadKind.PUBLIC_FILE -> PersistentDownloadKind.FILE
+        BackgroundDownloadKind.REPOSITORY_ARCHIVE -> PersistentDownloadKind.PROJECT_ARCHIVE
+        BackgroundDownloadKind.PDF_PREVIEW -> PersistentDownloadKind.PDF_PREVIEW
+        BackgroundDownloadKind.APP_UPDATE -> PersistentDownloadKind.APP_UPDATE
+    },
+    state = state,
+    downloaded = downloaded,
+    total = total,
+    repositoryFullName = repositoryFullName,
+    path = path,
+    commitSha = commitSha,
+    blobSha = sha,
+    error = error,
+    createdAt = createdAt,
+    updatedAt = System.currentTimeMillis()
+)
+
+private fun DownloadTaskEntity.toPersistentModel() = PersistentDownloadTask(
+    id = id,
+    uniqueKey = uniqueKey,
+    name = name,
+    kind = runCatching { PersistentDownloadKind.valueOf(kind) }.getOrDefault(PersistentDownloadKind.FILE),
+    state = runCatching { PersistentDownloadState.valueOf(state) }.getOrDefault(PersistentDownloadState.FAILED),
+    downloaded = downloaded,
+    total = total,
+    bytesPerSecond = bytesPerSecond,
+    repositoryFullName = repositoryFullName,
+    path = path,
+    commitSha = commitSha,
+    blobSha = blobSha,
+    error = error,
+    createdAt = createdAt,
+    updatedAt = updatedAt
+)
 
 private fun JSONObject.optionalString(key: String): String? = optString(key)
     .takeIf { it.isNotBlank() && it != "null" }

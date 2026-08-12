@@ -4,6 +4,7 @@ import java.security.KeyStore
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
 }
 
 fun firstPrivateKeyAlias(path: String, password: String): String {
@@ -21,8 +22,16 @@ android {
         applicationId = "com.zqy.latexviewer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.10.1"
+        versionCode = 14
+        versionName = "0.11.0"
+
+        val githubClientId = providers.gradleProperty("githubOAuthClientId")
+            .orElse(providers.environmentVariable("GITHUB_OAUTH_CLIENT_ID"))
+            .orElse("")
+            .get()
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+        buildConfigField("String", "GITHUB_OAUTH_CLIENT_ID", "\"$githubClientId\"")
     }
 
     val releaseStorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
@@ -74,14 +83,21 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.work:work-runtime-ktx:2.11.2")
+    implementation("androidx.room:room-runtime:2.8.4")
+    implementation("androidx.room:room-ktx:2.8.4")
+    ksp("androidx.room:room-compiler:2.8.4")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("dev.chrisbanes.haze:haze:1.7.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("io.legere:pdfiumandroid:2.0.3")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("androidx.room:room-testing:2.8.4")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

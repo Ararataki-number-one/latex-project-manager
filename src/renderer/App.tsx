@@ -164,7 +164,11 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   const [syncOnImport, setSyncOnImport] = useState(false);
   const [importVisibility, setImportVisibility] = useState<GitHubRepositoryVisibility>("private");
   const [importingPath, setImportingPath] = useState<string | null>(null);
-  const [selectedImportPath, setSelectedImportPath] = useState<string | null>(null);
+  const [selectedImportPaths, setSelectedImportPaths] = useState<string[]>([]);
+  const [focusedProjectId, setFocusedProjectId] = useState<string | null>(null);
+  const [sortMode, setSortMode] = useState<"recent" | "name" | "size" | "sync">("recent");
+  const [issueFilter, setIssueFilter] = useState<"all" | "path" | "sync" | "pdf">("all");
+  const [libraryDensity, setLibraryDensity] = useState<"comfortable" | "compact">("comfortable");
 
   useEffect(() => {
     if (openImportNonce > 0) setImportOpen(true);
@@ -173,7 +177,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
   useEffect(() => {
     if (importOpen) return;
     setCandidates([]);
-    setSelectedImportPath(null);
+    setSelectedImportPaths([]);
     setSyncOnImport(false);
     setImportVisibility("private");
   }, [importOpen]);
@@ -218,7 +222,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
 
   const visible = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    return projects
+    const filtered = projects
       .filter((project) => {
         if (filter === "trashed") {
           if (!project.trashed) return false;
@@ -229,13 +233,39 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
           if (filter !== "archived" && project.archived) return false;
         }
         if (activeTag && !project.tags.includes(activeTag)) return false;
-        return !normalized || [project.name, project.rootPath, ...project.classNames, ...project.tags].join(" ").toLocaleLowerCase().includes(normalized);
-      })
-      .sort((a, b) => (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? "") || a.name.localeCompare(b.name, "zh-CN"));
-  }, [projects, filter, query, activeTag]);
+        if (normalized && ![project.name, project.rootPath, ...project.classNames, ...project.tags].join(" ").toLocaleLowerCase().includes(normalized)) return false;
+        if (issueFilter === "path" && project.pathAvailable) return false;
+        if (issueFilter === "pdf" && pdfAvailability[project.id] === true) return false;
+        if (issueFilter === "sync") {
+          const state = syncStatuses[project.id];
+          if (state?.configured && !new Set(["blocked", "error", "needsPull", "unavailable", "changes", "retrying"]).has(state.state)) return false;
+          if (!state?.configured) return false;
+        }
+        return true;
+      });
+    return filtered.sort((a, b) => {
+      if (sortMode === "name") return a.name.localeCompare(b.name, "zh-CN");
+      if (sortMode === "size") return (projectStorage[b.id]?.totalBytes ?? -1) - (projectStorage[a.id]?.totalBytes ?? -1) || a.name.localeCompare(b.name, "zh-CN");
+      if (sortMode === "sync") {
+        const rank = (project: ProjectSummary) => {
+          const state = syncStatuses[project.id];
+          if (state?.state === "blocked" || state?.state === "error" || state?.state === "needsPull" || state?.state === "unavailable") return 0;
+          if (state?.state === "changes" || state?.state === "retrying") return 1;
+          if (state?.state === "syncing" || state?.state === "queued") return 2;
+          if (state?.configured) return 3;
+          return 4;
+        };
+        return rank(a) - rank(b) || a.name.localeCompare(b.name, "zh-CN");
+      }
+      return (b.lastOpenedAt ?? "").localeCompare(a.lastOpenedAt ?? "") || a.name.localeCompare(b.name, "zh-CN");
+    });
+  }, [projects, filter, query, activeTag, issueFilter, sortMode, pdfAvailability, projectStorage, syncStatuses]);
+
+  const focusedProject = visible.find((project) => project.id === focusedProjectId) ?? null;
 
   useEffect(() => {
     setSelectedProjectIds((current) => current.filter((id) => visible.some((project) => project.id === id)));
+    setFocusedProjectId((current) => current && visible.some((project) => project.id === current) ? current : null);
   }, [visible]);
 
   useEffect(() => {
@@ -522,7 +552,9 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
       if (!root) return;
       const scanned = await api.library.scan(root, { maxDepth: 3 });
       setCandidates(scanned);
-      setSelectedImportPath(scanned.length === 1 ? scanned[0].rootPath : null);
+      const knownRoots = new Set(projects.map((project) => project.rootPath.toLocaleLowerCase()));
+      const importable = scanned.filter((candidate) => !knownRoots.has(candidate.rootPath.toLocaleLowerCase()));
+      setSelectedImportPaths(importable.length === 1 ? [importable[0].rootPath] : []);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "扫描失败");
     } finally {
@@ -530,34 +562,42 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
     }
   }
 
-  async function importCandidate(candidate: ScanCandidate) {
-    setImportingPath(candidate.rootPath);
-    try {
-      const imported = await api.library.import(candidate);
-      onProjectsChange([...projects.filter((item) => item.id !== imported.id), imported]);
-      if (syncOnImport) {
-        try {
-          const result = await api.github.createRepository(imported.id, {
-            repositoryName: suggestedGitHubRepositoryName(imported.name, imported.id),
-            visibility: importVisibility,
-            autoSync: true,
-            useLfsForDocuments: true
-          });
-          setImportOpen(false);
-          onNotify(result.state === "synced" ? `已导入 ${candidate.name}，并创建 GitHub ${importVisibility === "public" ? "公开" : "私有"}仓库` : (result.message ?? `已导入 ${candidate.name}`));
-        } catch (error) {
-          setImportOpen(false);
-          onNotify(`项目已导入，但 GitHub 自动建仓失败：${error instanceof Error ? error.message : "未知错误"}`);
+  async function importSelectedCandidates() {
+    const selectedCandidates = candidates.filter((candidate) => selectedImportPaths.includes(candidate.rootPath));
+    if (!selectedCandidates.length) return;
+    const importedItems: ProjectSummary[] = [];
+    const failures: string[] = [];
+    for (const candidate of selectedCandidates) {
+      setImportingPath(candidate.rootPath);
+      try {
+        const imported = await api.library.import(candidate);
+        importedItems.push(imported);
+        onProjectsChange((current) => [...current.filter((item) => item.id !== imported.id), imported]);
+        if (syncOnImport) {
+          try {
+            await api.github.createRepository(imported.id, {
+              repositoryName: suggestedGitHubRepositoryName(imported.name, imported.id),
+              visibility: importVisibility,
+              autoSync: true,
+              useLfsForDocuments: true
+            });
+          } catch (error) {
+            failures.push(`${candidate.name}：项目已导入，但 GitHub 建仓失败（${error instanceof Error ? error.message : "未知错误"}）`);
+          }
         }
-      } else {
-        setImportOpen(false);
-        onNotify(`已导入 ${candidate.name}`);
+      } catch (error) {
+        failures.push(`${candidate.name}：${error instanceof Error ? error.message : "导入失败"}`);
       }
-    } catch (error) {
-      onNotify(error instanceof Error ? error.message : "导入失败");
-    } finally {
-      setImportingPath(null);
     }
+    setImportingPath(null);
+    setSelectedImportPaths([]);
+    if (!failures.length) {
+      setImportOpen(false);
+      onNotify(`已导入 ${importedItems.length} 个项目${syncOnImport ? "并创建同步仓库" : ""}`);
+      return;
+    }
+    setCandidates((current) => current.filter((candidate) => !importedItems.some((project) => project.rootPath.toLocaleLowerCase() === candidate.rootPath.toLocaleLowerCase())));
+    onNotify(`已导入 ${importedItems.length} 个项目，${failures.length} 项需要处理：${failures.slice(0, 2).join("；")}`);
   }
 
   async function openTemplates() {
@@ -628,7 +668,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
           <span className="page-heading-icon" aria-hidden="true"><FolderKanban size={23} /></span>
           <div>
             <h1>{filter === "favorites" ? "收藏项目" : filter === "recent" ? "最近使用" : filter === "archived" ? "已归档" : filter === "trashed" ? "已移除项目" : activeTag ? `标签：${activeTag}` : "你的项目"}</h1>
-            <p className="muted">{visible.length} 个项目 · 文件只保存在这台电脑上</p>
+            <p className="muted">{visible.length} 个项目 · 本地为主 · {Object.values(syncStatuses).filter((status) => status.configured).length} 项已连接 GitHub</p>
           </div>
         </div>
         <div className="header-actions">
@@ -643,6 +683,15 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、路径、标签或文档类" aria-label="搜索项目" />
           {query && <IconButton label="清除搜索" onClick={() => setQuery("")}><X size={15} /></IconButton>}
         </label>
+        <div className="library-view-options" aria-label="项目列表视图选项">
+          <select value={sortMode} onChange={(event) => setSortMode(event.target.value as typeof sortMode)} aria-label="项目排序">
+            <option value="recent">最近使用</option><option value="name">名称</option><option value="size">大小</option><option value="sync">同步状态</option>
+          </select>
+          <select value={issueFilter} onChange={(event) => setIssueFilter(event.target.value as typeof issueFilter)} aria-label="项目问题筛选">
+            <option value="all">全部状态</option><option value="sync">同步需处理</option><option value="path">路径失效</option><option value="pdf">缺少主 PDF</option>
+          </select>
+          <button className="icon-button" aria-label={libraryDensity === "compact" ? "使用舒适密度" : "使用紧凑密度"} title={libraryDensity === "compact" ? "舒适密度" : "紧凑密度"} onClick={() => setLibraryDensity((value) => value === "compact" ? "comfortable" : "compact")}><Settings2 size={17} /></button>
+        </div>
         {selectedProjectIds.length > 0 && (
           <div className="bulk-actions" role="toolbar" aria-label="批量项目操作">
             <strong>已选 {selectedProjectIds.length} 项</strong>
@@ -654,7 +703,8 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
       </div>
 
       {visible.length ? (
-        <div className="project-table" role="table" aria-label="项目列表" data-testid="project-list">
+        <div className={`library-list-layout ${focusedProject ? "with-inspector" : ""}`}>
+        <div className={`project-table density-${libraryDensity}`} role="table" aria-label="项目列表" data-testid="project-list">
           <div className="project-table-head" role="row">
             <span role="columnheader" className="project-check-cell">
               <input
@@ -671,15 +721,18 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
           </div>
           {visible.map((project) => (
             <article
-              className={`project-row ${!project.pathAvailable ? "path-missing" : ""}`}
+              className={`project-row ${!project.pathAvailable ? "path-missing" : ""} ${focusedProjectId === project.id ? "selected" : ""}`}
               key={project.id}
               data-testid={`project-row-${project.id}`}
               role="row"
               tabIndex={filter === "trashed" ? -1 : 0}
-              aria-label={filter === "trashed" ? `${project.name}，请先恢复项目` : `${project.name}，打开项目文件夹`}
-              onClick={() => { if (filter !== "trashed") void openProjectFolder(project); }}
+              aria-label={filter === "trashed" ? `${project.name}，请先恢复项目` : `${project.name}，单击选择，双击打开文件夹`}
+              aria-selected={focusedProjectId === project.id}
+              onClick={() => setFocusedProjectId(project.id)}
+              onDoubleClick={() => { if (filter !== "trashed") void openProjectFolder(project); }}
               onKeyDown={(event) => {
                 if (filter !== "trashed" && event.key === "Enter" && event.target === event.currentTarget) void openProjectFolder(project);
+                if (event.key === " " && event.target === event.currentTarget) { event.preventDefault(); setFocusedProjectId(project.id); }
               }}
             >
               <span role="cell" className="project-check-cell" onClick={(event) => event.stopPropagation()}>
@@ -689,7 +742,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
                 <span className="project-folder-icon" aria-hidden="true"><FolderKanban size={19} /></span>
                 <div className="project-copy">
                   <div className="project-title-line">
-                    <button className="project-title-button" disabled={filter === "trashed"} onClick={(event) => { event.stopPropagation(); if (filter !== "trashed") void openProjectFolder(project); }}>{project.name}</button>
+                    <button className="project-title-button" onClick={(event) => { event.stopPropagation(); setFocusedProjectId(project.id); }}>{project.name}</button>
                     {project.favorite && <Star className="project-favorite-mark" size={14} fill="currentColor" aria-label="已收藏" />}
                     {!project.pathAvailable && <span className="badge danger">路径不可用</span>}
                   </div>
@@ -709,7 +762,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
                   </>
                 ) : (
                   <>
-                    <button className="button secondary project-manage-button" aria-label={`管理项目 ${project.name}`} onClick={() => onManage(project)} disabled={!project.pathAvailable}>管理</button>
+                    <button className="button secondary project-manage-button" aria-label={`管理项目 ${project.name}`} onClick={() => onManage(project)} disabled={!project.pathAvailable}>项目详情</button>
                     <IconButton
                       id={`project-menu-trigger-${project.id}`}
                       label={`更多操作 ${project.name}`}
@@ -760,6 +813,13 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
               )}
             </article>
           ))}
+        </div>
+        {focusedProject && <aside className="project-inspector" aria-label={`项目快速检查 ${focusedProject.name}`}>
+          <header><span className="project-inspector-icon"><FolderKanban size={22} /></span><div><small>快速检查</small><h2>{focusedProject.name}</h2></div><IconButton label="关闭快速检查" onClick={() => setFocusedProjectId(null)}><X size={17} /></IconButton></header>
+          <p className="project-inspector-description">{focusedProject.description?.trim() || "还没有项目说明。可在项目详情中补充研究主题、进度或下一步。"}</p>
+          <dl><div><dt>存储空间</dt><dd>{projectStorage[focusedProject.id] ? formatBytes(projectStorage[focusedProject.id].totalBytes) : "正在统计…"}</dd></div><div><dt>主 PDF</dt><dd>{pdfAvailability[focusedProject.id] ? "可用" : "尚未设置"}</dd></div><div><dt>同步</dt><dd><ProjectSyncBadge status={syncStatuses[focusedProject.id]} /></dd></div><div><dt>最近使用</dt><dd>{relativeTime(focusedProject.lastOpenedAt)}</dd></div></dl>
+          <div className="project-inspector-actions"><button className="button primary" onClick={() => void openProjectFolder(focusedProject)} disabled={!focusedProject.pathAvailable}><FolderOpen size={16} />打开文件夹</button><button className="button secondary" onClick={() => onManage(focusedProject)} disabled={!focusedProject.pathAvailable}>项目详情</button><button className="button secondary" onClick={() => void openProjectInVsCode(focusedProject)} disabled={!focusedProject.pathAvailable}><Code2 size={16} />VS Code</button></div>
+        </aside>}
         </div>
       ) : (
         <div className="empty-state"><Search size={28} /><h2>{filter === "trashed" ? "没有已移除项目" : "没有匹配的项目"}</h2><p>{filter === "trashed" ? "从项目库移除只会删除本机索引，真实文件仍留在原位置。" : "调整搜索词、标签或资料库范围。"}</p></div>
@@ -818,7 +878,7 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
             </header>
             <ol className="import-progress" aria-label="导入进度">
               {["选择目录", "选择项目", "导入方式"].map((label, index) => {
-                const step = candidates.length === 0 ? 0 : selectedImportPath ? 2 : 1;
+                const step = candidates.length === 0 ? 0 : selectedImportPaths.length ? 2 : 1;
                 return <li key={label} className={index < step ? "completed" : index === step ? "current" : "locked"} aria-current={index === step ? "step" : undefined}><span>{index < step ? <Check size={14} /> : index + 1}</span><strong>{label}</strong></li>;
               })}
             </ol>
@@ -827,27 +887,30 @@ function LibraryView({ api, projects, filter, activeTag, onManage, onProjectsCha
               <button className="button primary" onClick={() => void scanLibrary()} disabled={scanning}>{scanning ? <><RefreshCw size={16} className="spin" />正在扫描…</> : <><FolderInput size={16} />{candidates.length ? "重新选择目录" : "选择目录"}</>}</button>
             </div>
             <div className={`import-stage import-project-stage ${candidates.length ? "ready" : "locked"}`}>
-              <div className="import-stage-heading"><span>2</span><div><strong>选择要加入项目库的项目</strong><p>{candidates.length ? `已识别 ${candidates.length} 个项目，选择其中一个继续。` : "选择目录后，这里会列出识别到的 LaTeX 主文件。"}</p></div></div>
+              <div className="import-stage-heading"><span>2</span><div><strong>选择要加入项目库的项目</strong><p>{candidates.length ? `已识别 ${candidates.length} 个项目，可一次选择多个。` : "选择目录后，这里会列出识别到的 LaTeX 主文件。"}</p></div></div>
+              {candidates.length > 1 && <div className="candidate-select-all"><label><input type="checkbox" checked={selectedImportPaths.length > 0 && candidates.filter((candidate) => !projects.some((project) => project.rootPath.toLocaleLowerCase() === candidate.rootPath.toLocaleLowerCase())).every((candidate) => selectedImportPaths.includes(candidate.rootPath))} onChange={(event) => { const importable = candidates.filter((candidate) => !projects.some((project) => project.rootPath.toLocaleLowerCase() === candidate.rootPath.toLocaleLowerCase())).map((candidate) => candidate.rootPath); setSelectedImportPaths(event.target.checked ? importable : []); }} />选择全部可导入项目</label><span>已选 {selectedImportPaths.length} 项</span></div>}
               <div className="candidate-list">
                 {candidates.length === 0 && <div className="import-empty"><BookOpenText size={24} /><span>等待选择目录</span><small>扫描过程只读，不会改写 `.tex`、`.bib` 或 `.cls`。</small></div>}
                 {candidates.map((candidate) => {
-                  const selected = selectedImportPath === candidate.rootPath;
-                  return <button type="button" className={`candidate ${selected ? "selected" : ""}`} key={candidate.rootPath} aria-pressed={selected} onClick={() => setSelectedImportPath(candidate.rootPath)} disabled={importingPath !== null}>
+                  const selected = selectedImportPaths.includes(candidate.rootPath);
+                  const duplicate = projects.some((project) => project.rootPath.toLocaleLowerCase() === candidate.rootPath.toLocaleLowerCase());
+                  return <label className={`candidate ${selected ? "selected" : ""} ${duplicate ? "duplicate" : ""}`} key={candidate.rootPath}>
+                    <input className="candidate-native-checkbox" type="checkbox" aria-label={`选择导入项目 ${candidate.name}`} checked={selected} onChange={(event) => setSelectedImportPaths((current) => event.target.checked ? [...current.filter((path) => path !== candidate.rootPath), candidate.rootPath] : current.filter((path) => path !== candidate.rootPath))} disabled={importingPath !== null || duplicate} />
                     <span className="candidate-icon"><BookOpenText size={19} /></span>
-                    <span className="candidate-copy"><strong>{candidate.name}</strong><small title={candidate.rootPath}>{candidate.rootPath}</small><em>{candidate.entries.length} 个入口 · {candidate.entries.map((entry) => `${entry.relativePath} (${entry.className})`).join("、")}</em></span>
-                    <span className="candidate-radio" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
-                  </button>;
+                    <span className="candidate-copy"><strong>{candidate.name}{duplicate && <em className="duplicate-label">已在项目库</em>}</strong><small title={candidate.rootPath}>{candidate.rootPath}</small><em>{candidate.entries.length} 个入口 · {candidate.entries.map((entry) => `${entry.relativePath} (${entry.className})`).join("、")}</em></span>
+                    <span className="candidate-radio candidate-checkbox" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
+                  </label>;
                 })}
               </div>
             </div>
-            <div className={`import-stage import-sync-choice ${selectedImportPath ? "ready" : "locked"}`}>
+            <div className={`import-stage import-sync-choice ${selectedImportPaths.length ? "ready" : "locked"}`}>
               <div className="import-stage-heading"><span>3</span><div><strong>选择导入方式</strong><p>默认只加入本机项目库；GitHub 同步可稍后再开启。</p></div></div>
-              <label className="sync-toggle"><span><strong>同时创建 GitHub 仓库并自动同步</strong><small>后续新增、修改和删除会在停止变化约 10 秒后安全同步</small></span><input type="checkbox" aria-label="导入后启用 GitHub 自动同步" checked={syncOnImport} onChange={(event) => setSyncOnImport(event.target.checked)} disabled={!selectedImportPath} /></label>
+              <label className="sync-toggle"><span><strong>为所选项目分别创建 GitHub 仓库并自动同步</strong><small>后续新增、修改和删除会在停止变化约 10 秒后安全同步</small></span><input type="checkbox" aria-label="导入后启用 GitHub 自动同步" checked={syncOnImport} onChange={(event) => setSyncOnImport(event.target.checked)} disabled={!selectedImportPaths.length} /></label>
               {syncOnImport && <div className="import-sync-options"><label><span>新仓库可见性</span><select value={importVisibility} onChange={(event) => setImportVisibility(event.target.value as GitHubRepositoryVisibility)}><option value="private">私有（推荐）</option><option value="public">公开</option></select></label><p>{importVisibility === "public" ? "公开仓库中的源码和原始文稿对所有人可见；首次上传前仍会进行安全检查。" : "仓库名会根据项目名称自动生成，登录凭据由 GitHub CLI 管理。"}</p></div>}
             </div>
             <footer className="import-actions">
               <div><ShieldCheck size={17} /><span>源文件保持原位；同步前会扫描私钥、令牌和大型文件。</span></div>
-              <button className="button primary" disabled={!selectedImportPath || importingPath !== null} onClick={() => { const candidate = candidates.find((item) => item.rootPath === selectedImportPath); if (candidate) void importCandidate(candidate); }}>{importingPath ? <><RefreshCw size={16} className="spin" />正在导入…</> : syncOnImport ? "导入并开启同步" : "加入本机项目库"}</button>
+              <button className="button primary" disabled={!selectedImportPaths.length || importingPath !== null} onClick={() => void importSelectedCandidates()}>{importingPath ? <><RefreshCw size={16} className="spin" />正在导入 {selectedImportPaths.findIndex((path) => path === importingPath) + 1}/{selectedImportPaths.length}…</> : syncOnImport ? `导入 ${selectedImportPaths.length} 项并开启同步` : `加入 ${selectedImportPaths.length} 项到本机项目库`}</button>
             </footer>
             {isDemo && <p className="demo-note">演示模式不会写入目录；桌面客户端中选择后会进入迁移预览。</p>}
           </section>
@@ -882,7 +945,7 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
   const [status, setStatus] = useState<AppUpdateStatus | null>(null);
   const [account, setAccount] = useState<GitHubAccountStatus | null>(null);
   const [busy, setBusy] = useState<"settings" | "check" | "download" | "install" | "github" | null>(null);
-  const [section, setSection] = useState<"account" | "updates" | "about">("account");
+  const [section, setSection] = useState<"general" | "account" | "updates" | "about">("general");
 
   useEffect(() => {
     let cancelled = false;
@@ -1026,10 +1089,23 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
     <section className="app-settings-page">
       <header className="settings-page-heading"><span><Settings2 size={22} /></span><div><h1>设置</h1><p>这些设置只保存在这台电脑，不会写入任何 LaTeX 项目。</p></div></header>
       <nav className="settings-section-tabs" aria-label="设置分类" role="tablist">
+        <button role="tab" aria-selected={section === "general"} className={section === "general" ? "active" : ""} onClick={() => setSection("general")}>外观与常规</button>
         <button role="tab" aria-selected={section === "account"} className={section === "account" ? "active" : ""} onClick={() => setSection("account")}>账号与同步</button>
         <button role="tab" aria-selected={section === "updates"} className={section === "updates" ? "active" : ""} onClick={() => setSection("updates")}>客户端更新</button>
         <button role="tab" aria-selected={section === "about"} className={section === "about" ? "active" : ""} onClick={() => setSection("about")}>关于</button>
       </nav>
+      {section === "general" && <section className="settings-card runtime-settings-card">
+        <header><div><h2>外观与操作</h2><p>玻璃效果会根据 Windows 版本和性能自动降级，关闭后使用高不透明霜化表面。</p></div><Settings2 size={20} /></header>
+        <div className="settings-choice-grid">
+          <label><span>主题</span><select value={runtimeSettings.theme} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, theme: event.target.value as AppRuntimeSettings["theme"] }, "已更新界面主题")}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+          <label><span>列表密度</span><select value={runtimeSettings.density} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, density: event.target.value as AppRuntimeSettings["density"] }, "已更新项目列表密度")}><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></label>
+          <label><span>液态玻璃</span><select value={runtimeSettings.glassMode} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, glassMode: event.target.value as AppRuntimeSettings["glassMode"] }, "已更新液态玻璃效果")}><option value="auto">自动</option><option value="full">完整</option><option value="off">关闭</option></select></label>
+        </div>
+        <div className="settings-toggle-list">
+          <label className="sync-toggle"><span><strong>关闭窗口后留在托盘</strong><small>托盘菜单可重新打开、同步全部或彻底退出</small></span><input type="checkbox" checked={runtimeSettings.closeToTray} disabled={busy !== null} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, closeToTray: event.target.checked }, event.target.checked ? "关闭窗口后将继续在托盘运行" : "关闭窗口将退出客户端")} /></label>
+        </div>
+        <div className="update-actions"><button className="button secondary" onClick={onOpenOnboarding}><BookOpenText size={16} />重新打开新手向导</button></div>
+      </section>}
       {section === "account" && <>
       <section className="settings-card github-login-settings-card">
         <header><div><h2>GitHub 连接</h2><p>登录一次后，即可在导入项目时自动创建仓库和开启同步。</p></div><GitFork size={20} /></header>
@@ -1043,10 +1119,8 @@ function SettingsView({ api, isDemo, onNotify, runtimeSettings, onRuntimeSetting
       <section className="settings-card runtime-settings-card">
         <header><div><h2>后台运行与同步</h2><p>关闭主窗口后仍可通过 Windows 托盘安全同步项目。</p></div><HardDrive size={20} /></header>
         <div className="settings-toggle-list">
-          <label className="sync-toggle"><span><strong>关闭窗口后留在托盘</strong><small>默认开启；从托盘菜单可以重新打开或彻底退出</small></span><input type="checkbox" checked={runtimeSettings.closeToTray} disabled={busy !== null} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, closeToTray: event.target.checked }, event.target.checked ? "关闭窗口后将继续在托盘运行" : "关闭窗口将退出客户端")} /></label>
           <label className="sync-toggle"><span><strong>暂停所有自动同步</strong><small>暂停后保留待同步变化，恢复时继续处理队列</small></span><input type="checkbox" checked={runtimeSettings.syncPaused} disabled={busy !== null} onChange={(event) => void saveRuntimeSettings({ ...runtimeSettings, syncPaused: event.target.checked }, event.target.checked ? "已暂停所有自动同步" : "已恢复自动同步")} /></label>
         </div>
-        <div className="update-actions"><button className="button secondary" onClick={onOpenOnboarding}><BookOpenText size={16} />重新打开新手向导</button></div>
       </section>
       </>}
       {section === "updates" && <section className="settings-card update-settings-card">
@@ -1168,7 +1242,14 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [selectedProjectTab, setSelectedProjectTab] = useState<"overview" | "github">("overview");
-  const [runtimeSettings, setRuntimeSettings] = useState<AppRuntimeSettings>({ closeToTray: true, onboardingCompleted: false, syncPaused: false });
+  const [runtimeSettings, setRuntimeSettings] = useState<AppRuntimeSettings>({
+    closeToTray: true,
+    onboardingCompleted: false,
+    syncPaused: false,
+    theme: "system",
+    density: "comfortable",
+    glassMode: "auto"
+  });
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [showOnboardingHint, setShowOnboardingHint] = useState(false);
   const [openImportNonce, setOpenImportNonce] = useState(0);
@@ -1202,6 +1283,17 @@ export default function App() {
     compact.addEventListener("change", handleBreakpoint);
     return () => compact.removeEventListener("change", handleBreakpoint);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = runtimeSettings.theme;
+    document.documentElement.dataset.density = runtimeSettings.density;
+    document.documentElement.dataset.glass = runtimeSettings.glassMode;
+    return () => {
+      delete document.documentElement.dataset.theme;
+      delete document.documentElement.dataset.density;
+      delete document.documentElement.dataset.glass;
+    };
+  }, [runtimeSettings.theme, runtimeSettings.density, runtimeSettings.glassMode]);
 
   async function completeOnboarding(openImport: boolean) {
     try {
@@ -1314,7 +1406,7 @@ export default function App() {
           <span className={`local-only ${runtimeSettings.syncPaused ? "sync-paused" : ""}`}>{runtimeSettings.syncPaused ? <PauseCircle size={13} /> : <ShieldCheck size={13} />}{runtimeSettings.syncPaused ? "同步已暂停" : "本地优先"}</span>
         </div>
         {selected ? (
-          <ProjectView key={selected.id} api={runtime.api} project={selected} isDemo={runtime.isDemo} initialTab={selectedProjectTab} onBack={() => goLibrary()} onNotify={setToast} />
+          <ProjectView key={selected.id} api={runtime.api} project={selected} isDemo={runtime.isDemo} initialTab={selectedProjectTab} onBack={() => goLibrary()} onNotify={setToast} onProjectChange={(updated) => { setSelected(updated); setProjects((current) => current.map((project) => project.id === updated.id ? updated : project)); }} />
         ) : settingsOpen ? (
           <SettingsView api={runtime.api} isDemo={runtime.isDemo} onNotify={setToast} runtimeSettings={runtimeSettings} onRuntimeSettingsChange={setRuntimeSettings} onOpenOnboarding={() => setOnboardingOpen(true)} />
         ) : syncCenterOpen ? (

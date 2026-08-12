@@ -111,6 +111,43 @@ export interface ProjectSummary {
   tags: string[];
   thumbnailPath?: string;
   pathAvailable: boolean;
+  /** A local-only project note. It is never written into the LaTeX project. */
+  description?: string;
+}
+
+export interface CatalogStatus {
+  schemaVersion: number;
+  persistent: boolean;
+  databasePath: string;
+  backupPath?: string;
+  warnings: string[];
+}
+
+export interface ProjectCollection {
+  id: string;
+  name: string;
+  color?: string;
+  projectIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SmartViewFilter {
+  query?: string;
+  tags?: string[];
+  favorite?: boolean;
+  archived?: boolean;
+  trashed?: boolean;
+  pathAvailable?: boolean;
+  openedWithinDays?: number;
+}
+
+export interface SmartView {
+  id: string;
+  name: string;
+  filter: SmartViewFilter;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ExportResult {
@@ -133,10 +170,13 @@ export interface MobilePdfOutput {
   entry: string;
   profileId?: string;
   pdfPath: string;
+  blobSha?: string;
+  size?: number;
+  generatedAt?: string;
 }
 
 export interface MobileProjectIndex {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   projectId: string;
   name: string;
   updatedAt: string;
@@ -278,6 +318,9 @@ export interface AppRuntimeSettings {
   closeToTray: boolean;
   onboardingCompleted: boolean;
   syncPaused: boolean;
+  theme: "system" | "light" | "dark";
+  density: "comfortable" | "compact";
+  glassMode: "auto" | "full" | "off";
 }
 
 export interface DesktopEnvironmentStatus {
@@ -439,6 +482,95 @@ export interface FileWriteRequest {
   path: string;
   content: string;
   expectedHash: string;
+}
+
+export type ProjectFileKind =
+  | "directory"
+  | "tex"
+  | "bib"
+  | "pdf"
+  | "image"
+  | "archive"
+  | "document"
+  | "other";
+
+export interface ProjectFileEntry {
+  name: string;
+  relativePath: string;
+  kind: ProjectFileKind;
+  isDirectory: boolean;
+  size: number;
+  modifiedAt: string;
+  extension?: string;
+  hidden: boolean;
+  hash?: string;
+}
+
+export interface ProjectFileListOptions {
+  directory?: string;
+  query?: string;
+  recursive?: boolean;
+  includeHidden?: boolean;
+  sort?: "name" | "modified" | "size" | "type";
+  direction?: "asc" | "desc";
+}
+
+export type ProjectFileOperationKind = "rename" | "move" | "copy" | "trash";
+
+export interface ProjectFileOperationRequest {
+  kind: ProjectFileOperationKind;
+  sourcePath: string;
+  destinationPath?: string;
+  expectedHash?: string;
+  rewriteLatexReferences?: boolean;
+}
+
+export interface LatexReferenceChange {
+  filePath: string;
+  expectedHash: string;
+  occurrences: number;
+  oldReference: string;
+  newReference: string;
+}
+
+export interface ProjectFileOperationPlan {
+  id: string;
+  kind: ProjectFileOperationKind;
+  sourcePath: string;
+  destinationPath?: string;
+  sourceHash: string;
+  sourceSize: number;
+  isDirectory: boolean;
+  referenceChanges: LatexReferenceChange[];
+  warnings: string[];
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ProjectFileOperationResult {
+  undoId: string;
+  affectedPaths: string[];
+  rewrittenFiles: string[];
+  operation: ProjectFileOperationKind;
+  sourcePath: string;
+  destinationPath?: string;
+  undoExpiresAt: string;
+}
+
+export interface ProjectFileUndoResult {
+  restoredPaths: string[];
+  revertedReferenceFiles: string[];
+}
+
+export interface ProjectFileOperationHistoryEntry {
+  id: string;
+  projectId: string;
+  operation: ProjectFileOperationKind;
+  sourcePath: string;
+  destinationPath?: string;
+  createdAt: string;
+  undoExpiresAt?: string;
+  result: "applied" | "undone";
 }
 
 export interface SyncTexLocation {

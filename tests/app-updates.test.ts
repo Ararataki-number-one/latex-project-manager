@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,28 @@ describe("application updates", () => {
     const assetName = "LaTeX-Project-Manager-Setup-0.3.1.exe";
     const bytes = Buffer.from("verified installer bytes");
     const digest = createHash("sha256").update(bytes).digest("hex");
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519", {
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" }
+    });
+    const signed = {
+      schemaVersion: 1 as const,
+      keyId: "latex-project-manager-release-ed25519-v1",
+      version: "0.3.1",
+      tag: "v0.3.1",
+      generatedAt: "2026-08-11T02:00:00Z",
+      assets: [{ kind: "windows-setup", name: assetName, size: bytes.length, sha256: digest }]
+    };
+    const payloadBytes = Buffer.from(JSON.stringify(signed), "utf8");
+    const manifestBytes = Buffer.from(`${JSON.stringify({
+      signed,
+      payload: payloadBytes.toString("base64"),
+      signature: {
+        algorithm: "Ed25519",
+        keyId: signed.keyId,
+        value: sign(null, payloadBytes, privateKey).toString("base64")
+      }
+    }, null, 2)}\n`);
     const commands: string[][] = [];
     const runner: UpdateCommandRunner = async (_executable, _cwd, args) => {
       commands.push(args);
@@ -40,19 +62,31 @@ describe("application updates", () => {
             publishedAt: "2026-08-11T02:00:00Z",
             isDraft: false,
             isPrerelease: false,
-            assets: [{ name: assetName, size: bytes.length, digest: `sha256:${digest}` }]
+            assets: [
+              { name: assetName, size: bytes.length, digest: `sha256:${digest}` },
+              { name: "release-manifest.json", size: manifestBytes.length }
+            ]
           }),
           stderr: ""
         };
       }
       if (args[0] === "release" && args[1] === "download") {
         const destinationDirectory = args[args.indexOf("--dir") + 1];
-        await writeFile(join(destinationDirectory, assetName), bytes);
+        const pattern = args[args.indexOf("--pattern") + 1];
+        await writeFile(
+          join(destinationDirectory, pattern),
+          pattern === "release-manifest.json" ? manifestBytes : bytes
+        );
         return { code: 0, stdout: "", stderr: "" };
       }
       throw new Error(`Unexpected gh command: ${args.join(" ")}`);
     };
-    const service = new AppUpdateService(directory, { currentVersion: "0.3.0", ghExecutable: "gh.exe", runner });
+    const service = new AppUpdateService(directory, {
+      currentVersion: "0.3.0",
+      ghExecutable: "gh.exe",
+      runner,
+      publicKeyPem: publicKey
+    });
 
     const available = await service.check(false);
     expect(available.state).toBe("available");
@@ -64,7 +98,7 @@ describe("application updates", () => {
     expect(await readFile(await service.downloadedInstaller())).toEqual(bytes);
     expect(commands.some((command) => command.includes("--clobber"))).toBe(true);
     await service.download();
-    expect(commands.filter((command) => command[0] === "release" && command[1] === "download")).toHaveLength(1);
+    expect(commands.filter((command) => command[0] === "release" && command[1] === "download" && command.includes(assetName))).toHaveLength(1);
 
     const settings = await service.setSettings({ autoCheck: false, autoDownload: false });
     expect(settings).toMatchObject({ autoCheck: false, autoDownload: false });

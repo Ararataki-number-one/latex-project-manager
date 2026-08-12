@@ -22,10 +22,17 @@ const SECRET_PATTERNS: Array<{ label: string; expression: RegExp }> = [
   { label: "常见 API 密钥", expression: /\bsk-[A-Za-z0-9_-]{32,}\b/ }
 ];
 
-export async function scanSyncSecurity(
-  root: string,
+export type SyncSecurityContentLoader = (path: string) => Promise<Buffer | null>;
+
+/**
+ * Scan a stable content snapshot. Git synchronization uses this entry point
+ * with blobs read from the candidate index tree, so the approved bytes are
+ * exactly the bytes that can be committed.
+ */
+export async function scanSyncSecuritySnapshot(
   changes: GitHubChangedFile[],
-  largeFiles: GitHubLargeFile[]
+  largeFiles: GitHubLargeFile[],
+  loadContent: SyncSecurityContentLoader
 ): Promise<SyncSecurityFinding[]> {
   const findings: SyncSecurityFinding[] = [];
   const largeByPath = new Map(largeFiles.map((file) => [file.path, file]));
@@ -54,17 +61,8 @@ export async function scanSyncSecurity(
       });
     }
 
-    const absolute = resolve(root, ...change.path.split("/"));
-    let metadata;
-    try {
-      metadata = await lstat(absolute);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
-    }
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_TEXT_SCAN_BYTES) continue;
-    const bytes = await readFile(absolute);
-    if (bytes.includes(0)) continue;
+    const bytes = await loadContent(change.path);
+    if (!bytes || bytes.length > MAX_TEXT_SCAN_BYTES || bytes.includes(0)) continue;
     const content = bytes.toString("utf8");
     for (const pattern of SECRET_PATTERNS) {
       if (!pattern.expression.test(content)) continue;
@@ -83,3 +81,21 @@ export async function scanSyncSecurity(
     : left.severity === "block" ? -1 : 1);
 }
 
+export async function scanSyncSecurity(
+  root: string,
+  changes: GitHubChangedFile[],
+  largeFiles: GitHubLargeFile[]
+): Promise<SyncSecurityFinding[]> {
+  return scanSyncSecuritySnapshot(changes, largeFiles, async (path) => {
+    const absolute = resolve(root, ...path.split("/"));
+    let metadata;
+    try {
+      metadata = await lstat(absolute);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_TEXT_SCAN_BYTES) return null;
+    return readFile(absolute);
+  });
+}

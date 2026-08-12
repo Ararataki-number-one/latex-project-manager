@@ -20,7 +20,7 @@ import type {
   GitHubSyncStatus,
   SyncSecurityFinding
 } from "../../shared/types";
-import { scanSyncSecurity } from "./sync-security";
+import { scanSyncSecuritySnapshot } from "./sync-security";
 
 const LARGE_FILE_WARNING = 50 * 1024 * 1024;
 const CONFIG_VERSION = 1;
@@ -56,6 +56,7 @@ interface StoredSyncConfig extends GitHubSyncSettings {
   repositoryFullName?: string;
   visibility?: GitHubRepositoryVisibility;
   acknowledgedWarnings?: string[];
+  acknowledgedTreeHash?: string;
 }
 
 export interface GitCommandResult {
@@ -68,7 +69,7 @@ export type GitCommandRunner = (
   executable: string,
   cwd: string,
   args: string[],
-  options: { background: boolean }
+  options: { background: boolean; signal?: AbortSignal }
 ) => Promise<GitCommandResult>;
 
 interface WatcherLike {
@@ -102,6 +103,14 @@ interface QueuedSync {
   root: string;
   background: boolean;
   resolve: (status: GitHubSyncStatus) => void;
+  settled: boolean;
+}
+
+interface CandidateSecuritySnapshot {
+  treeHash: string;
+  changes: GitHubChangedFile[];
+  largeFiles: GitHubLargeFile[];
+  findings: SyncSecurityFinding[];
 }
 
 class SyncNeedsPullError extends Error {
@@ -171,7 +180,7 @@ function defaultRunner(
   executable: string,
   cwd: string,
   args: string[],
-  options: { background: boolean }
+  options: { background: boolean; signal?: AbortSignal }
 ): Promise<GitCommandResult> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, args, {
@@ -190,29 +199,55 @@ function defaultRunner(
     let stdout = "";
     let stderr = "";
     let settled = false;
+    const terminateTree = (): void => {
+      if (!child.pid) return;
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+          shell: false,
+          windowsHide: true,
+          stdio: "ignore"
+        });
+        killer.unref();
+      } else {
+        child.kill("SIGTERM");
+      }
+    };
+    const abort = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      terminateTree();
+      const error = new Error("Git synchronization was cancelled.");
+      error.name = "AbortError";
+      rejectRun(error);
+    };
     const append = (current: string, chunk: Buffer): string => {
-      if (current.length >= 1_000_000) return current;
-      return `${current}${chunk.toString("utf8")}`.slice(0, 1_000_000);
+      if (current.length >= 3_000_000) return current;
+      return `${current}${chunk.toString("utf8")}`.slice(0, 3_000_000);
     };
     child.stdout?.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
     child.stderr?.on("data", (chunk: Buffer) => { stderr = append(stderr, chunk); });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill();
+      terminateTree();
       rejectRun(new Error("Git operation timed out."));
     }, 120_000);
     timer.unref();
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, { once: true });
     child.once("error", (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
       rejectRun(error);
     });
     child.once("close", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
       resolveRun({ code: code ?? -1, stdout, stderr });
     });
   });
@@ -345,6 +380,8 @@ export class GitHubSyncService {
   private readonly retryAttempts = new Map<string, number>();
   private readonly jobs = new Map<string, Promise<GitHubSyncStatus>>();
   private readonly queue: QueuedSync[] = [];
+  private readonly activeControllers = new Map<string, AbortController>();
+  private readonly activeSignalsByRoot = new Map<string, AbortSignal>();
   private readonly rerunAfter = new Set<string>();
   private readonly live = new Map<string, LiveStatus>();
   private activeJobs = 0;
@@ -377,6 +414,7 @@ export class GitHubSyncService {
 
   async pauseAll(): Promise<void> {
     this.paused = true;
+    for (const controller of this.activeControllers.values()) controller.abort();
     for (const [projectId] of this.roots) this.setLive(projectId, "queued", "自动同步已暂停，变更仍保留在本机。", "info");
   }
 
@@ -404,29 +442,25 @@ export class GitHubSyncService {
     this.roots.set(projectId, resolve(root));
     await this.requireGit(root);
     await this.ensureRepository(root);
-    let changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
-    if (includeTracked) {
-      const listed = await this.run(root, ["ls-files", "-co", "--exclude-standard", "-z"]);
-      const known = new Set(changes.map((change) => change.path));
-      for (const path of listed.stdout.split("\0").filter(Boolean)) {
-        const portable = portablePath(path);
-        if (!known.has(portable)) changes.push({ path: portable, status: "  " });
-      }
-    }
-    const largeFiles = await this.largeChangedFiles(root, changes);
-    return scanSyncSecurity(root, changes, largeFiles);
+    await this.run(root, ["add", "-A", "--", "."]);
+    return (await this.candidateSecuritySnapshot(root, includeTracked)).findings;
   }
 
   async acknowledgeWarnings(projectId: string, root: string, paths: string[]): Promise<GitHubSyncStatus> {
     const config = await this.readConfig(projectId);
     if (!config) throw new Error("请先连接 GitHub 仓库。");
     const safePaths = [...new Set(paths.map((path) => portablePath(path.trim())).filter(Boolean))];
-    const findings = await this.securityPreflight(projectId, root, false);
+    await this.requireGit(root);
+    await this.ensureRepository(root);
+    await this.run(root, ["add", "-A", "--", "."]);
+    const snapshot = await this.candidateSecuritySnapshot(root, false);
+    const findings = snapshot.findings;
     const allowed = new Set(findings.filter((finding) => finding.severity === "warning").map((finding) => finding.path));
     if (!safePaths.length || safePaths.some((path) => !allowed.has(path))) throw new Error("需要确认的同步警告已经变化，请重新检查。");
     await this.writeConfig({
       ...config,
-      acknowledgedWarnings: [...new Set([...(config.acknowledgedWarnings ?? []), ...safePaths])]
+      acknowledgedWarnings: [...new Set(safePaths)],
+      acknowledgedTreeHash: snapshot.treeHash
     });
     this.setLive(projectId, "queued", "已确认普通同步警告，正在重新同步。", "info");
     return this.syncNow(projectId, root, false);
@@ -539,8 +573,11 @@ export class GitHubSyncService {
     this.retryTimers.delete(projectId);
     this.retryAttempts.delete(projectId);
     this.rerunAfter.delete(projectId);
+    this.activeControllers.get(projectId)?.abort();
     for (let index = this.queue.length - 1; index >= 0; index -= 1) {
-      if (this.queue[index].projectId === projectId) this.queue.splice(index, 1);
+      if (this.queue[index].projectId !== projectId) continue;
+      const queued = this.queue.splice(index, 1)[0];
+      this.settleQueued(queued, await this.cancelledStatus(projectId, queued.root));
     }
     const watcher = this.watchers.get(projectId);
     this.watchers.delete(projectId);
@@ -558,7 +595,16 @@ export class GitHubSyncService {
     this.timers.clear();
     this.pollTimers.clear();
     this.retryTimers.clear();
-    this.queue.splice(0);
+    for (const queued of this.queue.splice(0)) {
+      this.settleQueued(queued, await this.cancelledStatus(queued.projectId, queued.root));
+    }
+    const activeJobs = [...this.activeControllers.entries()].map(([projectId, controller]) => {
+      controller.abort();
+      return this.jobs.get(projectId);
+    }).filter((job): job is Promise<GitHubSyncStatus> => Boolean(job));
+    await Promise.allSettled(activeJobs);
+    this.activeControllers.clear();
+    this.activeSignalsByRoot.clear();
   }
 
   async notifyProjectChanged(projectId: string, root: string): Promise<void> {
@@ -660,7 +706,11 @@ export class GitHubSyncService {
     this.roots.set(projectId, resolve(root));
     const account = await this.authStatus(root);
     if (!account.authenticated || !account.login) throw new Error("请先在客户端设置中登录 GitHub。");
-    const preflight = await this.securityPreflight(projectId, root, true);
+    await this.requireGit(root);
+    await this.ensureRepository(root);
+    await this.run(root, ["add", "-A", "--", "."]);
+    const preflightSnapshot = await this.candidateSecuritySnapshot(root, true);
+    const preflight = preflightSnapshot.findings;
     const blocked = preflight.filter((finding) => finding.severity === "block");
     if (blocked.length) {
       this.setLive(projectId, "blocked", blocked[0].message, "error", { securityFindings: preflight });
@@ -700,7 +750,8 @@ export class GitHubSyncService {
       ...config,
       repositoryFullName: fullName,
       visibility: options.visibility,
-      acknowledgedWarnings: preflight.filter((finding) => finding.severity === "warning").map((finding) => finding.path)
+      acknowledgedWarnings: preflight.filter((finding) => finding.severity === "warning").map((finding) => finding.path),
+      acknowledgedTreeHash: preflightSnapshot.treeHash
     });
     return this.syncNow(projectId, root, false);
   }
@@ -718,8 +769,14 @@ export class GitHubSyncService {
     const account = await this.authStatus(root);
     if (!account.authenticated) throw new Error("请先在客户端设置中登录 GitHub。");
     let publicPreflight: SyncSecurityFinding[] = [];
+    let publicTreeHash: string | undefined;
     if (visibility === "public") {
-      publicPreflight = await this.securityPreflight(projectId, root, true);
+      await this.requireGit(root);
+      await this.ensureRepository(root);
+      await this.run(root, ["add", "-A", "--", "."]);
+      const publicSnapshot = await this.candidateSecuritySnapshot(root, true);
+      publicPreflight = publicSnapshot.findings;
+      publicTreeHash = publicSnapshot.treeHash;
       const blocked = publicPreflight.filter((finding) => finding.severity === "block");
       if (blocked.length) {
         this.setLive(projectId, "blocked", blocked[0].message, "error", { securityFindings: publicPreflight });
@@ -739,7 +796,8 @@ export class GitHubSyncService {
       visibility,
       acknowledgedWarnings: visibility === "public"
         ? [...new Set([...(config.acknowledgedWarnings ?? []), ...publicPreflight.filter((finding) => finding.severity === "warning").map((finding) => finding.path)])]
-        : config.acknowledgedWarnings
+        : config.acknowledgedWarnings,
+      acknowledgedTreeHash: visibility === "public" ? publicTreeHash : config.acknowledgedTreeHash
     });
     this.setLive(projectId, "ready", `仓库已切换为${visibility === "public" ? "公开" : "私有"}。`, "info");
     return this.status(projectId, root);
@@ -765,7 +823,7 @@ export class GitHubSyncService {
     }
     this.roots.set(projectId, resolve(root));
     const job = new Promise<GitHubSyncStatus>((resolveJob) => {
-      this.queue.push({ projectId, root: resolve(root), background, resolve: resolveJob });
+      this.queue.push({ projectId, root: resolve(root), background, resolve: resolveJob, settled: false });
       this.setLive(projectId, "queued", this.paused ? "自动同步已暂停，任务保留在队列中。" : "同步任务已加入队列。", "info");
       this.pumpQueue();
     });
@@ -777,16 +835,66 @@ export class GitHubSyncService {
     if (this.paused) return;
     while (this.activeJobs < this.maxConcurrent && this.queue.length) {
       const queued = this.queue.shift()!;
+      if (queued.settled) continue;
       this.activeJobs += 1;
+      const controller = new AbortController();
+      const rootKey = foldedPath(queued.root, this.platform);
+      this.activeControllers.set(queued.projectId, controller);
+      this.activeSignalsByRoot.set(rootKey, controller.signal);
       void this.performSync(queued.projectId, queued.root, queued.background)
-        .then(queued.resolve)
+        .then((status) => this.settleQueued(queued, status))
+        .catch(async (error) => {
+          if (!controller.signal.aborted) {
+            this.setLive(
+              queued.projectId,
+              "error",
+              error instanceof Error ? error.message : "GitHub 同步失败。",
+              "error"
+            );
+          }
+          this.settleQueued(queued, await this.cancelledStatus(queued.projectId, queued.root));
+        })
         .finally(() => {
           this.activeJobs -= 1;
+          this.activeControllers.delete(queued.projectId);
+          if (this.activeSignalsByRoot.get(rootKey) === controller.signal) this.activeSignalsByRoot.delete(rootKey);
           this.jobs.delete(queued.projectId);
           if (this.rerunAfter.delete(queued.projectId)) this.scheduleSync(queued.projectId, 1_000);
           this.pumpQueue();
         });
     }
+  }
+
+  private settleQueued(queued: QueuedSync, status: GitHubSyncStatus): void {
+    if (queued.settled) return;
+    queued.settled = true;
+    queued.resolve(status);
+    if (!this.activeControllers.has(queued.projectId)) this.jobs.delete(queued.projectId);
+  }
+
+  private async cancelledStatus(projectId: string, root: string): Promise<GitHubSyncStatus> {
+    const config = await this.readConfig(projectId);
+    return {
+      available: Boolean(this.executable),
+      gitVersion: this.gitVersion,
+      configured: Boolean(config),
+      repository: existsSync(join(root, ".git")),
+      lfsAvailable: this.lfsAvailable ?? false,
+      remoteUrl: config?.remoteUrl ?? "",
+      autoSync: config?.autoSync ?? false,
+      useLfsForDocuments: config?.useLfsForDocuments ?? false,
+      repositoryFullName: config?.repositoryFullName,
+      visibility: config?.visibility,
+      state: "ready",
+      changedFiles: [],
+      largeFiles: [],
+      ahead: 0,
+      behind: 0,
+      lastSyncAt: config?.lastSyncAt,
+      paused: this.paused,
+      identity: emptyGitIdentity(),
+      message: "同步任务已取消，本地文件没有被丢弃。"
+    };
   }
 
   async status(projectId: string, root: string): Promise<GitHubSyncStatus> {
@@ -915,17 +1023,7 @@ export class GitHubSyncService {
       await this.ensureRepository(root);
       const branch = await this.ensureBranch(root);
       let changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
-      let largeFiles = await this.largeChangedFiles(root, changes);
-      const findings = await scanSyncSecurity(root, changes, largeFiles);
-      const hardBlocks = findings.filter((finding) => finding.severity === "block");
-      if (hardBlocks.length) {
-        throw new SyncSecurityBlockedError(hardBlocks[0].message, findings);
-      }
-      const acknowledged = new Set(config.acknowledgedWarnings ?? []);
-      const warnings = findings.filter((finding) => finding.severity === "warning" && !acknowledged.has(finding.path));
-      if (warnings.length) {
-        throw new SyncWarningApprovalError("发现需要确认的敏感文件或大文件，确认前不会上传。", findings);
-      }
+      let findings: SyncSecurityFinding[] = [];
 
       const remoteBranch = await this.run(root, ["ls-remote", "--exit-code", "--heads", "origin", branch], [0, 2], background);
       if (remoteBranch.code === 0) {
@@ -939,11 +1037,25 @@ export class GitHubSyncService {
           this.setLive(projectId, "syncing", "本机工作区干净，正在安全快进到 GitHub 最新版本…", "info");
           await this.run(root, ["pull", "--ff-only", "origin", branch], [0], background);
           changes = parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
-          largeFiles = await this.largeChangedFiles(root, changes);
         }
       }
 
       await this.run(root, ["add", "-A", "--", "."]);
+      const candidate = await this.candidateSecuritySnapshot(root, false);
+      findings = candidate.findings;
+      const hardBlocks = findings.filter((finding) => finding.severity === "block");
+      if (hardBlocks.length) throw new SyncSecurityBlockedError(hardBlocks[0].message, findings);
+      const acknowledged = config.acknowledgedTreeHash === candidate.treeHash
+        ? new Set(config.acknowledgedWarnings ?? [])
+        : new Set<string>();
+      const warnings = findings.filter((finding) => finding.severity === "warning" && !acknowledged.has(finding.path));
+      if (warnings.length) {
+        throw new SyncWarningApprovalError("发现需要确认的敏感文件或大文件，确认前不会上传。", findings);
+      }
+      const finalCandidateTree = (await this.run(root, ["write-tree"])).stdout.trim();
+      if (finalCandidateTree !== candidate.treeHash) {
+        throw new SyncWarningApprovalError("候选树在确认后发生变化；安全确认已作废，请重新检查。", findings);
+      }
       const staged = await this.run(root, ["diff", "--cached", "--quiet"], [0, 1]);
       if (staged.code === 1) {
         const identity = await this.gitIdentity(root);
@@ -951,12 +1063,18 @@ export class GitHubSyncService {
           throw new Error("Git 尚未设置提交姓名或邮箱；请在本页的“提交身份”中填写并保存。");
         }
         const timestamp = new Date().toLocaleString("zh-CN", { hour12: false });
-        await this.run(root, ["commit", "-m", `自动同步：${timestamp}`], [0]);
+        await this.commitCandidateTree(root, branch, candidate.treeHash, `自动同步：${timestamp}`);
       }
 
       await this.run(root, ["push", "-u", "origin", branch], [0], background);
       const lastSyncAt = new Date().toISOString();
-      await this.writeConfig({ ...config, lastSyncAt, lastError: undefined, acknowledgedWarnings: [] });
+      await this.writeConfig({
+        ...config,
+        lastSyncAt,
+        lastError: undefined,
+        acknowledgedWarnings: [],
+        acknowledgedTreeHash: undefined
+      });
       const retryTimer = this.retryTimers.get(projectId);
       if (retryTimer) clearTimeout(retryTimer);
       this.retryTimers.delete(projectId);
@@ -966,6 +1084,16 @@ export class GitHubSyncService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "GitHub 同步失败。";
+      if (error instanceof Error && error.name === "AbortError") {
+        this.activeSignalsByRoot.delete(foldedPath(root, this.platform));
+        this.setLive(
+          projectId,
+          this.paused ? "queued" : "ready",
+          this.paused ? "同步已暂停，本地变更仍安全保留。" : "同步任务已取消，本地变更仍安全保留。",
+          "info"
+        );
+        return this.cancelledStatus(projectId, root);
+      }
       if (error instanceof SyncSecurityBlockedError || error instanceof SyncWarningApprovalError) {
         this.setLive(projectId, "blocked", message, error instanceof SyncSecurityBlockedError ? "error" : "warning", {
           securityFindings: error.findings
@@ -1082,7 +1210,8 @@ export class GitHubSyncService {
 
   private async run(cwd: string, args: string[], allowedCodes = [0], background = true): Promise<GitCommandResult> {
     const executable = await this.requireGit(cwd);
-    const result = await this.runner(executable, cwd, this.safeArgs(cwd, args), { background });
+    const signal = this.activeSignalsByRoot.get(foldedPath(cwd, this.platform));
+    const result = await this.runner(executable, cwd, this.safeArgs(cwd, args), { background, signal });
     if (!allowedCodes.includes(result.code)) throw new Error(conciseError(result));
     return result;
   }
@@ -1165,6 +1294,68 @@ export class GitHubSyncService {
     };
   }
 
+  private async commitCandidateTree(root: string, branch: string, treeHash: string, message: string): Promise<void> {
+    const head = await this.run(root, ["rev-parse", "--verify", "HEAD"], [0, 128]);
+    const oldHead = head.code === 0 ? head.stdout.trim() : "";
+    if (oldHead && !/^[a-f0-9]{40,64}$/i.test(oldHead)) throw new Error("当前 Git HEAD 无效，已停止自动提交。");
+    const argumentsList = ["commit-tree", treeHash];
+    if (oldHead) argumentsList.push("-p", oldHead);
+    argumentsList.push("-m", message);
+    const committed = (await this.run(root, argumentsList)).stdout.trim();
+    if (!/^[a-f0-9]{40,64}$/i.test(committed)) throw new Error("无法创建经过安全扫描的提交。");
+    const reference = `refs/heads/${branch}`;
+    const updateArgs = oldHead
+      ? ["update-ref", reference, committed, oldHead]
+      : ["update-ref", reference, committed];
+    await this.run(root, updateArgs);
+  }
+
+  private async candidateSecuritySnapshot(root: string, includeTracked: boolean): Promise<CandidateSecuritySnapshot> {
+    const tree = (await this.run(root, ["write-tree"])).stdout.trim();
+    if (!/^[a-f0-9]{40,64}$/i.test(tree)) throw new Error("无法生成待同步候选树。请检查 Git 索引后重试。");
+
+    const listed = await this.run(root, ["ls-files", "--stage", "-z"]);
+    const entries = new Map<string, { objectId: string; size?: number }>();
+    for (const record of listed.stdout.split("\0").filter(Boolean)) {
+      const tab = record.indexOf("\t");
+      if (tab < 0) continue;
+      const metadata = record.slice(0, tab).trim().split(/\s+/);
+      if (metadata.length < 3 || metadata[2] !== "0" || !/^[a-f0-9]{40,64}$/i.test(metadata[1])) continue;
+      entries.set(portablePath(record.slice(tab + 1)), { objectId: metadata[1] });
+    }
+
+    const changes = includeTracked
+      ? [...entries.keys()].map((path) => ({ path, status: "  " }))
+      : parseChangedFiles((await this.run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
+    const largeFiles: GitHubLargeFile[] = [];
+    for (const change of changes) {
+      if (change.status.includes("D")) continue;
+      const entry = entries.get(change.path);
+      if (!entry) continue;
+      const sizeResult = await this.run(root, ["cat-file", "-s", entry.objectId]);
+      const size = Number.parseInt(sizeResult.stdout.trim(), 10);
+      if (!Number.isSafeInteger(size) || size < 0) throw new Error(`无法读取候选文件大小：${change.path}`);
+      entry.size = size;
+      if (size < LARGE_FILE_WARNING) continue;
+      const attribute = await this.run(root, ["check-attr", "--cached", "filter", "--", change.path]);
+      largeFiles.push({
+        path: change.path,
+        size,
+        trackedByLfs: /:\s*filter:\s*lfs\s*$/i.test(attribute.stdout.trim())
+      });
+    }
+
+    const findings = await scanSyncSecuritySnapshot(changes, largeFiles, async (path) => {
+      const entry = entries.get(path);
+      if (!entry || (entry.size ?? Number.POSITIVE_INFINITY) > 2 * 1024 * 1024) return null;
+      const blob = await this.run(root, ["cat-file", "blob", entry.objectId]);
+      return Buffer.from(blob.stdout, "utf8");
+    });
+    const verifiedTree = (await this.run(root, ["write-tree"])).stdout.trim();
+    if (verifiedTree !== tree) throw new Error("安全检查期间候选树发生变化，已停止同步；请重新检查后再试。");
+    return { treeHash: tree, changes, largeFiles, findings };
+  }
+
   private async largeChangedFiles(root: string, changes: GitHubChangedFile[]): Promise<GitHubLargeFile[]> {
     const result: GitHubLargeFile[] = [];
     for (const change of changes) {
@@ -1203,6 +1394,7 @@ export class GitHubSyncService {
       if (value.visibility !== undefined && value.visibility !== "public" && value.visibility !== "private") return null;
       if (value.repositoryFullName !== undefined && (typeof value.repositoryFullName !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repositoryFullName))) return null;
       if (value.acknowledgedWarnings !== undefined && (!Array.isArray(value.acknowledgedWarnings) || value.acknowledgedWarnings.some((path) => typeof path !== "string"))) return null;
+      if (value.acknowledgedTreeHash !== undefined && (typeof value.acknowledgedTreeHash !== "string" || !/^[a-f0-9]{40,64}$/i.test(value.acknowledgedTreeHash))) return null;
       return value as StoredSyncConfig;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return null;

@@ -337,6 +337,13 @@ const candidates: ScanCandidate[] = [
       { path: "D:\\LaTeX资料库\\Ramsey数笔记\\book.tex", relativePath: "book.tex", engine: "xelatex", className: "elegantbook", classOptions: ["cn"] },
       { path: "D:\\LaTeX资料库\\Ramsey数笔记\\notes.tex", relativePath: "notes.tex", engine: "pdflatex", className: "article", classOptions: [] }
     ]
+  },
+  {
+    rootPath: "D:\\LaTeX资料库\\随机图论文",
+    name: "随机图论文",
+    entries: [
+      { path: "D:\\LaTeX资料库\\随机图论文\\paper.tex", relativePath: "paper.tex", engine: "xelatex", className: "article", classOptions: ["a4paper"] }
+    ]
   }
 ];
 
@@ -400,27 +407,35 @@ export function createWorkbench(): DemoWorkbench {
       pdfPath: "main.pdf"
     }]
   };
-  let runtimeSettings: AppRuntimeSettings = { closeToTray: true, onboardingCompleted: false, syncPaused: false };
+  let runtimeSettings: AppRuntimeSettings = {
+    closeToTray: true,
+    onboardingCompleted: false,
+    syncPaused: false,
+    theme: "system",
+    density: "comfortable",
+    glassMode: "auto"
+  };
   const syncEvents: GitHubSyncEvent[] = [];
   let referenceDocuments: ReferenceDocumentInfo[] = [
     { name: "Alon-Spencer-The-Probabilistic-Method.pdf", relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf", size: 18_724_811, modifiedAt: "2026-08-02T08:20:00.000Z", kind: "pdf", lfsRecommended: false },
     { name: "随机图中文讲义.pdf", relativePath: "references/随机图中文讲义.pdf", size: 62_104_322, modifiedAt: "2026-07-28T13:15:00.000Z", kind: "pdf", lfsRecommended: true }
   ];
   let updateStatus: AppUpdateStatus = {
-    currentVersion: "0.6.0",
-    latestVersion: "0.6.0",
+    currentVersion: "0.11.0",
+    latestVersion: "0.11.0",
     autoCheck: true,
     autoDownload: true,
     state: "upToDate",
     githubCliAvailable: true,
     releaseUrl: "https://github.com/Ararataki-number-one/latex-project-manager/releases",
     checkedAt: new Date().toISOString(),
-    message: "当前已是最新版本 0.6.0。"
+    message: "当前已是最新版本 0.11.0。"
   };
 
   const api: WorkbenchApi = {
     library: {
       list: async () => structuredClone(projects),
+      catalogStatus: async () => ({ schemaVersion: 3, persistent: true, databasePath: "演示索引", warnings: [] }),
       scan: async () => structuredClone(candidates),
       import: async (candidate) => {
         const imported: ProjectSummary = {
@@ -438,6 +453,7 @@ export function createWorkbench(): DemoWorkbench {
         projects = [...projects, imported];
         return structuredClone(imported);
       },
+      importMany: async (items) => Promise.all(items.map(async (item) => api.library.import(item))),
       relink: async (projectId, rootPath) => {
         const current = projects.find((item) => item.id === projectId);
         if (!current) throw new Error("演示项目不存在");
@@ -539,6 +555,18 @@ export function createWorkbench(): DemoWorkbench {
         const index = Math.max(0, projects.findIndex((item) => item.id === projectId));
         return { totalBytes: (index + 1) * 18_742_930, fileCount: 42 + index * 17, measuredAt: new Date().toISOString() };
       }
+    },
+    collections: {
+      list: async () => [],
+      create: async (input) => ({ id: `collection-${Date.now()}`, ...input, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
+      update: async (id, patch) => ({ id, name: patch.name ?? "演示集合", color: patch.color, projectIds: patch.projectIds ?? [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
+      delete: async () => undefined
+    },
+    smartViews: {
+      list: async () => [],
+      create: async (input) => ({ id: `view-${Date.now()}`, ...input, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
+      update: async (id, patch) => ({ id, name: patch.name ?? "演示视图", filter: patch.filter ?? {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
+      delete: async () => undefined
     },
     mobileIndex: {
       read: async () => structuredClone(mobileProjectIndex),
@@ -647,6 +675,19 @@ export function createWorkbench(): DemoWorkbench {
       preview: async () => structuredClone(demoMigration)
     },
     files: {
+      list: async () => [
+        { name: "chapters", relativePath: "chapters", kind: "directory", isDirectory: true, size: 0, modifiedAt: new Date().toISOString(), hidden: false },
+        { name: "main.tex", relativePath: "main.tex", kind: "tex", isDirectory: false, size: 4210, modifiedAt: new Date().toISOString(), extension: "tex", hidden: false, hash: "demo" },
+        { name: "main.pdf", relativePath: "main.pdf", kind: "pdf", isDirectory: false, size: 8640000, modifiedAt: new Date().toISOString(), extension: "pdf", hidden: false }
+      ],
+      createDirectory: async () => readonlyError(),
+      create: async () => readonlyError(),
+      import: async () => readonlyError(),
+      plan: async () => readonlyError(),
+      apply: async () => readonlyError(),
+      undo: async () => readonlyError(),
+      open: async () => undefined,
+      reveal: async () => undefined,
       rename: async () => readonlyError(),
       move: async () => readonlyError(),
       trash: async () => readonlyError(),

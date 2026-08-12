@@ -72,6 +72,8 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
   await expect(initialRow.getByRole("button", { name: `更多操作 ${probability}` })).toBeFocused();
 
   await initialRow.getByRole("button", { name: probability, exact: true }).click();
+  await expect(page.getByRole("complementary", { name: `项目快速检查 ${probability}` })).toBeVisible();
+  await initialRow.dblclick();
   await expect(page.getByRole("status")).toContainText(/打开.*文件夹/);
 
   await (await openProjectMenu(page, probability)).getByRole("button", { name: `导出 ZIP ${probability}` }).click();
@@ -126,11 +128,15 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
   await expect(page.getByRole("button", { name: /保存移动端设置/ })).toBeVisible();
 
   const projectTabs = page.getByRole("tablist", { name: "项目页面" });
-  await expect(projectTabs.getByRole("tab")).toHaveCount(3);
+  await expect(projectTabs.getByRole("tab")).toHaveCount(4);
   await expect(projectTabs.getByRole("tab", { name: /文档结构/ })).toHaveCount(0);
   await expect(projectTabs.getByRole("tab", { name: /配置/ })).toHaveCount(0);
   await expect(projectTabs.getByRole("tab", { name: /原始文稿/ })).toBeVisible();
+  await expect(projectTabs.getByRole("tab", { name: "文件", exact: true })).toBeVisible();
   await expect(projectTabs.getByRole("tab", { name: "同步", exact: true })).toBeVisible();
+  await projectTabs.getByRole("tab", { name: "文件", exact: true }).click();
+  await expect(page.getByRole("grid")).toContainText("main.tex");
+  await expect(page.getByRole("button", { name: /导入文件/ })).toBeVisible();
   await projectTabs.getByRole("tab", { name: /原始文稿/ }).click();
   await expect(page.getByRole("heading", { name: "原始文稿" })).toBeVisible();
   await expect(page.getByText("Alon-Spencer-The-Probabilistic-Method.pdf", { exact: true })).toBeVisible();
@@ -146,8 +152,10 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
 
   await page.getByRole("navigation", { name: "应用导航" }).getByRole("button", { name: "设置" }).click();
   await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "GitHub 连接" })).toBeVisible();
   await expect(page.getByRole("checkbox", { name: /关闭窗口后留在托盘/ })).toBeChecked();
+  await expect(page.getByRole("combobox", { name: "液态玻璃" })).toHaveValue("auto");
+  await page.getByRole("tab", { name: "账号与同步" }).click();
+  await expect(page.getByRole("heading", { name: "GitHub 连接" })).toBeVisible();
   await expect(page.getByRole("checkbox", { name: /暂停所有自动同步/ })).not.toBeChecked();
   await page.getByRole("tab", { name: "客户端更新" }).click();
   await expect(page.getByRole("checkbox", { name: /自动检查更新/ })).toBeChecked();
@@ -155,8 +163,8 @@ test("现代项目库支持搜索、标签、复制、归档、移除和导出",
   await expect(page.getByRole("button", { name: "立即检查" })).toBeVisible();
   await page.getByRole("tab", { name: "关于" }).click();
   await expect(page.getByText("github.com/Ararataki-number-one/latex-project-manager", { exact: true })).toBeVisible();
-  await expect(page.getByText("0.6.0", { exact: true }).first()).toBeVisible();
-  await page.getByRole("tab", { name: "账号与同步" }).click();
+  await expect(page.getByText("0.11.0", { exact: true }).first()).toBeVisible();
+  await page.getByRole("tab", { name: "外观与常规" }).click();
   await page.getByRole("button", { name: "重新打开新手向导" }).click();
   const onboarding = page.getByRole("dialog", { name: "配置 LaTeX 项目管理器" });
   await expect(onboarding).toBeVisible();
@@ -174,15 +182,16 @@ test("导入项目会询问是否自动创建 GitHub 仓库", async ({ page }) =
   const dialog = page.getByRole("dialog", { name: "导入 LaTeX 项目" });
   await expect(dialog.getByLabel("导入进度")).toContainText("选择目录");
   await dialog.getByRole("button", { name: "选择目录" }).click();
-  await expect(dialog.locator(".candidate")).toHaveCount(2);
-  await dialog.locator(".candidate").filter({ hasText: probability }).click();
-  await expect(dialog.getByRole("button", { name: "加入本机项目库" })).toBeEnabled();
+  await expect(dialog.locator(".candidate")).toHaveCount(3);
+  await expect(dialog.getByRole("checkbox", { name: `选择导入项目 ${probability}` })).toBeDisabled();
+  await dialog.getByRole("checkbox", { name: "选择导入项目 随机图论文" }).check();
+  await expect(dialog.getByRole("button", { name: /加入 1 项到本机项目库/ })).toBeEnabled();
   const sync = dialog.getByRole("checkbox", { name: /导入后启用 GitHub 自动同步/ });
   await expect(sync).not.toBeChecked();
   await sync.check();
   await expect(dialog.getByText("新仓库可见性", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("combobox")).toHaveValue("private");
-  await expect(dialog.getByRole("button", { name: "导入并开启同步" })).toBeEnabled();
+  await expect(dialog.getByRole("button", { name: /导入 1 项并开启同步/ })).toBeEnabled();
 });
 
 test("同步中心汇总项目状态并直达项目同步页", async ({ page }) => {
@@ -249,7 +258,8 @@ test("390px 下项目库和管理页都没有横向溢出", async ({ page }) => 
   await expect(mobileMenu).toBeHidden();
   await expect(menuTrigger).toBeFocused();
 
-  await projectRow(page, probability).getByRole("button", { name: `管理项目 ${probability}` }).click();
+  await projectRow(page, probability).getByRole("button", { name: probability, exact: true }).click();
+  await page.getByRole("complementary", { name: `项目快速检查 ${probability}` }).getByRole("button", { name: "项目详情" }).click();
   await expect(page.locator(".project-page")).toBeVisible();
   await page.getByRole("tab", { name: /原始文稿/ }).click();
   await expect(page.getByRole("heading", { name: "原始文稿" })).toBeVisible();

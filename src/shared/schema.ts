@@ -174,13 +174,16 @@ export const mobilePdfOutputSchema = z
     targetId: idSchema,
     entry: relativePathSchema,
     profileId: idSchema.optional(),
-    pdfPath: relativePathSchema.refine((value) => value.toLocaleLowerCase("en-US").endsWith(".pdf"), "主文件必须是 PDF")
+    pdfPath: relativePathSchema.refine((value) => value.toLocaleLowerCase("en-US").endsWith(".pdf"), "主文件必须是 PDF"),
+    blobSha: z.string().regex(/^[a-f0-9]{40,64}$/i).optional(),
+    size: z.number().int().nonnegative().optional(),
+    generatedAt: z.string().datetime({ offset: true }).optional()
   })
   .strict();
 
 export const mobileProjectIndexSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.union([z.literal(1), z.literal(2)]),
     projectId: idSchema,
     name: z.string().min(1).max(200),
     updatedAt: z.string().datetime({ offset: true }),
@@ -203,6 +206,17 @@ export const mobileProjectIndexSchema = z
     }
     if (!ids.has(index.defaultOutputId)) {
       context.addIssue({ code: "custom", message: "默认移动输出不存在", path: ["defaultOutputId"] });
+    }
+    if (index.schemaVersion === 2) {
+      for (const [outputIndex, output] of index.outputs.entries()) {
+        if (!output.blobSha || output.size === undefined || !output.generatedAt) {
+          context.addIssue({
+            code: "custom",
+            message: "v2 移动输出必须包含 blobSha、size 和 generatedAt",
+            path: ["outputs", outputIndex]
+          });
+        }
+      }
     }
   });
 

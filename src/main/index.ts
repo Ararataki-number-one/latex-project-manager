@@ -22,6 +22,7 @@ function createWindow(allowedUrl: string): BrowserWindow {
   const workArea = screen.getPrimaryDisplay().workAreaSize;
   const initialWidth = Math.min(1480, Math.max(760, workArea.width - 32));
   const initialHeight = Math.min(940, Math.max(560, workArea.height - 32));
+  const supportsSystemGlass = process.platform === "win32" && Number.parseInt(process.getSystemVersion().split(".")[2] ?? "0", 10) >= 22000;
   const window = new BrowserWindow({
     width: initialWidth,
     height: initialHeight,
@@ -31,6 +32,7 @@ function createWindow(allowedUrl: string): BrowserWindow {
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#17191c" : "#f5f6f7",
     title: "LaTeX 项目管理器",
     autoHideMenuBar: true,
+    ...(supportsSystemGlass ? { backgroundMaterial: "mica" as const } : {}),
     webPreferences: {
       preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
@@ -41,6 +43,8 @@ function createWindow(allowedUrl: string): BrowserWindow {
     }
   });
   window.center();
+
+  if (supportsSystemGlass) window.setBackgroundMaterial("mica");
 
   window.once("ready-to-show", () => window.show());
   window.webContents.once("did-finish-load", () => {

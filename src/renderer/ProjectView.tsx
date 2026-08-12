@@ -26,8 +26,9 @@ import type {
 import { getVsCodeApi, type VsCodeStatusView } from "./vscode-bridge";
 import { GitHubSyncTab, ReferencesTab } from "./ProjectResources";
 import { MobilePdfCard } from "./MobilePdfCard";
+import { ProjectFiles } from "./ProjectFiles";
 
-type ProjectTab = "overview" | "references" | "github";
+type ProjectTab = "overview" | "files" | "references" | "github";
 
 interface ProjectViewProps {
   api: WorkbenchApi;
@@ -36,13 +37,14 @@ interface ProjectViewProps {
   initialTab?: "overview" | "github";
   onBack: () => void;
   onNotify: (message: string) => void;
+  onProjectChange?: (project: ProjectSummary) => void;
 }
 
 function IconButton({ label, children, className = "", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}>{children}</button>;
 }
 
-export function ProjectView({ api, project, isDemo, initialTab = "overview", onBack, onNotify }: ProjectViewProps) {
+export function ProjectView({ api, project, isDemo, initialTab = "overview", onBack, onNotify, onProjectChange }: ProjectViewProps) {
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [activeTab, setActiveTab] = useState<ProjectTab>(initialTab);
   const [targetId, setTargetId] = useState("");
@@ -183,11 +185,13 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
   const tabs: Array<{ id: ProjectTab; label: string; icon: typeof Code2 }> = migrationOnly
     ? [
         { id: "overview", label: "项目介绍", icon: BookOpen },
+        { id: "files", label: "文件", icon: FolderOpen },
         { id: "references", label: "原始文稿", icon: Files },
         { id: "github", label: "同步", icon: GitFork }
       ]
     : [
         { id: "overview", label: "项目介绍", icon: BookOpen },
+        { id: "files", label: "文件", icon: FolderOpen },
         { id: "references", label: "原始文稿", icon: Files },
         { id: "github", label: "同步", icon: GitFork }
       ];
@@ -230,8 +234,10 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
           onSelectProfile={setProfileId}
           onOpenEntry={() => void openFileInVsCode(target.entry)}
           onNotify={onNotify}
+          onProjectChange={onProjectChange}
         />
       )}
+      {activeTab === "files" && <ProjectFiles api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
       {activeTab === "references" && <ReferencesTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
       {activeTab === "github" && <GitHubSyncTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
     </section>
@@ -252,6 +258,7 @@ interface ProjectIntroductionTabProps {
   onSelectProfile: (id: string) => void;
   onOpenEntry: () => void;
   onNotify: (message: string) => void;
+  onProjectChange?: (project: ProjectSummary) => void;
 }
 
 function ProjectIntroductionTab({
@@ -267,8 +274,11 @@ function ProjectIntroductionTab({
   onSelectTarget,
   onSelectProfile,
   onOpenEntry,
-  onNotify
+  onNotify,
+  onProjectChange
 }: ProjectIntroductionTabProps) {
+  const [descriptionDraft, setDescriptionDraft] = useState(project.description ?? "");
+  const [savingDescription, setSavingDescription] = useState(false);
   const editorLabel = vsCodeStatus?.editor === "codium" ? "VSCodium" : "VS Code";
   const pdfName = projectPdf?.path.split(/[\\/]/).at(-1) ?? "尚未发现 PDF";
   const pdfDetail = projectPdf
@@ -277,6 +287,19 @@ function ProjectIntroductionTab({
   const workshop = vsCodeStatus?.latexWorkshop.state === "installed"
     ? `已安装${vsCodeStatus.latexWorkshop.version ? ` · ${vsCodeStatus.latexWorkshop.version}` : ""}`
     : "未检测到";
+
+  async function saveDescription() {
+    setSavingDescription(true);
+    try {
+      const updated = await api.library.update(project.id, { description: descriptionDraft.trim() });
+      onProjectChange?.(updated);
+      onNotify("项目说明已保存到本机项目库，不会写入 LaTeX 文件。");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存项目说明");
+    } finally {
+      setSavingDescription(false);
+    }
+  }
 
   return (
     <main className="overview-page introduction-page">
@@ -288,6 +311,11 @@ function ProjectIntroductionTab({
           <button className="button secondary" onClick={onOpenEntry} disabled={vsCodeStatus?.available === false}><ExternalLink size={16} />打开入口文件</button>
         </div>
       </header>
+
+      <section className="overview-section project-description-card">
+        <header><div><h3>项目说明</h3><p>只保存在本机项目库，适合记录研究主题、当前进度和下一步。</p></div><button className="button secondary" disabled={savingDescription || descriptionDraft.trim() === (project.description ?? "").trim()} onClick={() => void saveDescription()}>{savingDescription ? "正在保存…" : "保存说明"}</button></header>
+        <textarea value={descriptionDraft} onChange={(event) => setDescriptionDraft(event.target.value)} rows={3} maxLength={1200} placeholder="例如：基于原始英文文稿整理图论笔记；下一步补充第 6 章例题。" aria-label="项目说明" />
+      </section>
 
       <div className="introduction-grid">
         <section className="overview-section introduction-targets">

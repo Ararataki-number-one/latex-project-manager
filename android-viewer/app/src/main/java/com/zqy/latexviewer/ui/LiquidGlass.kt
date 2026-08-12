@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.zqy.latexviewer.model.GlassMode
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
@@ -64,8 +66,17 @@ import dev.chrisbanes.haze.hazeSource
  * A nullable state keeps previews and screens without a floating material layer
  * on the inexpensive opaque path.
  */
+internal typealias LiquidGlassMode = GlassMode
+
+internal val LocalLiquidGlassMode = staticCompositionLocalOf { LiquidGlassMode.AUTO }
+
+@Composable
 internal fun Modifier.liquidGlassSource(hazeState: HazeState?): Modifier =
-    if (hazeState == null) this else hazeSource(state = hazeState)
+    if (hazeState == null || LocalLiquidGlassMode.current == LiquidGlassMode.OFF) {
+        this
+    } else {
+        hazeSource(state = hazeState)
+    }
 
 /**
  * Applies a true backdrop effect when a shared [hazeState] is supplied.
@@ -85,13 +96,15 @@ internal fun Modifier.liquidGlass(
     val colors = MaterialTheme.colorScheme
     val dark = colors.background.luminance() < 0.5f
     val context = LocalContext.current
+    val glassMode = LocalLiquidGlassMode.current
     val lowRamDevice = remember(context) {
         context.getSystemService(ActivityManager::class.java)?.isLowRamDevice == true
     }
     val canBlurBackdrop = hazeState != null &&
         backdropBlurEnabled &&
+        glassMode != LiquidGlassMode.OFF &&
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-        !lowRamDevice
+        (glassMode == LiquidGlassMode.FULL || !lowRamDevice)
 
     val backdropTint = if (dark) {
         Color(0xFF1C1C1E).copy(alpha = 0.66f)
@@ -130,7 +143,7 @@ internal fun Modifier.liquidGlass(
         .shadow(elevation = elevation, shape = shape, clip = false)
         .clip(shape)
 
-    val materialSurface = if (hazeState != null) {
+    val materialSurface = if (hazeState != null && glassMode != LiquidGlassMode.OFF) {
         clippedSurface.hazeEffect(
             state = hazeState,
             style = hazeStyle
@@ -311,7 +324,7 @@ internal fun LiquidGlassBottomBar(
         LiquidGlassSurface(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .heightIn(min = 64.dp),
             shape = RoundedCornerShape(26.dp),
             elevation = 10.dp,
             hazeState = hazeState,

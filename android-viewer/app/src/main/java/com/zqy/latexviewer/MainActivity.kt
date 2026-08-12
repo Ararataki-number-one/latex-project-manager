@@ -30,7 +30,8 @@ class MainActivity : ComponentActivity() {
                     downloadStore,
                     backgroundDownloads,
                     preferences,
-                    BuildConfig.VERSION_NAME
+                    BuildConfig.VERSION_NAME,
+                    BuildConfig.GITHUB_OAUTH_CLIENT_ID
                 )
             )
             LaTeXViewerApp(viewerViewModel)

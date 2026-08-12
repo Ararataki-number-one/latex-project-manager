@@ -2,6 +2,7 @@ import type {
   AppUpdateSettings,
   AppUpdateStatus,
   AppRuntimeSettings,
+  CatalogStatus,
   DesktopEnvironmentStatus,
   ExportResult,
   GitIdentity,
@@ -15,6 +16,13 @@ import type {
   MobilePdfCandidate,
   MobileProjectIndex,
   ProjectManifest,
+  ProjectCollection,
+  ProjectFileEntry,
+  ProjectFileListOptions,
+  ProjectFileOperationPlan,
+  ProjectFileOperationRequest,
+  ProjectFileOperationResult,
+  ProjectFileUndoResult,
   ProjectPdfInfo,
   ProjectStorageInfo,
   ProjectSummary,
@@ -27,12 +35,15 @@ import type {
   ToolchainInfo,
   VsCodeStatus,
   SyncSecurityFinding
+  ,SmartView
 } from "./types";
 
 export const IPC = {
   libraryList: "library:list",
   libraryScan: "library:scan",
   libraryImport: "library:import",
+  libraryImportMany: "library:import-many",
+  libraryCatalogStatus: "library:catalog-status",
   libraryRelink: "library:relink",
   libraryUpdate: "library:update",
   libraryOpenFolder: "library:open-folder",
@@ -45,6 +56,14 @@ export const IPC = {
   libraryCleanupPreview: "library:cleanup-preview",
   libraryCleanupApply: "library:cleanup-apply",
   libraryStorageInfo: "library:storage-info",
+  collectionsList: "collections:list",
+  collectionsCreate: "collections:create",
+  collectionsUpdate: "collections:update",
+  collectionsDelete: "collections:delete",
+  smartViewsList: "smart-views:list",
+  smartViewsCreate: "smart-views:create",
+  smartViewsUpdate: "smart-views:update",
+  smartViewsDelete: "smart-views:delete",
   mobileIndexRead: "mobile-index:read",
   mobileIndexCandidates: "mobile-index:candidates",
   mobileIndexWrite: "mobile-index:write",
@@ -98,6 +117,15 @@ export const IPC = {
   fileMove: "file:move",
   fileTrash: "file:trash",
   fileDelete: "file:delete",
+  fileList: "file:list",
+  fileCreateDirectory: "file:create-directory",
+  fileCreate: "file:create",
+  fileImport: "file:import",
+  filePlan: "file:plan",
+  fileApply: "file:apply",
+  fileUndo: "file:undo",
+  fileOpen: "file:open",
+  fileReveal: "file:reveal",
   templatesList: "templates:list",
   templatesCreate: "templates:create",
   templatesInstantiate: "templates:instantiate",
@@ -116,8 +144,10 @@ export interface WorkbenchApi {
     list(): Promise<ProjectSummary[]>;
     scan(rootPath: string, options?: Partial<ScanOptions>): Promise<ScanCandidate[]>;
     import(candidate: ScanCandidate): Promise<ProjectSummary>;
+    importMany(candidates: ScanCandidate[]): Promise<ProjectSummary[]>;
+    catalogStatus(): Promise<CatalogStatus>;
     relink(projectId: string, rootPath: string): Promise<ProjectSummary>;
-    update(projectId: string, patch: Partial<Pick<ProjectSummary, "name" | "favorite" | "archived" | "trashed" | "tags">>): Promise<ProjectSummary>;
+    update(projectId: string, patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>): Promise<ProjectSummary>;
     openFolder(projectId: string): Promise<void>;
     openInVsCode(projectId: string): Promise<void>;
     copy(projectId: string, destinationParent: string, name: string): Promise<ProjectSummary>;
@@ -128,6 +158,18 @@ export interface WorkbenchApi {
     previewTemporaryCleanup(projectId: string): Promise<TemporaryCleanupPreview>;
     applyTemporaryCleanup(projectId: string, planId: string): Promise<TemporaryCleanupResult>;
     storageInfo(projectId: string): Promise<ProjectStorageInfo>;
+  };
+  collections: {
+    list(): Promise<ProjectCollection[]>;
+    create(input: Pick<ProjectCollection, "name" | "color" | "projectIds">): Promise<ProjectCollection>;
+    update(id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>): Promise<ProjectCollection>;
+    delete(id: string): Promise<void>;
+  };
+  smartViews: {
+    list(): Promise<SmartView[]>;
+    create(input: Pick<SmartView, "name" | "filter">): Promise<SmartView>;
+    update(id: string, patch: Partial<Pick<SmartView, "name" | "filter">>): Promise<SmartView>;
+    delete(id: string): Promise<void>;
   };
   mobileIndex: {
     read(projectId: string): Promise<MobileProjectIndex | null>;
@@ -183,10 +225,19 @@ export interface WorkbenchApi {
     preview(projectRoot: string, entryPath: string): Promise<MigrationPreview>;
   };
   files: {
-    rename(projectRoot: string, fromPath: string, toPath: string, expectedHash?: string): Promise<void>;
-    move(projectRoot: string, fromPath: string, toPath: string, expectedHash?: string): Promise<void>;
-    trash(projectRoot: string, path: string): Promise<void>;
-    delete(projectRoot: string, path: string): Promise<void>;
+    list(projectId: string, options?: ProjectFileListOptions): Promise<ProjectFileEntry[]>;
+    createDirectory(projectId: string, parentPath: string, name: string): Promise<ProjectFileEntry>;
+    create(projectId: string, parentPath: string, name: string): Promise<ProjectFileEntry>;
+    import(projectId: string, destinationDirectory?: string): Promise<ProjectFileEntry[]>;
+    plan(projectId: string, request: ProjectFileOperationRequest): Promise<ProjectFileOperationPlan>;
+    apply(projectId: string, planId: string): Promise<ProjectFileOperationResult>;
+    undo(projectId: string, undoId: string): Promise<ProjectFileUndoResult>;
+    open(projectId: string, path: string): Promise<void>;
+    reveal(projectId: string, path: string): Promise<void>;
+    rename(projectId: string, fromPath: string, toPath: string, expectedHash?: string): Promise<void>;
+    move(projectId: string, fromPath: string, toPath: string, expectedHash?: string): Promise<void>;
+    trash(projectId: string, path: string): Promise<void>;
+    delete(projectId: string, path: string): Promise<void>;
   };
   templates: {
     list(): Promise<TemplateInfo[]>;

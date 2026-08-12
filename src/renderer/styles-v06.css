@@ -1057,6 +1057,14 @@
   background: var(--accent);
 }
 
+.candidate-native-checkbox {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .candidate-copy {
   display: grid;
   min-width: 0;

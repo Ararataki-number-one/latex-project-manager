@@ -1,13 +1,18 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
   AppRuntimeSettings,
   BuildStatus,
+  CatalogStatus,
   GitHubSyncEvent,
+  ProjectCollection,
   ProjectManifest,
-  ProjectSummary
+  ProjectFileOperationHistoryEntry,
+  ProjectSummary,
+  SmartView
 } from "../../shared/types";
 
 interface CatalogRow {
@@ -25,6 +30,7 @@ interface CatalogRow {
   trashed_at: string | null;
   tags: string;
   thumbnail_path: string | null;
+  description: string;
 }
 
 const BUILD_STATUSES = new Set<BuildStatus>([
@@ -40,7 +46,10 @@ const BUILD_STATUSES = new Set<BuildStatus>([
 const DEFAULT_RUNTIME_SETTINGS: AppRuntimeSettings = {
   closeToTray: true,
   onboardingCompleted: false,
-  syncPaused: false
+  syncPaused: false,
+  theme: "system",
+  density: "comfortable",
+  glassMode: "auto"
 };
 
 function parseStringArray(value: string): string[] {
@@ -71,6 +80,7 @@ function fromRow(row: CatalogRow): ProjectSummary {
     tags: parseStringArray(row.tags),
     thumbnailPath: row.thumbnail_path ?? undefined,
     pathAvailable: existsSync(row.root_path)
+    ,description: row.description
   };
 }
 
@@ -98,7 +108,8 @@ export function projectSummaryFromManifest(
     trashedAt: previous?.trashedAt,
     tags: previous?.tags ?? [],
     thumbnailPath: previous?.thumbnailPath,
-    pathAvailable: existsSync(rootPath)
+    pathAvailable: existsSync(rootPath),
+    description: previous?.description ?? ""
   };
 }
 
@@ -106,17 +117,42 @@ export class ProjectCatalog {
   private readonly memory = new Map<string, ProjectSummary>();
   private readonly memorySyncEvents = new Map<string, GitHubSyncEvent[]>();
   private memoryRuntimeSettings: AppRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS };
+  private readonly memoryCollections = new Map<string, ProjectCollection>();
+  private readonly memorySmartViews = new Map<string, SmartView>();
   private database: DatabaseSync | null = null;
   readonly fallbackReason?: string;
+  private readonly migrationWarnings: string[] = [];
+  private migrationBackupPath?: string;
 
   constructor(public readonly databasePath: string) {
     let fallbackReason: string | undefined;
     try {
       mkdirSync(dirname(databasePath), { recursive: true });
+      const databaseExisted = existsSync(databasePath);
       this.database = new DatabaseSync(databasePath, { timeout: 5_000 });
-      this.database.exec(`
-        PRAGMA journal_mode = WAL;
-        PRAGMA foreign_keys = ON;
+      const integrity = this.database.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: string }>;
+      if (!integrity.length || integrity.some((row) => row.integrity_check !== "ok")) {
+        throw new Error(`SQLite 完整性检查失败：${integrity.map((row) => row.integrity_check).filter(Boolean).join("；") || "未知错误"}`);
+      }
+      if (databaseExisted) {
+        this.database.exec("PRAGMA wal_checkpoint(FULL)");
+        const backupOne = `${databasePath}.backup-1`;
+        const backupTwo = `${databasePath}.backup-2`;
+        if (existsSync(backupTwo)) unlinkSync(backupTwo);
+        if (existsSync(backupOne)) renameSync(backupOne, backupTwo);
+        copyFileSync(databasePath, backupOne);
+        this.migrationBackupPath = backupOne;
+      }
+      const currentVersion = Number((this.database.prepare("PRAGMA user_version").get() as { user_version?: number })?.user_version ?? 0);
+      if (databaseExisted && currentVersion < 3) {
+        this.database.exec("PRAGMA wal_checkpoint(FULL)");
+        const backupPath = `${databasePath}.pre-v3.bak`;
+        if (!existsSync(backupPath)) copyFileSync(databasePath, backupPath);
+        this.migrationBackupPath = backupPath;
+      }
+      this.database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; BEGIN IMMEDIATE;");
+      try {
+        this.database.exec(`
         CREATE TABLE IF NOT EXISTS projects (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -132,6 +168,7 @@ export class ProjectCatalog {
           trashed_at TEXT,
           tags TEXT NOT NULL DEFAULT '[]',
           thumbnail_path TEXT,
+          description TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS projects_root_path ON projects(root_path);
@@ -142,7 +179,8 @@ export class ProjectCatalog {
           occurred_at TEXT NOT NULL,
           state TEXT NOT NULL,
           level TEXT NOT NULL,
-          message TEXT NOT NULL
+          message TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS sync_events_project_time ON sync_events(project_id, occurred_at DESC);
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -150,17 +188,43 @@ export class ProjectCatalog {
           value TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-      `);
-      const columns = new Set(
-        (this.database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((column) => column.name)
-      );
-      if (!columns.has("trashed")) {
-        this.database.exec("ALTER TABLE projects ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
+        CREATE TABLE IF NOT EXISTS collections (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS collection_projects (
+          collection_id TEXT NOT NULL, project_id TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (collection_id, project_id),
+          FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS smart_views (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, filter TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS file_operation_history (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          destination_path TEXT,
+          created_at TEXT NOT NULL,
+          undo_expires_at TEXT,
+          result TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS file_operation_project_time
+          ON file_operation_history(project_id, created_at DESC);
+        `);
+        const columns = new Set(
+          (this.database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((column) => column.name)
+        );
+        if (!columns.has("trashed")) this.database.exec("ALTER TABLE projects ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
+        if (!columns.has("trashed_at")) this.database.exec("ALTER TABLE projects ADD COLUMN trashed_at TEXT");
+        if (!columns.has("description")) this.database.exec("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+        this.database.exec("PRAGMA user_version = 3; COMMIT;");
+      } catch (error) {
+        try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+        throw error;
       }
-      if (!columns.has("trashed_at")) {
-        this.database.exec("ALTER TABLE projects ADD COLUMN trashed_at TEXT");
-      }
-      this.database.exec("PRAGMA user_version = 2");
     } catch (error) {
       fallbackReason = error instanceof Error ? error.message : String(error);
       try {
@@ -177,6 +241,19 @@ export class ProjectCatalog {
     return this.database !== null;
   }
 
+  status(): CatalogStatus {
+    return {
+      schemaVersion: 3,
+      persistent: this.persistent,
+      databasePath: this.databasePath,
+      backupPath: this.migrationBackupPath,
+      warnings: [
+        ...this.migrationWarnings,
+        ...(this.fallbackReason ? [`SQLite 索引不可用，当前使用临时内存索引：${this.fallbackReason}`] : [])
+      ]
+    };
+  }
+
   list(): ProjectSummary[] {
     if (!this.database) {
       return [...this.memory.values()]
@@ -186,7 +263,7 @@ export class ProjectCatalog {
     const rows = this.database
       .prepare(
         `SELECT id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path
+                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description
            FROM projects
           ORDER BY favorite DESC, COALESCE(last_opened_at, updated_at) DESC, name COLLATE NOCASE`
       )
@@ -202,7 +279,7 @@ export class ProjectCatalog {
     const row = this.database
       .prepare(
         `SELECT id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path
+                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description
            FROM projects WHERE id = ?`
       )
       .get(projectId) as CatalogRow | undefined;
@@ -226,8 +303,8 @@ export class ProjectCatalog {
       .prepare(
         `INSERT INTO projects (
            id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-           last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            root_path = excluded.root_path,
@@ -242,6 +319,7 @@ export class ProjectCatalog {
            trashed_at = excluded.trashed_at,
            tags = excluded.tags,
            thumbnail_path = excluded.thumbnail_path,
+           description = excluded.description,
            updated_at = excluded.updated_at`
       )
       .run(
@@ -259,6 +337,7 @@ export class ProjectCatalog {
         normalized.trashedAt ?? null,
         JSON.stringify(normalized.tags),
         normalized.thumbnailPath ?? null,
+        normalized.description ?? "",
         new Date().toISOString()
       );
     return this.get(normalized.id)!;
@@ -276,7 +355,7 @@ export class ProjectCatalog {
 
   update(
     projectId: string,
-    patch: Partial<Pick<ProjectSummary, "name" | "favorite" | "archived" | "trashed" | "tags">>
+    patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>
   ): ProjectSummary {
     const current = this.require(projectId);
     const trashedAt = patch.trashed === true
@@ -348,7 +427,10 @@ export class ProjectCatalog {
       return {
         closeToTray: typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : true,
         onboardingCompleted: typeof parsed.onboardingCompleted === "boolean" ? parsed.onboardingCompleted : false,
-        syncPaused: typeof parsed.syncPaused === "boolean" ? parsed.syncPaused : false
+        syncPaused: typeof parsed.syncPaused === "boolean" ? parsed.syncPaused : false,
+        theme: parsed.theme === "light" || parsed.theme === "dark" ? parsed.theme : "system",
+        density: parsed.density === "compact" ? "compact" : "comfortable",
+        glassMode: parsed.glassMode === "full" || parsed.glassMode === "off" ? parsed.glassMode : "auto"
       };
     } catch {
       return { ...DEFAULT_RUNTIME_SETTINGS };
@@ -359,7 +441,10 @@ export class ProjectCatalog {
     const normalized: AppRuntimeSettings = {
       closeToTray: Boolean(settings.closeToTray),
       onboardingCompleted: Boolean(settings.onboardingCompleted),
-      syncPaused: Boolean(settings.syncPaused)
+      syncPaused: Boolean(settings.syncPaused),
+      theme: settings.theme === "light" || settings.theme === "dark" ? settings.theme : "system",
+      density: settings.density === "compact" ? "compact" : "comfortable",
+      glassMode: settings.glassMode === "full" || settings.glassMode === "off" ? settings.glassMode : "auto"
     };
     if (!this.database) {
       this.memoryRuntimeSettings = normalized;
@@ -370,6 +455,142 @@ export class ProjectCatalog {
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `).run("runtime", JSON.stringify(normalized), new Date().toISOString());
     return normalized;
+  }
+
+  listCollections(): ProjectCollection[] {
+    if (!this.database) return [...this.memoryCollections.values()].map((item) => ({ ...item, projectIds: [...item.projectIds] }));
+    const rows = this.database.prepare(`
+      SELECT c.id, c.name, c.color, c.created_at, c.updated_at,
+             COALESCE(json_group_array(cp.project_id) FILTER (WHERE cp.project_id IS NOT NULL), '[]') AS project_ids
+        FROM collections c LEFT JOIN collection_projects cp ON cp.collection_id = c.id
+       GROUP BY c.id ORDER BY c.name COLLATE NOCASE
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id), name: String(row.name), color: row.color ? String(row.color) : undefined,
+      projectIds: parseStringArray(String(row.project_ids)), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+    }));
+  }
+
+  createCollection(input: Pick<ProjectCollection, "name" | "color" | "projectIds">): ProjectCollection {
+    const now = new Date().toISOString();
+    const collection: ProjectCollection = {
+      id: randomUUID(), name: input.name.trim(), color: input.color, projectIds: [...new Set(input.projectIds)],
+      createdAt: now, updatedAt: now
+    };
+    if (!collection.name) throw new Error("集合名称不能为空。");
+    if (!this.database) {
+      this.memoryCollections.set(collection.id, collection);
+      return { ...collection, projectIds: [...collection.projectIds] };
+    }
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("INSERT INTO collections (id, name, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+        .run(collection.id, collection.name, collection.color ?? null, now, now);
+      const insert = this.database.prepare("INSERT INTO collection_projects (collection_id, project_id, position) VALUES (?, ?, ?)");
+      collection.projectIds.forEach((projectId, index) => insert.run(collection.id, projectId, index));
+      this.database.exec("COMMIT");
+      return collection;
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  updateCollection(id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>): ProjectCollection {
+    const current = this.listCollections().find((item) => item.id === id);
+    if (!current) throw new Error("集合不存在。");
+    const updated: ProjectCollection = {
+      ...current,
+      name: patch.name?.trim() || current.name,
+      color: Object.prototype.hasOwnProperty.call(patch, "color") ? patch.color : current.color,
+      projectIds: patch.projectIds ? [...new Set(patch.projectIds)] : current.projectIds,
+      updatedAt: new Date().toISOString()
+    };
+    if (!this.database) {
+      this.memoryCollections.set(id, updated);
+      return { ...updated, projectIds: [...updated.projectIds] };
+    }
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare("UPDATE collections SET name = ?, color = ?, updated_at = ? WHERE id = ?")
+        .run(updated.name, updated.color ?? null, updated.updatedAt, id);
+      if (patch.projectIds) {
+        this.database.prepare("DELETE FROM collection_projects WHERE collection_id = ?").run(id);
+        const insert = this.database.prepare("INSERT INTO collection_projects (collection_id, project_id, position) VALUES (?, ?, ?)");
+        updated.projectIds.forEach((projectId, index) => insert.run(id, projectId, index));
+      }
+      this.database.exec("COMMIT");
+      return updated;
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  deleteCollection(id: string): void {
+    if (!this.database) { this.memoryCollections.delete(id); return; }
+    this.database.prepare("DELETE FROM collections WHERE id = ?").run(id);
+  }
+
+  listSmartViews(): SmartView[] {
+    if (!this.database) return [...this.memorySmartViews.values()].map((item) => ({ ...item, filter: { ...item.filter, tags: item.filter.tags ? [...item.filter.tags] : undefined } }));
+    return (this.database.prepare("SELECT id, name, filter, created_at, updated_at FROM smart_views ORDER BY name COLLATE NOCASE").all() as Array<Record<string, unknown>>)
+      .map((row) => {
+        let filter: SmartView["filter"] = {};
+        try { filter = JSON.parse(String(row.filter)) as SmartView["filter"]; } catch { /* invalid legacy view stays empty */ }
+        return { id: String(row.id), name: String(row.name), filter, createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+      });
+  }
+
+  createSmartView(input: Pick<SmartView, "name" | "filter">): SmartView {
+    const now = new Date().toISOString();
+    const view: SmartView = { id: randomUUID(), name: input.name.trim(), filter: { ...input.filter }, createdAt: now, updatedAt: now };
+    if (!view.name) throw new Error("智能视图名称不能为空。");
+    if (!this.database) { this.memorySmartViews.set(view.id, view); return view; }
+    this.database.prepare("INSERT INTO smart_views (id, name, filter, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .run(view.id, view.name, JSON.stringify(view.filter), now, now);
+    return view;
+  }
+
+  updateSmartView(id: string, patch: Partial<Pick<SmartView, "name" | "filter">>): SmartView {
+    const current = this.listSmartViews().find((item) => item.id === id);
+    if (!current) throw new Error("智能视图不存在。");
+    const updated: SmartView = {
+      ...current, name: patch.name?.trim() || current.name, filter: patch.filter ? { ...patch.filter } : current.filter,
+      updatedAt: new Date().toISOString()
+    };
+    if (!this.database) { this.memorySmartViews.set(id, updated); return updated; }
+    this.database.prepare("UPDATE smart_views SET name = ?, filter = ?, updated_at = ? WHERE id = ?")
+      .run(updated.name, JSON.stringify(updated.filter), updated.updatedAt, id);
+    return updated;
+  }
+
+  deleteSmartView(id: string): void {
+    if (!this.database) { this.memorySmartViews.delete(id); return; }
+    this.database.prepare("DELETE FROM smart_views WHERE id = ?").run(id);
+  }
+
+  appendFileOperation(entry: ProjectFileOperationHistoryEntry): void {
+    if (!this.database) return;
+    this.database.prepare(`
+      INSERT OR REPLACE INTO file_operation_history
+        (id, project_id, operation, source_path, destination_path, created_at, undo_expires_at, result)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(entry.id, entry.projectId, entry.operation, entry.sourcePath, entry.destinationPath ?? null,
+      entry.createdAt, entry.undoExpiresAt ?? null, entry.result);
+  }
+
+  fileOperationHistory(projectId: string, limit = 50): ProjectFileOperationHistoryEntry[] {
+    if (!this.database) return [];
+    return (this.database.prepare(`
+      SELECT id, project_id, operation, source_path, destination_path, created_at, undo_expires_at, result
+        FROM file_operation_history WHERE project_id = ? ORDER BY created_at DESC LIMIT ?
+    `).all(projectId, Math.max(1, Math.min(100, Math.trunc(limit)))) as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id), projectId: String(row.project_id), operation: row.operation as ProjectFileOperationHistoryEntry["operation"],
+      sourcePath: String(row.source_path), destinationPath: row.destination_path ? String(row.destination_path) : undefined,
+      createdAt: String(row.created_at), undoExpiresAt: row.undo_expires_at ? String(row.undo_expires_at) : undefined,
+      result: row.result as ProjectFileOperationHistoryEntry["result"]
+    }));
   }
 
   close(): void {

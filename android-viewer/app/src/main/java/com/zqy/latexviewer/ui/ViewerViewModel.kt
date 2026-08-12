@@ -11,6 +11,10 @@ import com.zqy.latexviewer.data.BackgroundDownloadSnapshot
 import com.zqy.latexviewer.data.BackgroundDownloadTask
 import com.zqy.latexviewer.data.DownloadStore
 import com.zqy.latexviewer.data.GitHubApi
+import com.zqy.latexviewer.data.GitHubDeviceAuthorization
+import com.zqy.latexviewer.data.GitHubDeviceTokenResult
+import com.zqy.latexviewer.data.GitHubRequestException
+import com.zqy.latexviewer.data.MobileIndexFetchResult
 import com.zqy.latexviewer.data.SecureTokenStore
 import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.DownloadHistoryKind
@@ -18,14 +22,19 @@ import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubRepository
+import com.zqy.latexviewer.model.GlassMode
 import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
 import com.zqy.latexviewer.model.PdfDocument
+import com.zqy.latexviewer.model.PdfBookmark
+import com.zqy.latexviewer.model.PersistentDownloadTask
 import com.zqy.latexviewer.model.ReadingProgress
+import com.zqy.latexviewer.model.RepositoryRefreshFailure
 import com.zqy.latexviewer.model.TextDocument
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,6 +69,9 @@ data class ViewerUiState(
     val repositories: List<GitHubRepository> = emptyList(),
     val mobileIndexes: Map<String, MobileProjectIndex> = emptyMap(),
     val recentReading: ReadingProgress? = null,
+    val recentReadings: List<ReadingProgress> = emptyList(),
+    val repositoriesStale: Boolean = false,
+    val repositoryRefreshFailures: Map<String, RepositoryRefreshFailure> = emptyMap(),
     val repositoryQuery: String = "",
     val currentRepository: GitHubRepository? = null,
     val currentPath: String = "",
@@ -67,6 +79,7 @@ data class ViewerUiState(
     val fileQuery: String = "",
     val document: TextDocument? = null,
     val pdfDocument: PdfDocument? = null,
+    val pdfBookmarks: List<PdfBookmark> = emptyList(),
     val completedDownload: DownloadedFile? = null,
     val completedDownloadWorkId: String? = null,
     val downloadedFiles: List<DownloadedFile> = emptyList(),
@@ -75,6 +88,7 @@ data class ViewerUiState(
     val shareFile: DownloadedFile? = null,
     val loading: Boolean = false,
     val transfer: TransferUiState? = null,
+    val downloadTasks: List<PersistentDownloadTask> = emptyList(),
     val transferPanelVisible: Boolean = true,
     val error: String? = null,
     val notice: String? = null,
@@ -88,7 +102,11 @@ data class ViewerUiState(
     val updateMessage: String = "尚未检查更新",
     val downloadedApkPath: String? = null,
     val pdfCacheBytes: Long = 0,
-    val pdfCacheLimitBytes: Long = 512L * 1024 * 1024
+    val pdfCacheLimitBytes: Long = 512L * 1024 * 1024,
+    val glassMode: GlassMode = GlassMode.AUTO,
+    val githubLoginSupported: Boolean = false,
+    val githubDeviceAuthorization: GitHubDeviceAuthorization? = null,
+    val githubLoginPolling: Boolean = false
 )
 
 class ViewerViewModel(
@@ -97,7 +115,8 @@ class ViewerViewModel(
     private val downloadStore: DownloadStore,
     private val backgroundDownloads: BackgroundDownloadManager,
     private val preferences: AppPreferences,
-    private val currentVersion: String
+    private val currentVersion: String,
+    private val githubClientId: String = ""
 ) : ViewModel() {
     private val _state = MutableStateFlow(initialState())
     val state: StateFlow<ViewerUiState> = _state.asStateFlow()
@@ -109,6 +128,7 @@ class ViewerViewModel(
 
     init {
         observeBackgroundDownloads()
+        observePersistentDownloads()
         loadRepositories()
         refreshCacheUsage()
         refreshDownloadHistoryAvailability()
@@ -122,12 +142,26 @@ class ViewerViewModel(
             showError("请输入 GitHub 仓库地址")
             return
         }
-        if (normalizedToken.isNotEmpty()) tokenStore.save(normalizedToken)
-        _state.update { it.copy(tokenStored = tokenStore.hasToken(), error = null) }
-        if (normalizedRepository.isNotEmpty()) {
-            openRepositoryReference(normalizedRepository)
-        } else {
-            loadRepositories()
+        launchRequest {
+            val effectiveToken = if (normalizedToken.isNotEmpty()) {
+                // Never persist an unverified credential.
+                api.validateToken(normalizedToken)
+                tokenStore.save(normalizedToken)
+                normalizedToken
+            } else tokenStore.read()
+            _state.update { it.copy(tokenStored = tokenStore.hasToken(), error = null) }
+            if (normalizedRepository.isNotEmpty()) {
+                val remote = api.getRepository(normalizedRepository, effectiveToken)
+                val commit = api.resolveCommit(remote, effectiveToken, forceRefresh = true)
+                val repository = remote.copy(
+                    commitSha = commit.commitSha,
+                    lastSuccessfulRefreshAt = System.currentTimeMillis()
+                )
+                rememberRepository(repository)
+                openRepositoryContents(repository, "")
+            } else {
+                refreshRepositories(effectiveToken, preferences.savedRepositoryReferences())
+            }
         }
     }
 
@@ -165,13 +199,27 @@ class ViewerViewModel(
     fun loadRepositories() {
         val token = tokenStore.read()
         val savedReferences = preferences.savedRepositoryReferences()
+        val cached = preferences.repositorySnapshots()
+        if (cached.isNotEmpty()) {
+            _state.update {
+                it.copy(
+                    repositories = cached,
+                    mobileIndexes = preferences.cachedMobileIndexes(),
+                    recentReading = preferences.mostRecentReading(),
+                    recentReadings = preferences.allReadingProgress(),
+                    repositoriesStale = true,
+                    tokenStored = tokenStore.hasToken()
+                )
+            }
+        }
         if (savedReferences.isEmpty() && token.isNullOrBlank()) {
             _state.update {
                 it.copy(
                     screen = rootScreenAfterRepositoryRefresh(it.screen),
-                    repositories = emptyList(),
-                    mobileIndexes = emptyMap(),
+                    repositories = cached,
+                    mobileIndexes = preferences.cachedMobileIndexes(),
                     tokenStored = false,
+                    repositoriesStale = false,
                     loading = false,
                     currentRepository = null,
                     currentPath = "",
@@ -183,39 +231,124 @@ class ViewerViewModel(
             return
         }
         launchRequest {
-            var failed = 0
-            val repositories = if (savedReferences.isNotEmpty()) {
-                savedReferences.mapNotNull { reference ->
-                    runCatching { api.getRepository(reference, token) }
-                        .onFailure { failed += 1 }
-                        .getOrNull()
+            refreshRepositories(token, savedReferences)
+        }
+    }
+
+    fun startGitHubLogin() {
+        if (githubClientId.isBlank()) {
+            showError("此安装包尚未配置 GitHub 登录，可先添加公开项目或使用高级令牌")
+            return
+        }
+        launchRequest {
+            val authorization = api.startDeviceFlow(githubClientId)
+            _state.update { it.copy(githubDeviceAuthorization = authorization, githubLoginPolling = true) }
+            pollGitHubLogin(authorization)
+        }
+    }
+
+    fun cancelGitHubLogin() {
+        _state.update { it.copy(githubDeviceAuthorization = null, githubLoginPolling = false) }
+    }
+
+    private suspend fun pollGitHubLogin(authorization: GitHubDeviceAuthorization) {
+        val deadline = System.currentTimeMillis() + authorization.expiresInSeconds * 1_000L
+        var intervalSeconds = authorization.intervalSeconds
+        while (_state.value.githubLoginPolling && System.currentTimeMillis() < deadline) {
+            delay(intervalSeconds * 1_000L)
+            when (val result = api.pollDeviceFlow(githubClientId, authorization.deviceCode)) {
+                is GitHubDeviceTokenResult.Authorized -> {
+                    api.validateToken(result.token)
+                    tokenStore.save(result.token)
+                    _state.update {
+                        it.copy(
+                            tokenStored = true,
+                            githubDeviceAuthorization = null,
+                            githubLoginPolling = false
+                        )
+                    }
+                    showNotice("GitHub 登录成功")
+                    refreshRepositories(result.token, preferences.savedRepositoryReferences())
+                    return
                 }
-            } else {
-                api.listRepositories(token.orEmpty())
-            }
-            _state.update {
-                it.copy(
-                    screen = rootScreenAfterRepositoryRefresh(it.screen),
-                    repositories = repositories.sortedByDescending(GitHubRepository::updatedAt),
-                    tokenStored = tokenStore.hasToken(),
-                    currentRepository = null,
-                    currentPath = "",
-                    contents = emptyList(),
-                    document = null,
-                    pdfDocument = null
-                )
-            }
-            refreshMobileIndexes(repositories)
-            if (failed > 0) {
-                showNotice("$failed 个项目暂时无法访问，请检查仓库地址或令牌权限")
+                GitHubDeviceTokenResult.Pending -> Unit
+                GitHubDeviceTokenResult.SlowDown -> intervalSeconds += 5
+                GitHubDeviceTokenResult.Expired -> {
+                    showError("GitHub 登录码已过期，请重新开始")
+                    cancelGitHubLogin()
+                    return
+                }
+                GitHubDeviceTokenResult.Denied -> {
+                    showError("你已取消 GitHub 授权")
+                    cancelGitHubLogin()
+                    return
+                }
+                is GitHubDeviceTokenResult.Failed -> {
+                    showError(result.message)
+                    cancelGitHubLogin()
+                    return
+                }
             }
         }
+        if (_state.value.githubLoginPolling) {
+            showError("GitHub 登录码已过期，请重新开始")
+            cancelGitHubLogin()
+        }
+    }
+
+    private suspend fun refreshRepositories(token: String?, savedReferences: List<String>) {
+        val cached = preferences.repositorySnapshots().associateBy { it.fullName.lowercase() }
+        val failures = linkedMapOf<String, RepositoryRefreshFailure>()
+        val repositories = if (savedReferences.isNotEmpty()) {
+            coroutineScope {
+                savedReferences.map { reference ->
+                    async {
+                        try {
+                            val remote = api.getRepository(reference, token)
+                            val commit = api.resolveCommit(remote, token, forceRefresh = true)
+                            remote.copy(
+                                commitSha = commit.commitSha,
+                                lastSuccessfulRefreshAt = System.currentTimeMillis()
+                            ).also(preferences::saveRepositorySnapshot)
+                        } catch (failure: Throwable) {
+                            synchronized(failures) {
+                                failures[reference.lowercase()] = failure.toRefreshFailure()
+                            }
+                            cached[reference.lowercase()]
+                        }
+                    }
+                }.awaitAll().filterNotNull()
+            }
+        } else {
+            api.listRepositories(token.orEmpty()).onEach(preferences::saveRepositorySnapshot)
+        }
+        val sorted = repositories.distinctBy { it.fullName.lowercase() }
+            .sortedByDescending(GitHubRepository::updatedAt)
+        _state.update {
+            it.copy(
+                screen = rootScreenAfterRepositoryRefresh(it.screen),
+                repositories = sorted,
+                tokenStored = tokenStore.hasToken(),
+                repositoriesStale = failures.isNotEmpty(),
+                repositoryRefreshFailures = failures,
+                currentRepository = null,
+                currentPath = "",
+                contents = emptyList(),
+                document = null,
+                pdfDocument = null
+            )
+        }
+        refreshMobileIndexes(sorted)
+        if (failures.isNotEmpty()) showNotice("${failures.size} 个项目正在显示上次成功保存的内容")
     }
 
     fun openRepositoryReference(reference: String) {
         pendingPdfOpenKey = null
         launchRequest {
-            val repository = api.getRepository(reference, tokenStore.read())
+            val token = tokenStore.read()
+            val remote = api.getRepository(reference, token)
+            val commit = api.resolveCommit(remote, token, forceRefresh = true)
+            val repository = remote.copy(commitSha = commit.commitSha, lastSuccessfulRefreshAt = System.currentTimeMillis())
             rememberRepository(repository)
             openRepositoryContents(repository, "")
         }
@@ -224,7 +357,12 @@ class ViewerViewModel(
     fun openRepository(repository: GitHubRepository) {
         pendingPdfOpenKey = null
         rememberRepository(repository)
-        launchRequest { openRepositoryContents(repository, "") }
+        launchRequest {
+            val commit = api.resolveCommit(repository, tokenStore.read(), forceRefresh = true)
+            val pinned = repository.copy(commitSha = commit.commitSha, lastSuccessfulRefreshAt = System.currentTimeMillis())
+            rememberRepository(pinned)
+            openRepositoryContents(pinned, "")
+        }
     }
 
     fun openMobilePdf(repository: GitHubRepository, output: MobilePdfOutput) {
@@ -247,15 +385,18 @@ class ViewerViewModel(
                             localPath = cached.absolutePath,
                             repositoryFullName = repository.fullName,
                             sha = previous.sha,
+                            commitSha = repository.commitSha,
+                            blobSha = previous.sha,
                             initialPage = previous.pageIndex.coerceAtLeast(0)
-                        )
+                        ),
+                        pdfBookmarks = preferences.bookmarks(repository.fullName, output.pdfPath)
                     )
                 }
                 showNotice("已打开离线缓存，正在后台检查最新版")
                 runCatching {
-                    val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
+                    val (pinned, latest) = resolveMobilePdfAtIndexCommit(repository, output)
                     if (latest.sha != previous.sha) {
-                        openOrQueuePdfLatest(repository, latest, output.name)
+                        openOrQueuePdfLatest(pinned, latest, output.name)
                         showNotice("发现新版本，正在后台更新 ${output.name}")
                     } else {
                         pendingPdfOpenKey = null
@@ -266,8 +407,8 @@ class ViewerViewModel(
                 }
             } else {
                 launchRequest {
-                    val latest = api.getContent(repository, output.pdfPath, tokenStore.read())
-                    openOrQueuePdfLatest(repository, latest, output.name)
+                    val (pinned, latest) = resolveMobilePdfAtIndexCommit(repository, output)
+                    openOrQueuePdfLatest(pinned, latest, output.name)
                 }
             }
         }
@@ -542,7 +683,46 @@ class ViewerViewModel(
             lastReadAt = System.currentTimeMillis()
         )
         preferences.saveReadingProgress(progress)
-        _state.update { it.copy(recentReading = progress) }
+        val recent = preferences.allReadingProgress()
+        _state.update { it.copy(recentReading = recent.firstOrNull(), recentReadings = recent) }
+    }
+
+    fun openRecentReading(progress: ReadingProgress) {
+        val repository = _state.value.repositories.firstOrNull {
+            it.fullName.equals(progress.repositoryFullName, ignoreCase = true)
+        } ?: preferences.repositorySnapshots().firstOrNull {
+            it.fullName.equals(progress.repositoryFullName, ignoreCase = true)
+        }
+        if (repository == null) {
+            showError("找不到 ${progress.projectName} 的本地项目入口")
+            return
+        }
+        openMobilePdf(
+            repository,
+            MobilePdfOutput(
+                id = "recent:${progress.documentId}",
+                targetId = "recent",
+                name = progress.pdfName,
+                entry = "",
+                profileId = null,
+                pdfPath = progress.pdfPath
+            )
+        )
+    }
+
+    fun togglePdfBookmark(pageIndex: Int, pageCount: Int) {
+        val document = _state.value.pdfDocument ?: return
+        val repositoryFullName = document.repositoryFullName ?: return
+        val bookmark = PdfBookmark(
+            repositoryFullName = repositoryFullName,
+            pdfPath = document.path,
+            pageIndex = pageIndex.coerceIn(0, pageCount.coerceAtLeast(1) - 1)
+        )
+        val added = preferences.toggleBookmark(bookmark)
+        _state.update {
+            it.copy(pdfBookmarks = preferences.bookmarks(repositoryFullName, document.path))
+        }
+        showNotice(if (added) "已添加第 ${bookmark.pageIndex + 1} 页书签" else "已移除书签")
     }
 
     fun checkForUpdates(silent: Boolean = false) {
@@ -724,13 +904,18 @@ class ViewerViewModel(
 
     private fun initialState() = ViewerUiState(
         tokenStored = tokenStore.hasToken(),
+        repositories = preferences.repositorySnapshots(),
         mobileIndexes = preferences.cachedMobileIndexes(),
         recentReading = preferences.mostRecentReading(),
+        recentReadings = preferences.allReadingProgress(),
         downloadedFiles = preferences.downloadedFiles(),
+        downloadTasks = preferences.downloadTasks(),
         currentVersion = currentVersion,
         autoCheckUpdates = preferences.autoCheckUpdates,
         autoDownloadUpdates = preferences.autoDownloadUpdates,
-        pdfCacheLimitBytes = preferences.pdfCacheLimitBytes
+        pdfCacheLimitBytes = preferences.pdfCacheLimitBytes,
+        glassMode = preferences.glassMode,
+        githubLoginSupported = githubClientId.isNotBlank()
     )
 
     private suspend fun openRepositoryContents(repository: GitHubRepository, path: String) {
@@ -789,8 +974,12 @@ class ViewerViewModel(
                     localPath = localPath,
                     repositoryFullName = repository.fullName,
                     sha = latest.sha,
+                    commitSha = latest.commitSha ?: repository.commitSha,
+                    blobSha = latest.gitObjectSha,
+                    expectedSize = latest.size.takeIf { size -> size > 0 },
                     initialPage = initialPage
-                )
+                ),
+                pdfBookmarks = preferences.bookmarks(repository.fullName, latest.path)
             )
         }
         refreshCacheUsage()
@@ -798,18 +987,30 @@ class ViewerViewModel(
 
     private suspend fun refreshMobileIndexes(repositories: List<GitHubRepository>) {
         val token = tokenStore.read()
-        val discovered = mutableMapOf<String, MobileProjectIndex>()
+        val discovered = preferences.cachedMobileIndexes().toMutableMap()
         repositories.chunked(4).forEach { batch ->
             coroutineScope {
                 batch.map { repository ->
                     async {
-                        val index = api.mobileProjectIndex(repository, token)
-                        repository.fullName.lowercase() to index
+                        repository.fullName.lowercase() to runCatching {
+                            api.mobileProjectIndexResult(repository, token)
+                        }
                     }
                 }.awaitAll()
-            }.forEach { (repository, index) ->
-                preferences.saveMobileIndex(repository, index)
-                if (index != null) discovered[repository] = index
+            }.forEach { (repository, result) ->
+                result.onSuccess { fetch ->
+                    when (fetch) {
+                        is MobileIndexFetchResult.Found -> {
+                            preferences.saveMobileIndex(repository, fetch.index)
+                            discovered[repository] = fetch.index
+                        }
+                        MobileIndexFetchResult.Missing -> {
+                            preferences.deleteMobileIndex(repository)
+                            discovered.remove(repository)
+                        }
+                        MobileIndexFetchResult.Malformed -> Unit // retain last known-good index
+                    }
+                }
             }
         }
         _state.update { it.copy(mobileIndexes = discovered) }
@@ -862,6 +1063,54 @@ class ViewerViewModel(
 
     fun cancelTransfer() {
         _state.value.transfer?.workId?.let { runCatching { backgroundDownloads.cancel(java.util.UUID.fromString(it)) } }
+    }
+
+    private suspend fun resolveMobilePdfAtIndexCommit(
+        repository: GitHubRepository,
+        output: MobilePdfOutput
+    ): Pair<GitHubRepository, GitHubContent> {
+        val token = tokenStore.read()
+        if (output.id.startsWith("recent:")) {
+            val commit = api.resolveCommit(repository, token, forceRefresh = true)
+            val pinned = repository.copy(commitSha = commit.commitSha, lastSuccessfulRefreshAt = System.currentTimeMillis())
+            preferences.saveRepositorySnapshot(pinned)
+            return pinned to api.getContent(pinned, output.pdfPath, token)
+        }
+        val index = when (val result = api.mobileProjectIndexResult(repository, token)) {
+            is MobileIndexFetchResult.Found -> result.index
+            MobileIndexFetchResult.Missing -> throw IllegalStateException("项目尚未发布移动端主 PDF 索引")
+            MobileIndexFetchResult.Malformed -> throw IllegalStateException("移动端 PDF 索引损坏；已保留上次可用缓存")
+        }
+        preferences.saveMobileIndex(repository.fullName, index)
+        _state.update { state ->
+            state.copy(mobileIndexes = state.mobileIndexes + (repository.fullName.lowercase() to index))
+        }
+        val selected = index.outputs.firstOrNull { it.id == output.id }
+            ?: index.outputs.firstOrNull { it.pdfPath == output.pdfPath }
+            ?: throw IllegalStateException("最新项目索引中已没有这个 PDF")
+        val pinned = repository.copy(
+            commitSha = index.commitSha ?: throw IllegalStateException("项目索引缺少固定提交信息"),
+            lastSuccessfulRefreshAt = System.currentTimeMillis()
+        )
+        preferences.saveRepositorySnapshot(pinned)
+        return pinned to api.getContent(pinned, selected.pdfPath, token)
+    }
+
+    fun cancelDownloadTask(taskId: String) {
+        runCatching { java.util.UUID.fromString(taskId) }
+            .onSuccess(backgroundDownloads::cancel)
+            .onFailure { showError("下载任务标识无效") }
+    }
+
+    fun retryDownloadTask(taskId: String) {
+        val workId = backgroundDownloads.retry(taskId)
+        if (workId == null) showError("找不到可重试的下载信息")
+        else showNotice("已重新加入下载队列")
+    }
+
+    fun setGlassMode(mode: GlassMode) {
+        preferences.glassMode = mode
+        _state.update { it.copy(glassMode = mode) }
     }
 
     fun hideTransferPanel() {
@@ -936,6 +1185,14 @@ class ViewerViewModel(
                             else -> Unit
                         }
                     }
+            }
+        }
+    }
+
+    private fun observePersistentDownloads() {
+        viewModelScope.launch {
+            backgroundDownloads.persistentTasks.collect { tasks ->
+                _state.update { it.copy(downloadTasks = tasks) }
             }
         }
     }
@@ -1063,6 +1320,14 @@ class ViewerViewModel(
         }
     }
 
+    private fun Throwable.toRefreshFailure(): RepositoryRefreshFailure = when (this) {
+        is GitHubRequestException -> RepositoryRefreshFailure(kind, message.orEmpty(), retryAfterEpochMillis)
+        else -> RepositoryRefreshFailure(
+            com.zqy.latexviewer.model.RepositoryRefreshFailureKind.UNKNOWN,
+            message ?: "项目刷新失败"
+        )
+    }
+
     companion object {
         private const val MAX_INLINE_BYTES = 1_500_000L
 
@@ -1072,13 +1337,22 @@ class ViewerViewModel(
             downloadStore: DownloadStore,
             backgroundDownloads: BackgroundDownloadManager,
             preferences: AppPreferences,
-            currentVersion: String
+            currentVersion: String,
+            githubClientId: String = ""
         ): ViewModelProvider.Factory {
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     require(modelClass.isAssignableFrom(ViewerViewModel::class.java))
-                    return ViewerViewModel(api, tokenStore, downloadStore, backgroundDownloads, preferences, currentVersion) as T
+                    return ViewerViewModel(
+                        api,
+                        tokenStore,
+                        downloadStore,
+                        backgroundDownloads,
+                        preferences,
+                        currentVersion,
+                        githubClientId
+                    ) as T
                 }
             }
         }

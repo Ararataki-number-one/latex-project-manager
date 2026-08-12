@@ -27,6 +27,10 @@ import type {
   MigrationPreview,
   MobileProjectIndex,
   ProjectManifest,
+  ProjectFileListOptions,
+  ProjectFileOperationRequest,
+  ProjectCollection,
+  SmartView,
   ProjectPdfInfo,
   ProjectSummary,
   ScanCandidate,
@@ -87,7 +91,8 @@ function summaryFromCandidate(candidate: ScanCandidate, projectId = createProjec
     archived: false,
     trashed: false,
     tags: [],
-    pathAvailable: existsSync(candidate.rootPath)
+    pathAvailable: existsSync(candidate.rootPath),
+    description: ""
   };
 }
 
@@ -225,6 +230,7 @@ export function registerIpcHandlers(
   };
 
   register(IPC.libraryList, () => catalog.list());
+  register(IPC.libraryCatalogStatus, () => catalog.status());
   register(IPC.libraryScan, async (rootPath: string, options?: Partial<ScanOptions>) => {
     let selectedRoot: string;
     try {
@@ -258,6 +264,21 @@ export function registerIpcHandlers(
     await github.attachProject(imported.id, imported.rootPath);
     return imported;
   });
+  register(IPC.libraryImportMany, async (candidates: ScanCandidate[]) => {
+    if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > 500) throw new Error("请选择 1 到 500 个扫描结果。");
+    const imported: ProjectSummary[] = [];
+    for (const candidate of candidates) {
+      const canonicalRoot = await access.consumePendingCandidate(candidate.rootPath);
+      const issued = pendingCandidates.get(rootKey(canonicalRoot));
+      if (!issued) throw new ProjectAccessError("The scan result is stale; scan again before importing.", "ROOT_NOT_AUTHORIZED");
+      pendingCandidates.delete(rootKey(canonicalRoot));
+      const existingManifest = await readProjectManifestIfExists(canonicalRoot);
+      const summary = catalog.upsert(summaryFromCandidate({ ...issued, rootPath: canonicalRoot }, existingManifest?.projectId));
+      await github.attachProject(summary.id, summary.rootPath);
+      imported.push(summary);
+    }
+    return imported;
+  });
   register(IPC.libraryRelink, async (projectId: string, rootPath: string) => {
     requireCatalogProject(projectId);
     const canonicalRoot = await access.requireSelection(rootPath);
@@ -277,15 +298,18 @@ export function registerIpcHandlers(
     IPC.libraryUpdate,
     async (
       projectId: string,
-      patch: Partial<Pick<ProjectSummary, "name" | "favorite" | "archived" | "trashed" | "tags">>
+      patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>
     ) => {
       const current = requireCatalogProject(projectId, true);
       if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("A project update is required.");
-      const allowed = new Set(["name", "favorite", "archived", "trashed", "tags"]);
+      const allowed = new Set(["name", "description", "favorite", "archived", "trashed", "tags"]);
       if (Object.keys(patch).some((key) => !allowed.has(key))) throw new Error("The project update contains unsupported fields.");
       const has = (key: string): boolean => Object.prototype.hasOwnProperty.call(patch, key);
       if (has("name") && (typeof patch.name !== "string" || !patch.name.trim() || patch.name.length > 240)) {
         throw new Error("The project name must be a non-empty string of at most 240 characters.");
+      }
+      if (has("description") && (typeof patch.description !== "string" || patch.description.length > 4_000)) {
+        throw new Error("项目说明不能超过 4000 个字符。");
       }
       for (const key of ["favorite", "archived", "trashed"] as const) {
         if (has(key) && typeof patch[key] !== "boolean") throw new Error(`${key} must be a boolean.`);
@@ -307,6 +331,14 @@ export function registerIpcHandlers(
       return updated;
     }
   );
+  register(IPC.collectionsList, () => catalog.listCollections());
+  register(IPC.collectionsCreate, (input: Pick<ProjectCollection, "name" | "color" | "projectIds">) => catalog.createCollection(input));
+  register(IPC.collectionsUpdate, (id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>) => catalog.updateCollection(id, patch));
+  register(IPC.collectionsDelete, (id: string) => catalog.deleteCollection(id));
+  register(IPC.smartViewsList, () => catalog.listSmartViews());
+  register(IPC.smartViewsCreate, (input: Pick<SmartView, "name" | "filter">) => catalog.createSmartView(input));
+  register(IPC.smartViewsUpdate, (id: string, patch: Partial<Pick<SmartView, "name" | "filter">>) => catalog.updateSmartView(id, patch));
+  register(IPC.smartViewsDelete, (id: string) => catalog.deleteSmartView(id));
   register(IPC.libraryOpenFolder, async (projectId: string) => {
     const { project, root } = await requireCatalogProjectRoot(projectId);
     const error = await shell.openPath(root);
@@ -662,6 +694,59 @@ export function registerIpcHandlers(
   });
 
   register(IPC.fileRead, async (projectRoot: string, path: string) => files.read(await requireProject(projectRoot), path));
+  register(IPC.fileList, async (projectId: string, options?: ProjectFileListOptions) => files.list((await requireCatalogProjectRoot(projectId)).root, options));
+  register(IPC.fileCreateDirectory, async (projectId: string, parentPath: string, name: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const result = await files.createDirectory(root, parentPath, name);
+    await github.notifyProjectChanged(project.id, root);
+    return result;
+  });
+  register(IPC.fileCreate, async (projectId: string, parentPath: string, name: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const result = await files.create(root, parentPath, name);
+    await github.notifyProjectChanged(project.id, root);
+    return result;
+  });
+  register(IPC.fileImport, async (projectId: string, destinationDirectory: string = "") => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const owner = getWindow();
+    const options: OpenDialogOptions = { properties: ["openFile", "multiSelections"], title: "导入文件到项目" };
+    const selected = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    if (selected.canceled) return [];
+    const result = await files.import(root, destinationDirectory, selected.filePaths);
+    if (result.length > 0) await github.notifyProjectChanged(project.id, root);
+    return result;
+  });
+  register(IPC.filePlan, async (projectId: string, request: ProjectFileOperationRequest) => files.plan((await requireCatalogProjectRoot(projectId)).root, request));
+  register(IPC.fileApply, async (projectId: string, planId: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const result = await files.apply(root, planId);
+    catalog.appendFileOperation({ id: result.undoId, projectId, operation: result.operation, sourcePath: result.sourcePath,
+      destinationPath: result.destinationPath, createdAt: new Date().toISOString(), undoExpiresAt: result.undoExpiresAt, result: "applied" });
+    await github.notifyProjectChanged(project.id, root);
+    return result;
+  });
+  register(IPC.fileUndo, async (projectId: string, undoId: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
+    const result = await files.undo(root, undoId);
+    const history = catalog.fileOperationHistory(projectId).find((entry) => entry.id === undoId);
+    if (history) catalog.appendFileOperation({ ...history, result: "undone", createdAt: new Date().toISOString() });
+    await github.notifyProjectChanged(project.id, root);
+    return result;
+  });
+  register(IPC.fileOpen, async (projectId: string, path: string) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    const absolutePath = resolve(root, path);
+    const authorized = await requireProjectPath(absolutePath);
+    if (rootKey(authorized.root) !== rootKey(root)) throw new ProjectAccessError("Path belongs to another project.", "PATH_NOT_AUTHORIZED");
+    const message = await shell.openPath(authorized.path); if (message) throw new Error(message);
+  });
+  register(IPC.fileReveal, async (projectId: string, path: string) => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    const authorized = await requireProjectPath(resolve(root, path));
+    if (rootKey(authorized.root) !== rootKey(root)) throw new ProjectAccessError("Path belongs to another project.", "PATH_NOT_AUTHORIZED");
+    shell.showItemInFolder(authorized.path);
+  });
   register(IPC.fileWrite, async (request: FileWriteRequest) => {
     const root = await requireProject(request.projectRoot);
     const result = await files.write({ ...request, projectRoot: root });
@@ -669,31 +754,27 @@ export function registerIpcHandlers(
     if (project) await github.notifyProjectChanged(project.id, root);
     return result;
   });
-  register(IPC.fileRename, async (projectRoot: string, fromPath: string, toPath: string, expectedHash?: string) => {
-    const root = await requireProject(projectRoot);
+  register(IPC.fileRename, async (projectId: string, fromPath: string, toPath: string, expectedHash?: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
     const result = await files.rename(root, fromPath, toPath, expectedHash);
-    const project = projectAtRoot(root);
-    if (project) await github.notifyProjectChanged(project.id, root);
+    await github.notifyProjectChanged(project.id, root);
     return result;
   });
-  register(IPC.fileMove, async (projectRoot: string, fromPath: string, toPath: string, expectedHash?: string) => {
-    const root = await requireProject(projectRoot);
+  register(IPC.fileMove, async (projectId: string, fromPath: string, toPath: string, expectedHash?: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
     const result = await files.move(root, fromPath, toPath, expectedHash);
-    const project = projectAtRoot(root);
-    if (project) await github.notifyProjectChanged(project.id, root);
+    await github.notifyProjectChanged(project.id, root);
     return result;
   });
-  register(IPC.fileTrash, async (projectRoot: string, path: string) => {
-    const root = await requireProject(projectRoot);
+  register(IPC.fileTrash, async (projectId: string, path: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
     await files.trash(root, path);
-    const project = projectAtRoot(root);
-    if (project) await github.notifyProjectChanged(project.id, root);
+    await github.notifyProjectChanged(project.id, root);
   });
-  register(IPC.fileDelete, async (projectRoot: string, path: string) => {
-    const root = await requireProject(projectRoot);
+  register(IPC.fileDelete, async (projectId: string, path: string) => {
+    const { project, root } = await requireCatalogProjectRoot(projectId);
     await files.trash(root, path);
-    const project = projectAtRoot(root);
-    if (project) await github.notifyProjectChanged(project.id, root);
+    await github.notifyProjectChanged(project.id, root);
   });
 
   register(IPC.templatesList, () => templates.list());

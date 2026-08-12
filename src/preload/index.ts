@@ -6,6 +6,8 @@ const api: WorkbenchApi = {
     list: () => ipcRenderer.invoke(IPC.libraryList),
     scan: (rootPath, options) => ipcRenderer.invoke(IPC.libraryScan, rootPath, options),
     import: (candidate) => ipcRenderer.invoke(IPC.libraryImport, candidate),
+    importMany: (candidates) => ipcRenderer.invoke(IPC.libraryImportMany, candidates),
+    catalogStatus: () => ipcRenderer.invoke(IPC.libraryCatalogStatus),
     relink: (projectId, rootPath) => ipcRenderer.invoke(IPC.libraryRelink, projectId, rootPath),
     update: (projectId, patch) => ipcRenderer.invoke(IPC.libraryUpdate, projectId, patch),
     openFolder: (projectId) => ipcRenderer.invoke(IPC.libraryOpenFolder, projectId),
@@ -19,6 +21,18 @@ const api: WorkbenchApi = {
     previewTemporaryCleanup: (projectId) => ipcRenderer.invoke(IPC.libraryCleanupPreview, projectId),
     applyTemporaryCleanup: (projectId, planId) => ipcRenderer.invoke(IPC.libraryCleanupApply, projectId, planId),
     storageInfo: (projectId) => ipcRenderer.invoke(IPC.libraryStorageInfo, projectId)
+  },
+  collections: {
+    list: () => ipcRenderer.invoke(IPC.collectionsList),
+    create: (input) => ipcRenderer.invoke(IPC.collectionsCreate, input),
+    update: (id, patch) => ipcRenderer.invoke(IPC.collectionsUpdate, id, patch),
+    delete: (id) => ipcRenderer.invoke(IPC.collectionsDelete, id)
+  },
+  smartViews: {
+    list: () => ipcRenderer.invoke(IPC.smartViewsList),
+    create: (input) => ipcRenderer.invoke(IPC.smartViewsCreate, input),
+    update: (id, patch) => ipcRenderer.invoke(IPC.smartViewsUpdate, id, patch),
+    delete: (id) => ipcRenderer.invoke(IPC.smartViewsDelete, id)
   },
   mobileIndex: {
     read: (projectId) => ipcRenderer.invoke(IPC.mobileIndexRead, projectId),
@@ -78,6 +92,15 @@ const api: WorkbenchApi = {
     preview: (projectRoot, entryPath) => ipcRenderer.invoke(IPC.migrationPreview, projectRoot, entryPath)
   },
   files: {
+    list: (projectId, options) => ipcRenderer.invoke(IPC.fileList, projectId, options),
+    createDirectory: (projectId, parentPath, name) => ipcRenderer.invoke(IPC.fileCreateDirectory, projectId, parentPath, name),
+    create: (projectId, parentPath, name) => ipcRenderer.invoke(IPC.fileCreate, projectId, parentPath, name),
+    import: (projectId, destinationDirectory) => ipcRenderer.invoke(IPC.fileImport, projectId, destinationDirectory),
+    plan: (projectId, request) => ipcRenderer.invoke(IPC.filePlan, projectId, request),
+    apply: (projectId, planId) => ipcRenderer.invoke(IPC.fileApply, projectId, planId),
+    undo: (projectId, undoId) => ipcRenderer.invoke(IPC.fileUndo, projectId, undoId),
+    open: (projectId, path) => ipcRenderer.invoke(IPC.fileOpen, projectId, path),
+    reveal: (projectId, path) => ipcRenderer.invoke(IPC.fileReveal, projectId, path),
     rename: (projectRoot, fromPath, toPath, expectedHash) => ipcRenderer.invoke(IPC.fileRename, projectRoot, fromPath, toPath, expectedHash),
     move: (projectRoot, fromPath, toPath, expectedHash) => ipcRenderer.invoke(IPC.fileMove, projectRoot, fromPath, toPath, expectedHash),
     trash: (projectRoot, path) => ipcRenderer.invoke(IPC.fileTrash, projectRoot, path),

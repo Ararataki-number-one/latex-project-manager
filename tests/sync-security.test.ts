@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { scanSyncSecurity } from "../src/main/services/sync-security";
+import { scanSyncSecurity, scanSyncSecuritySnapshot } from "../src/main/services/sync-security";
 
 const temporaryDirectories: string[] = [];
 
@@ -47,5 +47,14 @@ describe("sync security preflight", () => {
       expect.objectContaining({ path: "huge.pdf", severity: "block" })
     ]));
     expect(findings.some((finding) => finding.path === "deleted.env")).toBe(false);
+  });
+
+  it("scans the immutable candidate blob supplied by Git rather than a later worktree value", async () => {
+    const findings = await scanSyncSecuritySnapshot(
+      [{ path: "main.tex", status: "M " }],
+      [],
+      async () => Buffer.from("token=github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_secret\n", "utf8")
+    );
+    expect(findings).toContainEqual(expect.objectContaining({ path: "main.tex", kind: "secret", severity: "block" }));
   });
 });

@@ -17,8 +17,12 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
 import java.security.MessageDigest
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 class DownloadStore(private val context: Context) {
+    private val dao by lazy { ViewerDatabase.get(context.applicationContext).viewerDao() }
     fun stagingFile(taskId: String): File {
         val safeId = taskId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
         val directory = File(context.cacheDir, "background-downloads").apply { mkdirs() }
@@ -27,6 +31,7 @@ class DownloadStore(private val context: Context) {
 
     fun discardStaging(file: File) {
         runCatching { if (file.isFile) file.delete() }
+        runCatching { File(file.parentFile, "${file.name}.resume").delete() }
     }
 
     suspend fun publishPublicDownloadFromFile(
@@ -52,11 +57,20 @@ class DownloadStore(private val context: Context) {
         val destination = File(directory, fileName)
         try {
             validatePdf(source)
-            if (destination.exists() && !destination.delete()) {
-                throw IllegalStateException("无法替换 PDF 预览缓存")
-            }
-            moveOrCopy(source, destination)
+            atomicReplaceKeepingKnownGood(source, destination, ::validatePdf)
             destination.setLastModified(System.currentTimeMillis())
+            dao.upsertPdfCache(
+                PdfCacheEntity(
+                    cacheKey = cacheKey,
+                    localPath = destination.absolutePath,
+                    size = destination.length(),
+                    lastAccessAt = System.currentTimeMillis(),
+                    repositoryFullName = null,
+                    pdfPath = null,
+                    sha = cacheKey.substringAfterLast('-').removeSuffix(".pdf").takeIf { it.length >= 40 },
+                    knownGood = true
+                )
+            )
             trimPdfCache(directory, destination, maxCacheBytes)
             destination
         } catch (failure: Throwable) {
@@ -74,10 +88,11 @@ class DownloadStore(private val context: Context) {
                 throw IllegalStateException("更新包大小校验失败，请重新下载")
             }
             verifyDigest(source, asset.sha256)
-            if (destination.exists() && !destination.delete()) {
-                throw IllegalStateException("无法替换旧的更新包")
+            atomicReplaceKeepingKnownGood(source, destination) { candidate ->
+                require(candidate.length() > 0) { "更新包为空" }
+                if (asset.size > 0) require(candidate.length() == asset.size) { "更新包大小校验失败" }
+                verifyDigest(candidate, asset.sha256)
             }
-            moveOrCopy(source, destination)
             directory.listFiles()?.filter { it != destination }?.forEach { it.delete() }
             destination
         } catch (failure: Throwable) {
@@ -112,6 +127,9 @@ class DownloadStore(private val context: Context) {
             val cached = runCatching { validatePdf(destination) }.isSuccess
             if (cached) {
                 destination.setLastModified(System.currentTimeMillis())
+                dao.upsertPdfCache(
+                    PdfCacheEntity(cacheKey, destination.absolutePath, destination.length(), System.currentTimeMillis(), null, null, null, true)
+                )
                 return@withContext destination
             }
             destination.delete()
@@ -120,12 +138,10 @@ class DownloadStore(private val context: Context) {
         try {
             FileOutputStream(temporary).use { writer(it) }
             validatePdf(temporary)
-            if (destination.exists() && !destination.delete()) {
-                throw IllegalStateException("无法替换 PDF 预览缓存")
-            }
-            if (!temporary.renameTo(destination)) {
-                throw IllegalStateException("无法建立 PDF 预览缓存")
-            }
+            atomicReplaceKeepingKnownGood(temporary, destination, ::validatePdf)
+            dao.upsertPdfCache(
+                PdfCacheEntity(cacheKey, destination.absolutePath, destination.length(), System.currentTimeMillis(), null, null, null, true)
+            )
             trimPdfCache(directory, destination, maxCacheBytes)
             destination
         } catch (failure: Throwable) {
@@ -143,6 +159,9 @@ class DownloadStore(private val context: Context) {
             return@withContext null
         }
         candidate.setLastModified(System.currentTimeMillis())
+        dao.upsertPdfCache(
+            PdfCacheEntity(cacheKey, candidate.absolutePath, candidate.length(), System.currentTimeMillis(), null, null, null, true)
+        )
         candidate
     }
 
@@ -222,6 +241,7 @@ class DownloadStore(private val context: Context) {
             val size = file.length()
             if (file.isFile && file.delete()) removed += size
         }
+        dao.clearPdfCacheIndex()
         removed
     }
 
@@ -261,11 +281,10 @@ class DownloadStore(private val context: Context) {
                 throw IllegalStateException("更新包大小校验失败，请重新下载")
             }
             verifyDigest(temporary, asset.sha256)
-            if (destination.exists() && !destination.delete()) {
-                throw IllegalStateException("无法替换旧的更新包")
-            }
-            if (!temporary.renameTo(destination)) {
-                throw IllegalStateException("无法保存下载完成的更新包")
+            atomicReplaceKeepingKnownGood(temporary, destination) { candidate ->
+                require(candidate.length() > 0) { "更新包为空" }
+                if (asset.size > 0) require(candidate.length() == asset.size) { "更新包大小校验失败" }
+                verifyDigest(candidate, asset.sha256)
             }
             directory.listFiles()?.filter { it != destination }?.forEach { it.delete() }
             destination
@@ -306,6 +325,60 @@ class DownloadStore(private val context: Context) {
             }
         }
         source.delete()
+    }
+
+    /**
+     * Replaces a cache entry only after the new file is complete and verified.
+     * The previous known-good file is restored if the final move fails.
+     */
+    private fun atomicReplaceKeepingKnownGood(
+        source: File,
+        destination: File,
+        validator: (File) -> Unit
+    ) {
+        destination.parentFile?.mkdirs()
+        val candidate = File(destination.parentFile, ".${destination.name}.${System.nanoTime()}.candidate")
+        val backup = File(destination.parentFile, ".${destination.name}.known-good")
+        try {
+            source.inputStream().use { input ->
+                FileOutputStream(candidate).use { output ->
+                    input.copyTo(output, COPY_BUFFER_BYTES)
+                    output.fd.sync()
+                }
+            }
+            validator(candidate)
+            backup.delete()
+            if (destination.isFile) moveAtomically(destination, backup, replace = true)
+            try {
+                moveAtomically(candidate, destination, replace = true)
+            } catch (failure: Throwable) {
+                if (backup.isFile) moveAtomically(backup, destination, replace = true)
+                throw failure
+            }
+            backup.delete()
+            source.delete()
+        } finally {
+            candidate.delete()
+            if (!destination.isFile && backup.isFile) {
+                runCatching { moveAtomically(backup, destination, replace = true) }
+            }
+        }
+    }
+
+    private fun moveAtomically(source: File, destination: File, replace: Boolean) {
+        val options = buildList {
+            add(StandardCopyOption.ATOMIC_MOVE)
+            if (replace) add(StandardCopyOption.REPLACE_EXISTING)
+        }.toTypedArray()
+        try {
+            Files.move(source.toPath(), destination.toPath(), *options)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                source.toPath(),
+                destination.toPath(),
+                *(if (replace) arrayOf(StandardCopyOption.REPLACE_EXISTING) else emptyArray())
+            )
+        }
     }
 
     private fun trimPdfCache(directory: File, keep: File, maxCacheBytes: Long) {

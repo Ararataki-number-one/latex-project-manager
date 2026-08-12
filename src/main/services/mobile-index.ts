@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve, sep } from "node:path";
@@ -51,6 +51,14 @@ function validateAgainstManifest(index: MobileProjectIndex, manifest: ProjectMan
   }
 }
 
+async function gitBlobSha(path: string): Promise<string> {
+  const bytes = await readFile(path);
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`, "utf8")
+    .update(bytes)
+    .digest("hex");
+}
+
 export class MobileIndexService {
   async read(root: string): Promise<MobileProjectIndex | null> {
     try {
@@ -66,6 +74,7 @@ export class MobileIndexService {
   async write(root: string, manifest: ProjectManifest, value: MobileProjectIndex): Promise<MobileProjectIndex> {
     const parsed = parseMobileProjectIndex(value);
     validateAgainstManifest(parsed, manifest);
+    const verifiedOutputs: MobileProjectIndex["outputs"] = [];
     for (const output of parsed.outputs) {
       const absolute = resolve(root, ...output.pdfPath.split("/"));
       const portable = portableRelativePath(root, absolute);
@@ -75,13 +84,22 @@ export class MobileIndexService {
         throw error;
       });
       if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error(`主 PDF 必须是普通文件：${output.pdfPath}`);
+      const generatedAt = metadata.mtime.toISOString();
+      verifiedOutputs.push({
+        ...output,
+        pdfPath: portable,
+        blobSha: await gitBlobSha(absolute),
+        size: metadata.size,
+        generatedAt
+      });
     }
 
     const normalized: MobileProjectIndex = {
       ...parsed,
+      schemaVersion: 2,
       name: parsed.name.trim(),
       updatedAt: new Date().toISOString(),
-      outputs: parsed.outputs.map((output) => ({ ...output, pdfPath: output.pdfPath.split("\\").join("/") }))
+      outputs: verifiedOutputs
     };
     const destination = resolve(root, MOBILE_PROJECT_INDEX_FILE);
     const temporary = resolve(dirname(destination), `${MOBILE_PROJECT_INDEX_FILE}.${randomBytes(5).toString("hex")}.tmp`);

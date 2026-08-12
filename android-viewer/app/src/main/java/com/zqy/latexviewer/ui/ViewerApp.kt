@@ -20,13 +20,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -58,7 +61,10 @@ import androidx.compose.material.icons.outlined.Logout
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Replay
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
@@ -78,6 +84,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -86,6 +93,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -94,7 +102,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
@@ -114,6 +121,10 @@ import com.zqy.latexviewer.model.GitHubRepository
 import com.zqy.latexviewer.model.DownloadHistoryKind
 import com.zqy.latexviewer.model.DownloadedFile
 import com.zqy.latexviewer.model.MobilePdfOutput
+import com.zqy.latexviewer.model.MobileProjectIndex
+import com.zqy.latexviewer.model.PersistentDownloadState
+import com.zqy.latexviewer.model.PersistentDownloadTask
+import com.zqy.latexviewer.model.ReadingProgress
 import com.zqy.latexviewer.ui.theme.LaTeXViewerTheme
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.rememberHazeState
@@ -134,6 +145,12 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     val apkInstaller = remember(context) { ApkInstaller(context.applicationContext) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     var askedForDownloadNotifications by rememberSaveable { mutableStateOf(false) }
+    var selectedProjectFullName by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedProject = remember(selectedProjectFullName, state.repositories) {
+        state.repositories.firstOrNull {
+            it.fullName.equals(selectedProjectFullName, ignoreCase = true)
+        }
+    }
 
     LaunchedEffect(state.transfer?.workId) {
         if (state.transfer != null && !askedForDownloadNotifications &&
@@ -156,7 +173,19 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
             .onFailure { viewModel.showError(it.message ?: "无法打开 Android 安装界面") }
     }
 
-    BackHandler(enabled = state.screen !in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) { viewModel.goBack() }
+    BackHandler(
+        enabled = selectedProject != null || state.screen !in setOf(
+            ViewerScreen.HOME,
+            ViewerScreen.REPOSITORIES,
+            ViewerScreen.DOWNLOADS
+        )
+    ) {
+        if (selectedProject != null && state.screen == ViewerScreen.REPOSITORIES) {
+            selectedProjectFullName = null
+        } else {
+            viewModel.goBack()
+        }
+    }
 
     LaunchedEffect(state.error) {
         state.error?.let {
@@ -223,31 +252,30 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     }
 
     LaTeXViewerTheme {
-        val colors = MaterialTheme.colorScheme
-        val hazeState = rememberHazeState()
-        val ambientBackground = Brush.verticalGradient(
-            colors = listOf(
-                colors.primaryContainer.copy(alpha = 0.42f),
-                colors.background,
-                colors.background,
-                colors.tertiaryContainer.copy(alpha = 0.18f)
-            )
-        )
-        Box(
-            modifier = Modifier.fillMaxSize()
-        ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(ambientBackground)
-                .liquidGlassSource(hazeState)
-        )
-        Scaffold(
-            containerColor = Color.Transparent,
+        CompositionLocalProvider(LocalLiquidGlassMode provides state.glassMode) {
+            val hazeState = rememberHazeState()
+            Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             contentWindowInsets = WindowInsets.safeDrawing,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
-                if (state.screen != ViewerScreen.PDF) {
+                if (state.screen != ViewerScreen.PDF && selectedProject != null && state.screen == ViewerScreen.REPOSITORIES) {
+                    LiquidGlassTopBar(
+                        title = selectedProject.name,
+                        navigationIcon = Icons.AutoMirrored.Outlined.ArrowBack,
+                        navigationContentDescription = "返回项目列表",
+                        onNavigationClick = { selectedProjectFullName = null },
+                        hazeState = hazeState,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        IconButton(
+                            onClick = { uriHandler.openUri(selectedProject.htmlUrl) },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(Icons.Outlined.OpenInNew, contentDescription = "在 GitHub 查看项目")
+                        }
+                    }
+                } else if (state.screen != ViewerScreen.PDF) {
                     ViewerTopBar(
                         state = state,
                         onBack = viewModel::goBack,
@@ -266,11 +294,26 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                 if (state.screen in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) {
                     ViewerBottomBar(
                         screen = state.screen,
-                        transferActive = state.transfer != null,
+                        transferActive = state.transfer != null || state.downloadTasks.any {
+                            it.state in setOf(
+                                PersistentDownloadState.QUEUED,
+                                PersistentDownloadState.RUNNING,
+                                PersistentDownloadState.WAITING_FOR_NETWORK
+                            )
+                        },
                         hazeState = hazeState,
-                        onHome = viewModel::openHome,
-                        onProjects = viewModel::openProjects,
-                        onDownloads = viewModel::openDownloads
+                        onHome = {
+                            selectedProjectFullName = null
+                            viewModel.openHome()
+                        },
+                        onProjects = {
+                            selectedProjectFullName = null
+                            viewModel.openProjects()
+                        },
+                        onDownloads = {
+                            selectedProjectFullName = null
+                            viewModel.openDownloads()
+                        }
                     )
                 }
             }
@@ -280,16 +323,22 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     .fillMaxSize()
                     .padding(contentPadding)
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .liquidGlassSource(hazeState)
-                ) {
+                val screenModifier = if (state.screen == ViewerScreen.PDF) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth()
+                        .widthIn(max = 960.dp)
+                        .align(Alignment.TopCenter)
+                }
+                Box(modifier = screenModifier.liquidGlassSource(hazeState)) {
                     when (state.screen) {
                     ViewerScreen.HOME -> HomeScreen(
                         state = state,
                         listState = homeListState,
                         onOpenMobilePdf = viewModel::openMobilePdf,
+                        onOpenRecentReading = viewModel::openRecentReading,
                         onOpenProjects = viewModel::openProjects
                     )
                     ViewerScreen.CONNECT -> ConnectScreen(
@@ -298,15 +347,25 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onConnect = viewModel::connect,
                         onTokenHelp = { uriHandler.openUri("https://github.com/settings/personal-access-tokens/new") }
                     )
-                    ViewerScreen.REPOSITORIES -> RepositoryListScreen(
-                        state = state,
-                        listState = projectListState,
-                        onQueryChange = viewModel::updateRepositoryQuery,
-                        onOpen = viewModel::openRepository,
-                        onDownload = viewModel::downloadRepository,
-                        onAdd = viewModel::openAddProject,
-                        onRemove = viewModel::removeRepository
-                    )
+                    ViewerScreen.REPOSITORIES -> if (selectedProject != null) {
+                        ProjectLandingScreen(
+                            repository = selectedProject,
+                            index = state.mobileIndexes[selectedProject.fullName.lowercase()],
+                            onOpenPdf = { output -> viewModel.openMobilePdf(selectedProject, output) },
+                            onBrowseFiles = { viewModel.openRepository(selectedProject) },
+                            onDownloadProject = { viewModel.downloadRepository(selectedProject) }
+                        )
+                    } else {
+                        RepositoryListScreen(
+                            state = state,
+                            listState = projectListState,
+                            onQueryChange = viewModel::updateRepositoryQuery,
+                            onOpen = { selectedProjectFullName = it.fullName },
+                            onDownload = viewModel::downloadRepository,
+                            onAdd = viewModel::openAddProject,
+                            onRemove = viewModel::removeRepository
+                        )
+                    }
                     ViewerScreen.DOWNLOADS -> DownloadsScreen(
                         state = state,
                         listState = downloadListState,
@@ -314,7 +373,9 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onShare = viewModel::shareDownloaded,
                         onRemove = viewModel::removeDownloadRecord,
                         onClearHistory = viewModel::clearDownloadHistory,
-                        onCancelTransfer = viewModel::cancelTransfer
+                        onCancelTransfer = viewModel::cancelTransfer,
+                        onRetryTask = viewModel::retryDownloadTask,
+                        onCancelTask = viewModel::cancelDownloadTask
                     )
                     ViewerScreen.FILES -> FileListScreen(
                         state = state,
@@ -333,7 +394,9 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onDownload = viewModel::downloadFile,
                         onRetry = viewModel::retryCurrentPdf,
                         onOpenExternal = viewModel::openCurrentPdfExternally,
-                        onPageChanged = viewModel::recordPdfPage
+                        onPageChanged = viewModel::recordPdfPage,
+                        bookmarks = state.pdfBookmarks,
+                        onToggleBookmark = viewModel::togglePdfBookmark
                     )
                     ViewerScreen.SETTINGS -> SettingsScreen(
                         state = state,
@@ -344,7 +407,12 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                         onInstallUpdate = ::installDownloadedUpdate,
                         onOpenRelease = viewModel::openReleasePage,
                         onClearPdfCache = viewModel::clearPdfCache,
-                        onDisconnect = viewModel::disconnect
+                        onDisconnect = viewModel::disconnect,
+                        onStartGitHubLogin = viewModel::startGitHubLogin,
+                        onCancelGitHubLogin = viewModel::cancelGitHubLogin,
+                        onOpenGitHubLoginPage = uriHandler::openUri,
+                        glassMode = state.glassMode,
+                        onGlassModeChange = viewModel::setGlassMode
                     )
                     }
                     if (state.loading) {
@@ -386,10 +454,9 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     )
                 }
             }
+            }
         }
     }
-}
-
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -625,7 +692,7 @@ private fun ConnectScreen(
                 enabled = !loading && (repository.isNotBlank() || token.isNotBlank() || tokenStored),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(50.dp),
+                    .heightIn(min = 50.dp),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
@@ -667,6 +734,7 @@ private fun HomeScreen(
     state: ViewerUiState,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onOpenMobilePdf: (GitHubRepository, MobilePdfOutput) -> Unit,
+    onOpenRecentReading: (ReadingProgress) -> Unit,
     onOpenProjects: () -> Unit
 ) {
     val latestPdfs = remember(state.repositories, state.mobileIndexes) {
@@ -675,15 +743,13 @@ private fun HomeScreen(
             .mapNotNull { repository ->
                 state.mobileIndexes[repository.fullName.lowercase()]?.defaultOutput?.let { repository to it }
             }
+            .take(6)
     }
-    val continueReading = remember(state.recentReading, latestPdfs) {
-        val progress = state.recentReading ?: return@remember null
-        latestPdfs.firstOrNull { (repository, output) ->
-            repository.fullName.equals(progress.repositoryFullName, ignoreCase = true) && output.pdfPath == progress.pdfPath
-        }
-    }
-    val recentPdfs = remember(latestPdfs, continueReading) {
-        latestPdfs.filterNot { candidate -> candidate == continueReading }.take(3)
+    val recentReadings = remember(state.recentReadings, state.recentReading) {
+        (state.recentReadings.ifEmpty { listOfNotNull(state.recentReading) })
+            .distinctBy(ReadingProgress::documentId)
+            .sortedByDescending(ReadingProgress::lastReadAt)
+            .take(4)
     }
 
     LazyColumn(
@@ -697,48 +763,39 @@ private fun HomeScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        item { PaperSectionHeader(if (continueReading != null) "继续阅读" else "开始阅读") }
-        if (continueReading != null) {
-            val (repository, output) = continueReading
-            item {
-                MobilePdfHomeCard(
-                    repository = repository,
-                    output = output,
-                    progress = state.recentReading?.let { "第 ${it.pageIndex + 1} / ${it.pageCount} 页" },
-                    progressFraction = state.recentReading?.let {
-                        if (it.pageCount > 0) ((it.pageIndex + 1f) / it.pageCount).coerceIn(0f, 1f) else null
-                    },
-                    emphasized = true,
-                    onOpen = { onOpenMobilePdf(repository, output) }
-                )
-            }
-        } else if (latestPdfs.isNotEmpty()) {
-            val (repository, output) = latestPdfs.first()
-            item {
-                MobilePdfHomeCard(
-                    repository = repository,
-                    output = output,
-                    progress = "首次打开",
-                    progressFraction = 0f,
-                    emphasized = true,
-                    onOpen = { onOpenMobilePdf(repository, output) }
-                )
-            }
-        } else {
+        item { PaperSectionHeader("继续阅读") }
+        if (recentReadings.isEmpty()) {
             item {
                 PaperEmptyState(
-                    title = "还没有可阅读的 PDF",
-                    detail = "在桌面端为项目指定主 PDF 后，就可以从这里继续阅读。",
+                    title = "还没有阅读记录",
+                    detail = "打开任意 PDF 后，阅读位置会自动出现在这里。",
                     icon = Icons.Outlined.PictureAsPdf,
                     actionLabel = "查看项目",
                     onAction = onOpenProjects
                 )
             }
-        }
-        if (recentPdfs.isNotEmpty()) {
-            item { PaperSectionHeader("最近更新", modifier = Modifier.padding(top = 18.dp)) }
+        } else {
             itemsIndexed(
-                recentPdfs,
+                recentReadings,
+                key = { _, progress -> "reading:${progress.documentId}" }
+            ) { index, progress ->
+                ContinueReadingHomeCard(
+                    progress = progress,
+                    emphasized = index == 0,
+                    onOpen = { onOpenRecentReading(progress) }
+                )
+                if (index != recentReadings.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = if (index == 0) 0.dp else 36.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+        }
+        if (latestPdfs.isNotEmpty()) {
+            item { PaperSectionHeader("最新主 PDF", modifier = Modifier.padding(top = 22.dp)) }
+            itemsIndexed(
+                latestPdfs,
                 key = { _, (repository, output) -> "home:${repository.fullName}:${output.id}" }
             ) { index, (repository, output) ->
                 MobilePdfHomeCard(
@@ -746,16 +803,107 @@ private fun HomeScreen(
                     output = output,
                     progress = null,
                     progressFraction = null,
-                    emphasized = false,
+                    emphasized = recentReadings.isEmpty() && index == 0,
                     onOpen = { onOpenMobilePdf(repository, output) }
                 )
-                if (index != recentPdfs.lastIndex) {
+                if (index != latestPdfs.lastIndex) {
                     HorizontalDivider(
                         modifier = Modifier.padding(start = 36.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
             }
+        } else if (recentReadings.isNotEmpty()) {
+            item {
+                PaperEmptyState(
+                    title = "尚未指定主 PDF",
+                    detail = "在桌面端为项目指定成品后，这里会直接显示最新版。",
+                    icon = Icons.Outlined.PictureAsPdf,
+                    actionLabel = "查看项目",
+                    onAction = onOpenProjects,
+                    modifier = Modifier.padding(top = 18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContinueReadingHomeCard(
+    progress: ReadingProgress,
+    emphasized: Boolean,
+    onOpen: () -> Unit
+) {
+    val fraction = if (progress.pageCount > 0) {
+        ((progress.pageIndex + 1f) / progress.pageCount).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    Surface(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(if (emphasized) 22.dp else 0.dp),
+        color = if (emphasized) MaterialTheme.colorScheme.inverseSurface else Color.Transparent,
+        contentColor = if (emphasized) MaterialTheme.colorScheme.inverseOnSurface else MaterialTheme.colorScheme.onSurface
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = if (emphasized) 20.dp else 0.dp, vertical = 15.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                PaperFileTypeIcon(
+                    type = PaperFileType.PDF,
+                    size = 24.dp,
+                    tint = if (emphasized) MaterialTheme.colorScheme.secondary else null
+                )
+                Spacer(Modifier.width(13.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        progress.pdfName,
+                        style = if (emphasized) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        progress.projectName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (emphasized) {
+                            MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.7f)
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Icon(
+                    Icons.Outlined.PlayArrow,
+                    contentDescription = "继续阅读 ${progress.pdfName}",
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp),
+                color = MaterialTheme.colorScheme.secondary,
+                trackColor = if (emphasized) {
+                    MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.18f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                }
+            )
+            Text(
+                if (progress.pageCount > 0) "第 ${progress.pageIndex + 1} / ${progress.pageCount} 页" else "继续上次位置",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (emphasized) {
+                    MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f)
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
         }
     }
 }
@@ -769,7 +917,9 @@ private fun DownloadsScreen(
     onShare: (DownloadedFile) -> Unit,
     onRemove: (DownloadedFile) -> Unit,
     onClearHistory: () -> Unit,
-    onCancelTransfer: () -> Unit
+    onCancelTransfer: () -> Unit,
+    onRetryTask: (String) -> Unit,
+    onCancelTask: (String) -> Unit
 ) {
     var filterName by rememberSaveable { mutableStateOf(DownloadHistoryFilter.ALL.name) }
     var detailDownload by remember { mutableStateOf<DownloadedFile?>(null) }
@@ -779,6 +929,12 @@ private fun DownloadsScreen(
         .getOrDefault(DownloadHistoryFilter.ALL)
     val filteredDownloads = state.downloadedFiles.filter(filter::accepts)
     val totalBytes = state.downloadedFiles.sumOf { it.size.coerceAtLeast(0) }
+    val visibleTasks = remember(state.downloadTasks) {
+        state.downloadTasks
+            .filter { it.state !in setOf(PersistentDownloadState.SUCCEEDED, PersistentDownloadState.CANCELLED) }
+            .sortedByDescending(PersistentDownloadTask::updatedAt)
+            .take(12)
+    }
 
     detailDownload?.let { download ->
         val available = state.downloadAvailability[download.stableId] != false
@@ -850,7 +1006,7 @@ private fun DownloadsScreen(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp)
+                            .heightIn(min = 50.dp)
                     ) {
                         Text("打开文件")
                     }
@@ -861,7 +1017,7 @@ private fun DownloadsScreen(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp)
+                            .heightIn(min = 50.dp)
                     ) {
                         Icon(Icons.Outlined.Share, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
@@ -907,7 +1063,24 @@ private fun DownloadsScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        state.transfer?.let { transfer ->
+        if (visibleTasks.isNotEmpty()) {
+            item { PaperSectionHeader("下载任务") }
+            itemsIndexed(visibleTasks, key = { _, task -> "task:${task.id}" }) { index, task ->
+                PersistentDownloadTaskRow(
+                    task = task,
+                    onRetry = { onRetryTask(task.id) },
+                    onCancel = { onCancelTask(task.id) }
+                )
+                if (index != visibleTasks.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 36.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+            item { Spacer(Modifier.height(20.dp)) }
+        }
+        state.transfer?.takeIf { state.downloadTasks.isEmpty() }?.let { transfer ->
             item {
                 TransferCard(transfer, onCancelTransfer)
                 Spacer(Modifier.height(20.dp))
@@ -1094,6 +1267,38 @@ private fun RepositoryListScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
+        if (state.repositoriesStale || state.repositoryRefreshFailures.isNotEmpty()) {
+            item {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 14.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            Icons.Outlined.CloudQueue,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("正在显示上次同步的项目", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "部分 GitHub 内容暂时无法刷新；恢复网络后可再次刷新。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.78f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
         item {
             Column {
                 PaperSearchField(
@@ -1148,6 +1353,254 @@ private fun RepositoryListScreen(
                 TextButton(onClick = { removeCandidate = null }) { Text("取消") }
             }
         )
+    }
+}
+
+@Composable
+private fun PersistentDownloadTaskRow(
+    task: PersistentDownloadTask,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val determinate = task.total > 0
+    val progress = if (determinate) {
+        (task.downloaded.toFloat() / task.total.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val stateLabel = when (task.state) {
+        PersistentDownloadState.QUEUED -> "排队中"
+        PersistentDownloadState.RUNNING -> if (determinate) "${(progress * 100).toInt()}%" else "正在下载"
+        PersistentDownloadState.WAITING_FOR_NETWORK -> "等待网络"
+        PersistentDownloadState.SUCCEEDED -> "已完成"
+        PersistentDownloadState.FAILED -> "下载失败"
+        PersistentDownloadState.CANCELLED -> "已取消"
+    }
+    val stateColor = if (task.state == PersistentDownloadState.FAILED) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            PaperFileTypeIcon(
+                type = when (task.kind.name) {
+                    "PDF_PREVIEW" -> PaperFileType.PDF
+                    "PROJECT_ARCHIVE" -> PaperFileType.ARCHIVE
+                    "APP_UPDATE" -> PaperFileType.APP
+                    else -> PaperFileType.FILE
+                },
+                size = 24.dp,
+                tint = if (task.state == PersistentDownloadState.FAILED) MaterialTheme.colorScheme.error else null
+            )
+            Spacer(Modifier.width(13.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    task.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    buildString {
+                        append(stateLabel)
+                        if (task.downloaded > 0) {
+                            append(" · ")
+                            append(formatBytes(task.downloaded))
+                            if (determinate) append(" / ${formatBytes(task.total)}")
+                        }
+                        if (task.bytesPerSecond > 0) append(" · ${formatBytes(task.bytesPerSecond)}/s")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = stateColor,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            when (task.state) {
+                PersistentDownloadState.FAILED -> IconButton(
+                    onClick = onRetry,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Outlined.Replay, contentDescription = "重试 ${task.name}")
+                }
+                PersistentDownloadState.QUEUED,
+                PersistentDownloadState.RUNNING,
+                PersistentDownloadState.WAITING_FOR_NETWORK -> IconButton(
+                    onClick = onCancel,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Outlined.Clear, contentDescription = "取消 ${task.name}")
+                }
+                else -> Unit
+            }
+        }
+        if (task.state == PersistentDownloadState.RUNNING) {
+            if (determinate) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.secondary
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.secondary
+                )
+            }
+        }
+        task.error?.takeIf { task.state == PersistentDownloadState.FAILED }?.let { error ->
+            Text(
+                error,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectLandingScreen(
+    repository: GitHubRepository,
+    index: MobileProjectIndex?,
+    onOpenPdf: (MobilePdfOutput) -> Unit,
+    onBrowseFiles: () -> Unit,
+    onDownloadProject: () -> Unit
+) {
+    val defaultOutput = index?.defaultOutput
+    val otherOutputs = remember(index) {
+        index?.outputs.orEmpty().filterNot { it.id == index?.defaultOutputId }
+    }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 8.dp,
+            bottom = 40.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
+    ) {
+        item {
+            Text(
+                index?.name?.ifBlank { repository.name } ?: repository.name,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (repository.isPrivate) Icons.Outlined.Lock else Icons.Outlined.Public,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    "${repository.owner} · ${if (repository.isPrivate) "私有项目" else "公开项目"} · 更新于 ${shortDate(repository.updatedAt)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            repository.description?.takeIf(String::isNotBlank)?.let { description ->
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(28.dp))
+        }
+
+        item { PaperSectionHeader("主 PDF") }
+        if (defaultOutput != null) {
+            item {
+                MobilePdfHomeCard(
+                    repository = repository,
+                    output = defaultOutput,
+                    progress = "打开最新版",
+                    progressFraction = null,
+                    emphasized = true,
+                    onOpen = { onOpenPdf(defaultOutput) }
+                )
+            }
+        } else {
+            item {
+                PaperEmptyState(
+                    title = "尚未指定主 PDF",
+                    detail = "仍可浏览和下载全部项目文件。主 PDF 可在桌面端的项目介绍中设置。",
+                    icon = Icons.Outlined.PictureAsPdf
+                )
+            }
+        }
+
+        if (otherOutputs.isNotEmpty()) {
+            item { PaperSectionHeader("其他成品", modifier = Modifier.padding(top = 22.dp)) }
+            itemsIndexed(otherOutputs, key = { _, output -> "output:${output.id}" }) { position, output ->
+                MobilePdfHomeCard(
+                    repository = repository,
+                    output = output,
+                    progress = null,
+                    progressFraction = null,
+                    emphasized = false,
+                    onOpen = { onOpenPdf(output) }
+                )
+                if (position != otherOutputs.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 36.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+        }
+
+        item {
+            PaperSectionHeader("项目操作", modifier = Modifier.padding(top = 24.dp))
+            Button(
+                onClick = onBrowseFiles,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(Icons.Outlined.FolderOpen, contentDescription = null)
+                Spacer(Modifier.width(9.dp))
+                Text("浏览项目文件")
+            }
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onDownloadProject,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(Icons.Outlined.Download, contentDescription = null)
+                Spacer(Modifier.width(9.dp))
+                Text("下载完整项目 ZIP")
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Android 客户端保持只读。下载和阅读不会修改 GitHub 项目。",
+                modifier = Modifier.padding(horizontal = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -1521,7 +1974,12 @@ private fun SettingsScreen(
     onInstallUpdate: () -> Unit,
     onOpenRelease: () -> Unit,
     onClearPdfCache: () -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onStartGitHubLogin: () -> Unit,
+    onCancelGitHubLogin: () -> Unit,
+    onOpenGitHubLoginPage: (String) -> Unit,
+    glassMode: LiquidGlassMode,
+    onGlassModeChange: (LiquidGlassMode) -> Unit
 ) {
     var confirmDisconnect by remember { mutableStateOf(false) }
 
@@ -1579,7 +2037,82 @@ private fun SettingsScreen(
                             Spacer(Modifier.width(5.dp))
                             Text("移除")
                         }
+                    } else if (state.githubLoginSupported && state.githubDeviceAuthorization == null) {
+                        TextButton(onClick = onStartGitHubLogin) {
+                            Text("登录")
+                        }
                     }
+                }
+            }
+        }
+        state.githubDeviceAuthorization?.let { authorization ->
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("在 GitHub 完成登录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "验证码 ${authorization.userCode}",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            if (state.githubLoginPolling) "浏览器确认后会自动返回，无需复制密钥。" else "登录已暂停，可以重新开始。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Button(
+                            onClick = { onOpenGitHubLoginPage(authorization.verificationUri) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                        ) {
+                            Icon(Icons.Outlined.OpenInNew, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("打开 GitHub 登录页")
+                        }
+                        TextButton(
+                            onClick = onCancelGitHubLogin,
+                            modifier = Modifier.heightIn(min = 48.dp)
+                        ) { Text("取消登录") }
+                    }
+                }
+            }
+        }
+        item { SettingsSectionTitle("视觉效果") }
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
+            ) {
+                Column {
+                    GlassModeRow(
+                        title = "自动",
+                        detail = "根据系统版本和设备性能选择玻璃效果",
+                        selected = glassMode == LiquidGlassMode.AUTO,
+                        onClick = { onGlassModeChange(LiquidGlassMode.AUTO) }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    GlassModeRow(
+                        title = "完整",
+                        detail = "始终使用液态玻璃，旧设备可能更耗电",
+                        selected = glassMode == LiquidGlassMode.FULL,
+                        onClick = { onGlassModeChange(LiquidGlassMode.FULL) }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    GlassModeRow(
+                        title = "关闭",
+                        detail = "使用高对比不透明界面，性能和可读性最佳",
+                        selected = glassMode == LiquidGlassMode.OFF,
+                        onClick = { onGlassModeChange(LiquidGlassMode.OFF) }
+                    )
                 }
             }
         }
@@ -1663,7 +2196,7 @@ private fun SettingsScreen(
                             enabled = state.transfer == null,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(50.dp),
+                                .heightIn(min = 50.dp),
                             shape = RoundedCornerShape(13.dp)
                         ) {
                             Icon(
@@ -1765,6 +2298,38 @@ private fun SettingsScreen(
 @Composable
 private fun SettingsSectionTitle(title: String) {
     PaperSectionHeader(title)
+}
+
+@Composable
+private fun GlassModeRow(
+    title: String,
+    detail: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        color = Color.Transparent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RadioButton(selected = selected, onClick = onClick)
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 }
 
 @Composable

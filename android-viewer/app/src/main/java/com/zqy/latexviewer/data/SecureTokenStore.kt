@@ -29,6 +29,9 @@ class SecureTokenStore(context: Context) {
             .apply()
     }
 
+    /** Saves an OAuth device-flow token only after the caller validates /user. */
+    fun saveOAuthToken(token: String) = save(token)
+
     fun read(): String? {
         val iv = preferences.getString(KEY_IV, null) ?: return null
         val encrypted = preferences.getString(KEY_VALUE, null) ?: return null

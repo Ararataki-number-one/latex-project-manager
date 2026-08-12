@@ -51,6 +51,9 @@ describe("GitHub synchronization", () => {
     let committed = false;
     let identityName = "";
     let identityEmail = "";
+    const blobId = "1".repeat(40);
+    const treeId = "2".repeat(40);
+    const commitId = "3".repeat(40);
     const commands: string[][] = [];
     const result = (code = 0, stdout = "", stderr = ""): GitCommandResult => ({ code, stdout, stderr });
     const runner: GitCommandRunner = async (_executable, cwd, args) => {
@@ -62,6 +65,7 @@ describe("GitHub synchronization", () => {
       commands.push(command);
       if (command[0] === "--version") return result(0, "git version 2.50.0.windows.1\n");
       if (command[0] === "rev-parse" && command[1] === "--show-toplevel") return repository ? result(0, `${root}\n`) : result(128, "", "not a repository");
+      if (command[0] === "rev-parse" && command[1] === "--verify" && command[2] === "HEAD") return committed ? result(0, `${commitId}\n`) : result(128);
       if (command[0] === "init") { repository = true; return result(); }
       if (command[0] === "symbolic-ref" && command[1] === "--short") return result(0, "main\n");
       if (command[0] === "remote" && command[1] === "get-url") return remote ? result(0, "https://github.com/example/notes.git\n") : result(2);
@@ -73,6 +77,10 @@ describe("GitHub synchronization", () => {
       if (command[0] === "log") return committed ? result(0, `abc123\0自动同步\0${"2026-08-10T12:00:00+08:00"}\n`) : result(128);
       if (command[0] === "show-ref") return result(1);
       if (command[0] === "add") { staged = true; return result(); }
+      if (command[0] === "write-tree") return result(0, `${treeId}\n`);
+      if (command[0] === "ls-files" && command[1] === "--stage") return result(0, `100644 ${blobId} 0\tmain.tex\0`);
+      if (command[0] === "cat-file" && command[1] === "-s") return result(0, "24\n");
+      if (command[0] === "cat-file" && command[1] === "blob") return result(0, "\\documentclass{article}\n");
       if (command[0] === "diff" && command.includes("--cached")) return result(staged ? 1 : 0);
       if (command[0] === "config" && command[1] === "--local" && command[2] === "user.name") { identityName = command[3]; return result(); }
       if (command[0] === "config" && command[1] === "--local" && command[2] === "user.email") { identityEmail = command[3]; return result(); }
@@ -80,7 +88,8 @@ describe("GitHub synchronization", () => {
       if (command[0] === "config" && command[1] === "--local" && command[2] === "--get" && command[3] === "user.email") return identityEmail ? result(0, `${identityEmail}\n`) : result(1);
       if (command[0] === "config" && command[1] === "--get" && command[2] === "user.name") return identityName ? result(0, `${identityName}\n`) : result(1);
       if (command[0] === "config" && command[1] === "--get" && command[2] === "user.email") return identityEmail ? result(0, `${identityEmail}\n`) : result(1);
-      if (command[0] === "commit") { committed = true; staged = false; return result(); }
+      if (command[0] === "commit-tree") return result(0, `${commitId}\n`);
+      if (command[0] === "update-ref") { committed = true; staged = false; return result(); }
       if (command[0] === "ls-remote") return result(2);
       if (command[0] === "push") return result();
       throw new Error(`Unexpected Git command: ${command.join(" ")}`);
@@ -103,7 +112,8 @@ describe("GitHub synchronization", () => {
     expect(identified.identity).toEqual({ name: "Reader", email: "reader@example.test", configured: true, source: "local" });
     expect(synced.state).toBe("synced");
     expect(commands).toContainEqual(["add", "-A", "--", "."]);
-    expect(commands.some((command) => command[0] === "commit")).toBe(true);
+    expect(commands.some((command) => command[0] === "commit-tree" && command.includes(treeId))).toBe(true);
+    expect(commands).toContainEqual(["update-ref", "refs/heads/main", commitId]);
     expect(commands).toContainEqual(["push", "-u", "origin", "main"]);
     expect(commands).toContainEqual(["lfs", "install", "--local", "--force"]);
     expect(commands).toContainEqual(["lfs", "track", "*.pdf", "*.epub", "*.djvu"]);
