@@ -28,17 +28,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -49,6 +51,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -81,9 +84,11 @@ private data class PdfRendererHandle(
 @Composable
 internal fun PdfPreviewScreen(
     state: ViewerUiState,
+    onBack: () -> Unit,
     onDownload: (GitHubContent) -> Unit,
     onRetry: () -> Unit,
     onOpenExternal: () -> Unit,
+    onOpenGitHub: () -> Unit,
     onPageChanged: (pageIndex: Int, pageCount: Int) -> Unit
 ) {
     val document = state.pdfDocument ?: return
@@ -152,21 +157,11 @@ internal fun PdfPreviewScreen(
         }
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        PdfReaderToolbar(
-            loading = loadingDocument,
-            pageCount = pageCount,
-            currentPage = currentPage,
-            canDownload = sourceItem != null,
-            documentName = document.name,
-            onDownload = { sourceItem?.let(onDownload) },
-            onOpenExternal = onOpenExternal
-        )
-
         when {
             loadingDocument -> PdfStatusPane(
                 loading = true,
@@ -195,112 +190,142 @@ internal fun PdfPreviewScreen(
             else -> LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                contentPadding = PaddingValues(
+                    start = 5.dp,
+                    top = 76.dp,
+                    end = 5.dp,
+                    bottom = 12.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(count = pageCount, key = { it }) { pageIndex ->
-                    PdfPage(handle.renderer, pageIndex, onOpenExternal)
+                    PdfPage(handle.renderer, pageIndex)
                 }
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp, bottom = 24.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Outlined.CheckCircle,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "已读完全部 " + pageCount + " 页",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
+            }
+        }
+
+        PdfFloatingToolbar(
+            documentName = document.name,
+            sourceItem = sourceItem,
+            onBack = onBack,
+            onDownload = onDownload,
+            onOpenExternal = onOpenExternal,
+            onOpenGitHub = onOpenGitHub,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        )
+
+        if (pageCount > 0 && handle != null) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp),
+                shape = RoundedCornerShape(999.dp),
+                color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.82f),
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shadowElevation = 1.dp
+            ) {
+                Text(
+                    (currentPage + 1).toString() + " / " + pageCount,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium
+                )
             }
         }
     }
 }
 
 @Composable
-private fun PdfReaderToolbar(
-    loading: Boolean,
-    pageCount: Int,
-    currentPage: Int,
-    canDownload: Boolean,
+private fun PdfFloatingToolbar(
     documentName: String,
-    onDownload: () -> Unit,
-    onOpenExternal: () -> Unit
+    sourceItem: GitHubContent?,
+    onBack: () -> Unit,
+    onDownload: (GitHubContent) -> Unit,
+    onOpenExternal: () -> Unit,
+    onOpenGitHub: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    val status = when {
-        loading -> "正在打开"
-        pageCount <= 0 -> "PDF"
-        else -> "第 " + (currentPage + 1) + " / " + pageCount + " 页"
-    }
+    var menuExpanded by remember { mutableStateOf(false) }
+
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 1.dp
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shadowElevation = 3.dp
     ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(start = 12.dp, end = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.size(48.dp)
             ) {
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
-                    Text(
-                        status,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(Modifier.weight(1f))
-                if (canDownload) {
-                    IconButton(
-                        onClick = onDownload,
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            Icons.Outlined.Download,
-                            contentDescription = "下载 " + documentName
-                        )
-                    }
-                }
+                Icon(
+                    Icons.AutoMirrored.Outlined.ArrowBack,
+                    contentDescription = "返回"
+                )
+            }
+            Text(
+                documentName,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Box {
                 IconButton(
-                    onClick = onOpenExternal,
+                    onClick = { menuExpanded = true },
                     modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
-                        Icons.Outlined.OpenInNew,
-                        contentDescription = "使用其他 PDF 应用打开"
+                        Icons.Outlined.MoreVert,
+                        contentDescription = "PDF 选项"
                     )
                 }
-            }
-            if (pageCount > 0) {
-                LinearProgressIndicator(
-                    progress = { (currentPage + 1).toFloat() / pageCount.toFloat() },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(2.dp),
-                    color = MaterialTheme.colorScheme.secondary,
-                    trackColor = MaterialTheme.colorScheme.outlineVariant
-                )
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("在 GitHub 查看") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.OpenInNew, contentDescription = null)
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onOpenGitHub()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("用其他应用打开") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.PictureAsPdf, contentDescription = null)
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onOpenExternal()
+                        }
+                    )
+                    sourceItem?.let { source ->
+                        DropdownMenuItem(
+                            text = { Text("保存副本") },
+                            leadingIcon = {
+                                Icon(Icons.Outlined.Download, contentDescription = null)
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDownload(source)
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -405,7 +430,7 @@ private fun pdfOpenFailureMessage(failure: Throwable?): String = when (failure) 
 }
 
 @Composable
-private fun PdfPage(renderer: PdfRenderer, pageIndex: Int, onOpenExternal: () -> Unit) {
+private fun PdfPage(renderer: PdfRenderer, pageIndex: Int) {
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val density = LocalDensity.current
         val requestedWidth = with(density) { maxWidth.roundToPx() }.coerceAtLeast(1)
@@ -457,8 +482,9 @@ private fun PdfPage(renderer: PdfRenderer, pageIndex: Int, onOpenExternal: () ->
 
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(6.dp),
-            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(2.dp),
+            color = Color.White,
+            contentColor = Color(0xFF252525),
             shadowElevation = 1.dp
         ) {
             val page = bitmap
@@ -469,61 +495,41 @@ private fun PdfPage(renderer: PdfRenderer, pageIndex: Int, onOpenExternal: () ->
                         .aspectRatio(DEFAULT_PAGE_ASPECT_RATIO),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            "正在渲染第 " + (pageIndex + 1) + " 页",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 1.75.dp,
+                        color = Color(0xFF087A5B)
+                    )
                 }
 
                 page == null -> Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 32.dp),
+                        .aspectRatio(DEFAULT_PAGE_ASPECT_RATIO)
+                        .padding(horizontal = 24.dp),
+                    verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Icon(
-                        Icons.Outlined.PictureAsPdf,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(30.dp)
-                    )
-                    Spacer(Modifier.height(12.dp))
                     Text(
-                        "第 " + (pageIndex + 1) + " 页渲染失败",
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "这一页可能过大、损坏，或采用系统不支持的 PDF 格式。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        "第 " + (pageIndex + 1) + " 页无法显示",
+                        color = Color(0xFF666666),
                         style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
                         textAlign = TextAlign.Center
                     )
-                    Spacer(Modifier.height(16.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(
+                        onClick = { retryGeneration += 1 },
+                        modifier = Modifier.height(48.dp)
                     ) {
-                        OutlinedButton(
-                            onClick = { retryGeneration += 1 },
-                            modifier = Modifier.height(48.dp)
-                        ) {
-                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("重试本页")
-                        }
-                        TextButton(
-                            onClick = onOpenExternal,
-                            modifier = Modifier.height(48.dp)
-                        ) {
-                            Text("其他应用打开")
-                        }
+                        Icon(
+                            Icons.Outlined.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                            tint = Color(0xFF087A5B)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("重试", color = Color(0xFF087A5B))
                     }
                 }
 

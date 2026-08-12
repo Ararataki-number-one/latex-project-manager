@@ -10,7 +10,6 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -39,7 +38,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Clear
@@ -59,7 +57,6 @@ import androidx.compose.material.icons.outlined.Logout
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PictureAsPdf
-import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
@@ -68,22 +65,16 @@ import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -93,8 +84,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -135,6 +124,9 @@ import java.util.Locale
 fun LaTeXViewerApp(viewModel: ViewerViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val homeListState = rememberLazyListState()
+    val projectListState = rememberLazyListState()
+    val downloadListState = rememberLazyListState()
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
     val apkInstaller = remember(context) { ApkInstaller(context.applicationContext) }
@@ -234,17 +226,19 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
             contentWindowInsets = WindowInsets.safeDrawing,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
-                ViewerTopBar(
-                    state = state,
-                    onBack = viewModel::goBack,
-                    onAddProject = viewModel::openAddProject,
-                    onRefresh = viewModel::refresh,
-                    onOpenGitHub = viewModel::openCurrentOnGitHub,
-                    onOpenSettings = viewModel::openSettings,
-                    onDownloadProject = {
-                        state.currentRepository?.let(viewModel::downloadRepository)
-                    }
-                )
+                if (state.screen != ViewerScreen.PDF) {
+                    ViewerTopBar(
+                        state = state,
+                        onBack = viewModel::goBack,
+                        onAddProject = viewModel::openAddProject,
+                        onRefresh = viewModel::refresh,
+                        onOpenGitHub = viewModel::openCurrentOnGitHub,
+                        onOpenSettings = viewModel::openSettings,
+                        onDownloadProject = {
+                            state.currentRepository?.let(viewModel::downloadRepository)
+                        }
+                    )
+                }
             },
             bottomBar = {
                 if (state.screen in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) {
@@ -266,19 +260,19 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                 when (state.screen) {
                     ViewerScreen.HOME -> HomeScreen(
                         state = state,
+                        listState = homeListState,
                         onOpenMobilePdf = viewModel::openMobilePdf,
-                        onOpenProjects = viewModel::openProjects,
-                        onOpenSettings = viewModel::openSettings
+                        onOpenProjects = viewModel::openProjects
                     )
                     ViewerScreen.CONNECT -> ConnectScreen(
                         tokenStored = state.tokenStored,
                         loading = state.loading,
                         onConnect = viewModel::connect,
-                        onSettings = viewModel::openSettings,
                         onTokenHelp = { uriHandler.openUri("https://github.com/settings/personal-access-tokens/new") }
                     )
                     ViewerScreen.REPOSITORIES -> RepositoryListScreen(
                         state = state,
+                        listState = projectListState,
                         onQueryChange = viewModel::updateRepositoryQuery,
                         onOpen = viewModel::openRepository,
                         onDownload = viewModel::downloadRepository,
@@ -287,6 +281,7 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     )
                     ViewerScreen.DOWNLOADS -> DownloadsScreen(
                         state = state,
+                        listState = downloadListState,
                         onOpen = viewModel::openDownloaded,
                         onShare = viewModel::shareDownloaded,
                         onRemove = viewModel::removeDownloadRecord,
@@ -305,6 +300,8 @@ fun LaTeXViewerApp(viewModel: ViewerViewModel) {
                     )
                     ViewerScreen.PDF -> PdfPreviewScreen(
                         state,
+                        onBack = viewModel::goBack,
+                        onOpenGitHub = viewModel::openCurrentOnGitHub,
                         onDownload = viewModel::downloadFile,
                         onRetry = viewModel::retryCurrentPdf,
                         onOpenExternal = viewModel::openCurrentPdfExternally,
@@ -374,8 +371,9 @@ private fun ViewerTopBar(
     onDownloadProject: () -> Unit
 ) {
     var projectMenuExpanded by remember { mutableStateOf(false) }
+    var documentMenuExpanded by remember { mutableStateOf(false) }
     val title = when (state.screen) {
-        ViewerScreen.HOME -> "首页"
+        ViewerScreen.HOME -> "阅读"
         ViewerScreen.REPOSITORIES -> "项目"
         ViewerScreen.DOWNLOADS -> "下载"
         ViewerScreen.FILES -> state.currentRepository?.name ?: "项目文件"
@@ -384,39 +382,39 @@ private fun ViewerTopBar(
         ViewerScreen.SETTINGS -> "设置"
         ViewerScreen.CONNECT -> "添加项目"
     }
-    CenterAlignedTopAppBar(
-        title = {
-            Column {
-                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                if (state.screen == ViewerScreen.FILES && state.currentPath.isNotEmpty()) {
-                    Text(
-                        state.currentPath,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+
+    if (state.screen in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) {
+        PaperRootHeader(title = title) {
+            if (state.screen == ViewerScreen.REPOSITORIES) {
+                IconButton(onClick = onAddProject) {
+                    Icon(Icons.Outlined.Add, contentDescription = "添加项目")
                 }
             }
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Outlined.Settings, contentDescription = "打开设置")
+            }
+        }
+        return
+    }
+
+    TopAppBar(
+        title = {
+            Text(
+                title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
         },
         navigationIcon = {
-            if (state.screen !in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) {
+            if (state.screen != ViewerScreen.PDF) {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                 }
             }
         },
         actions = {
-            if (state.screen == ViewerScreen.REPOSITORIES) {
-                IconButton(onClick = onAddProject) {
-                    Icon(Icons.Outlined.Add, contentDescription = "添加项目")
-                }
-            }
-            if (state.screen in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.DOWNLOADS)) {
-                IconButton(onClick = onOpenSettings) {
-                    Icon(Icons.Outlined.Settings, contentDescription = "打开设置")
-                }
-            }
             if (state.screen == ViewerScreen.FILES) {
                 Box {
                     IconButton(onClick = { projectMenuExpanded = true }) {
@@ -453,14 +451,33 @@ private fun ViewerTopBar(
                     }
                 }
             }
-            if (state.screen == ViewerScreen.TEXT || state.screen == ViewerScreen.PDF) {
-                IconButton(onClick = onOpenGitHub) {
-                    Icon(Icons.Outlined.OpenInNew, contentDescription = "在 GitHub 中打开")
-                }
-            }
-            if (state.screen in setOf(ViewerScreen.HOME, ViewerScreen.REPOSITORIES, ViewerScreen.TEXT, ViewerScreen.PDF)) {
-                IconButton(onClick = onRefresh, enabled = !state.loading) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = "刷新")
+            if (state.screen == ViewerScreen.TEXT) {
+                Box {
+                    IconButton(onClick = { documentMenuExpanded = true }) {
+                        Icon(Icons.Outlined.MoreVert, contentDescription = "文档选项")
+                    }
+                    DropdownMenu(
+                        expanded = documentMenuExpanded,
+                        onDismissRequest = { documentMenuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("在 GitHub 中打开") },
+                            leadingIcon = { Icon(Icons.Outlined.OpenInNew, contentDescription = null) },
+                            onClick = {
+                                documentMenuExpanded = false
+                                onOpenGitHub()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("重新载入") },
+                            leadingIcon = { Icon(Icons.Outlined.Refresh, contentDescription = null) },
+                            enabled = !state.loading,
+                            onClick = {
+                                documentMenuExpanded = false
+                                onRefresh()
+                            }
+                        )
+                    }
                 }
             }
         },
@@ -479,40 +496,13 @@ private fun ViewerBottomBar(
     onProjects: () -> Unit,
     onDownloads: () -> Unit
 ) {
-    NavigationBar(tonalElevation = 0.dp) {
-        NavigationBarItem(
-            selected = screen == ViewerScreen.HOME,
-            onClick = onHome,
-            icon = { Icon(Icons.Outlined.Home, contentDescription = null) },
-            label = { Text("首页") }
-        )
-        NavigationBarItem(
-            selected = screen == ViewerScreen.REPOSITORIES,
-            onClick = onProjects,
-            icon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
-            label = { Text("项目") }
-        )
-        NavigationBarItem(
-            selected = screen == ViewerScreen.DOWNLOADS,
-            onClick = onDownloads,
-            icon = {
-                Box(modifier = Modifier.size(32.dp), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Download, contentDescription = null)
-                    if (transferActive) {
-                        Surface(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(9.dp),
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.secondary,
-                            content = {}
-                        )
-                    }
-                }
-            },
-            label = { Text("下载") }
-        )
-    }
+    PaperBottomBar(
+        selected = screen,
+        downloadActive = transferActive,
+        onHome = onHome,
+        onProjects = onProjects,
+        onDownloads = onDownloads
+    )
 }
 
 @Composable
@@ -520,7 +510,6 @@ private fun ConnectScreen(
     tokenStored: Boolean,
     loading: Boolean,
     onConnect: (String, String) -> Unit,
-    onSettings: () -> Unit,
     onTokenHelp: () -> Unit
 ) {
     var repository by rememberSaveable { mutableStateOf("") }
@@ -532,32 +521,20 @@ private fun ConnectScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 36.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.Start
     ) {
-        Surface(
-            modifier = Modifier.size(72.dp),
-            shape = RoundedCornerShape(22.dp),
-            color = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(32.dp))
-            }
-        }
-        Spacer(Modifier.height(24.dp))
-        Text("添加 GitHub 项目", style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(8.dp))
         Text(
-            "项目会保存在手机项目库中，可以继续添加多个。",
+            "粘贴 GitHub 仓库地址。添加后，项目会保存在这台手机的只读项目库中。",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(Modifier.height(34.dp))
+        Spacer(Modifier.height(24.dp))
+        PaperSectionHeader("仓库")
 
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             OutlinedTextField(
                 value = repository,
@@ -566,7 +543,7 @@ private fun ConnectScreen(
                 placeholder = { Text("owner/repository 或完整网址") },
                 leadingIcon = { Icon(Icons.Outlined.CloudQueue, contentDescription = null) },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             )
             if (showPrivateOptions) {
@@ -586,10 +563,10 @@ private fun ConnectScreen(
                     },
                     visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
-                TextButton(onClick = onTokenHelp, modifier = Modifier.align(Alignment.End)) {
+                TextButton(onClick = onTokenHelp, modifier = Modifier.align(Alignment.Start)) {
                     Text("创建只读令牌")
                     Spacer(Modifier.width(6.dp))
                     Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(15.dp))
@@ -606,8 +583,8 @@ private fun ConnectScreen(
                 enabled = !loading && (repository.isNotBlank() || token.isNotBlank() || tokenStored),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(14.dp),
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
                 if (loading) {
@@ -620,54 +597,35 @@ private fun ConnectScreen(
                     Text(if (repository.isBlank()) "载入可访问仓库" else "添加并打开项目")
                 }
             }
-            OutlinedButton(
-                onClick = onSettings,
-                enabled = !loading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Icon(Icons.Outlined.SystemUpdateAlt, contentDescription = null, modifier = Modifier.size(19.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("设置与应用更新")
-            }
         }
 
-        Spacer(Modifier.height(24.dp))
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.fillMaxWidth()
+        Spacer(Modifier.height(28.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
         ) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Lock, contentDescription = null, modifier = Modifier.size(17.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("只读与本机安全", fontWeight = FontWeight.SemiBold)
-                }
-                Text(
-                    "公开仓库不需要令牌。私有仓库建议使用 fine-grained token，仅授予 Metadata: read 与 Contents: read。令牌由 Android Keystore 加密保存。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Icon(
+                Icons.Outlined.Lock,
+                contentDescription = null,
+                modifier = Modifier.size(17.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.width(9.dp))
+            Text(
+                "应用只读取项目。私有令牌由 Android Keystore 加密保存；从手机移除项目不会删除 GitHub 仓库。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
-        Spacer(Modifier.height(18.dp))
-        Text(
-            "从手机项目库移除项目不会删除 GitHub 仓库。",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
 @Composable
 private fun HomeScreen(
     state: ViewerUiState,
+    listState: androidx.compose.foundation.lazy.LazyListState,
     onOpenMobilePdf: (GitHubRepository, MobilePdfOutput) -> Unit,
-    onOpenProjects: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenProjects: () -> Unit
 ) {
     val latestPdfs = remember(state.repositories, state.mobileIndexes) {
         state.repositories
@@ -687,25 +645,17 @@ private fun HomeScreen(
     }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(13.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 4.dp,
+            bottom = 32.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        item {
-            Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)) {
-                Text(
-                    if (continueReading != null) "继续阅读" else "开始阅读",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "主 PDF 会在后台检查 GitHub 最新版本",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
+        item { PaperSectionHeader(if (continueReading != null) "继续阅读" else "开始阅读") }
         if (continueReading != null) {
             val (repository, output) = continueReading
             item {
@@ -713,6 +663,9 @@ private fun HomeScreen(
                     repository = repository,
                     output = output,
                     progress = state.recentReading?.let { "第 ${it.pageIndex + 1} / ${it.pageCount} 页" },
+                    progressFraction = state.recentReading?.let {
+                        if (it.pageCount > 0) ((it.pageIndex + 1f) / it.pageCount).coerceIn(0f, 1f) else null
+                    },
                     emphasized = true,
                     onOpen = { onOpenMobilePdf(repository, output) }
                 )
@@ -724,17 +677,24 @@ private fun HomeScreen(
                     repository = repository,
                     output = output,
                     progress = "首次打开",
+                    progressFraction = 0f,
                     emphasized = true,
                     onOpen = { onOpenMobilePdf(repository, output) }
                 )
             }
         } else {
             item {
-                EmptyState("还没有主 PDF", "在桌面端为项目设置移动端主 PDF 后，会显示在这里。")
+                PaperEmptyState(
+                    title = "还没有可阅读的 PDF",
+                    detail = "在桌面端为项目指定主 PDF 后，就可以从这里继续阅读。",
+                    icon = Icons.Outlined.PictureAsPdf,
+                    actionLabel = "查看项目",
+                    onAction = onOpenProjects
+                )
             }
         }
         if (recentPdfs.isNotEmpty()) {
-            item { HomeSectionTitle("最新 PDF", "按项目更新时间排列") }
+            item { PaperSectionHeader("最近更新", modifier = Modifier.padding(top = 18.dp)) }
             itemsIndexed(
                 recentPdfs,
                 key = { _, (repository, output) -> "home:${repository.fullName}:${output.id}" }
@@ -743,46 +703,15 @@ private fun HomeScreen(
                     repository = repository,
                     output = output,
                     progress = null,
+                    progressFraction = null,
                     emphasized = false,
                     onOpen = { onOpenMobilePdf(repository, output) }
                 )
                 if (index != recentPdfs.lastIndex) {
                     HorizontalDivider(
-                        modifier = Modifier.padding(start = 60.dp),
+                        modifier = Modifier.padding(start = 36.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
-                }
-            }
-        }
-        item {
-            OutlinedButton(
-                onClick = onOpenProjects,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(13.dp)
-            ) {
-                Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(7.dp))
-                Text("查看全部 ${state.repositories.size} 个项目")
-            }
-        }
-        if (state.updateAvailable) {
-            item {
-                Surface(
-                    onClick = onOpenSettings,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.SystemUpdateAlt, contentDescription = null)
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Android ${state.updateInfo?.version.orEmpty()} 可用", fontWeight = FontWeight.SemiBold)
-                            Text(if (state.downloadedApkPath != null) "更新包已下载" else "点击查看并下载更新", style = MaterialTheme.typography.bodyMedium)
-                        }
-                        Icon(Icons.Outlined.ChevronRight, contentDescription = null)
-                    }
                 }
             }
         }
@@ -793,6 +722,7 @@ private fun HomeScreen(
 @Composable
 private fun DownloadsScreen(
     state: ViewerUiState,
+    listState: androidx.compose.foundation.lazy.LazyListState,
     onOpen: (DownloadedFile) -> Unit,
     onShare: (DownloadedFile) -> Unit,
     onRemove: (DownloadedFile) -> Unit,
@@ -800,7 +730,6 @@ private fun DownloadsScreen(
     onCancelTransfer: () -> Unit
 ) {
     var filterName by rememberSaveable { mutableStateOf(DownloadHistoryFilter.ALL.name) }
-    var expandedDownloadId by remember { mutableStateOf<String?>(null) }
     var detailDownload by remember { mutableStateOf<DownloadedFile?>(null) }
     var showHeaderMenu by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -926,43 +855,20 @@ private fun DownloadsScreen(
     }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 12.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 4.dp,
+            bottom = 32.dp
+        ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        if (state.downloadedFiles.isNotEmpty()) item {
-            Row(
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "${state.downloadedFiles.size} 条记录 · ${formatBytes(totalBytes)}",
-                    modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Box {
-                    IconButton(
-                        enabled = state.downloadedFiles.isNotEmpty(),
-                        onClick = { showHeaderMenu = true }
-                    ) { Icon(Icons.Outlined.MoreVert, contentDescription = "下载历史选项") }
-                    DropdownMenu(expanded = showHeaderMenu, onDismissRequest = { showHeaderMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("清空历史记录") },
-                            onClick = {
-                                showHeaderMenu = false
-                                confirmClear = true
-                            }
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.height(4.dp))
-        }
         state.transfer?.let { transfer ->
             item {
                 TransferCard(transfer, onCancelTransfer)
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(20.dp))
             }
         }
         if (state.downloadedFiles.isNotEmpty()) {
@@ -971,34 +877,69 @@ private fun DownloadsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     DownloadHistoryFilter.entries.filter { option ->
                         option == DownloadHistoryFilter.ALL || state.downloadedFiles.any(option::accepts)
                     }.forEach { option ->
-                        val count = state.downloadedFiles.count(option::accepts)
-                        FilterChip(
-                            selected = filter == option,
-                            onClick = { filterName = option.name },
-                            label = { Text(if (option == DownloadHistoryFilter.ALL) option.label else "${option.label} $count") }
-                        )
+                        TextButton(onClick = { filterName = option.name }) {
+                            Text(
+                                option.label,
+                                color = if (filter == option) {
+                                    MaterialTheme.colorScheme.onSurface
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                fontWeight = if (filter == option) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        }
+                    }
+                    Box {
+                        IconButton(
+                            enabled = state.downloadedFiles.isNotEmpty(),
+                            onClick = { showHeaderMenu = true }
+                        ) { Icon(Icons.Outlined.MoreVert, contentDescription = "下载历史选项") }
+                        DropdownMenu(expanded = showHeaderMenu, onDismissRequest = { showHeaderMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("清空历史记录") },
+                                onClick = {
+                                    showHeaderMenu = false
+                                    confirmClear = true
+                                }
+                            )
+                        }
                     }
                 }
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(8.dp))
             }
         }
         if (state.downloadedFiles.isEmpty()) {
             item {
-                EmptyState(
+                PaperEmptyState(
                     title = "还没有下载记录",
                     detail = "下载项目、PDF 或源码后，可以在这里打开和分享。",
                     icon = Icons.Outlined.Download
                 )
             }
         } else if (filteredDownloads.isEmpty()) {
-            item { EmptyState("这个分类还没有文件", "切换到“全部”查看其他下载记录。", Icons.Outlined.Search) }
+            item {
+                PaperEmptyState(
+                    title = "这个分类还没有文件",
+                    detail = "切换到“全部”查看其他下载记录。",
+                    icon = Icons.Outlined.Search
+                )
+            }
         } else {
-            item { HomeSectionTitle("最近下载", "最多保留 200 条记录") }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PaperSectionHeader("下载历史", modifier = Modifier.weight(1f))
+                    Text(
+                        "${state.downloadedFiles.size} 项 · ${formatBytes(totalBytes)}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
             itemsIndexed(filteredDownloads, key = { _, download -> download.stableId }) { index, download ->
                 val available = state.downloadAvailability[download.stableId] != false
                 Surface(
@@ -1006,26 +947,29 @@ private fun DownloadsScreen(
                         if (available) onOpen(download) else detailDownload = download
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.background
+                    shape = RoundedCornerShape(0.dp),
+                    color = Color.Transparent
                 ) {
-                    Row(modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Surface(
-                            modifier = Modifier.size(42.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (available) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.errorContainer
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = downloadHistoryIcon(download.kind),
-                                    contentDescription = null,
-                                    tint = if (available) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(12.dp))
+                    Row(modifier = Modifier.padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                        PaperFileTypeIcon(
+                            type = when (download.kind) {
+                                DownloadHistoryKind.PROJECT_ARCHIVE -> PaperFileType.ARCHIVE
+                                DownloadHistoryKind.PDF -> PaperFileType.PDF
+                                DownloadHistoryKind.SOURCE_FILE -> PaperFileType.SOURCE
+                                DownloadHistoryKind.APP_PACKAGE -> PaperFileType.APP
+                                DownloadHistoryKind.OTHER -> PaperFileType.FILE
+                            },
+                            size = 23.dp,
+                            tint = if (available) null else MaterialTheme.colorScheme.error
+                        )
+                        Spacer(Modifier.width(13.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(download.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                download.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                             Text(
                                 if (available) {
                                     "${downloadHistoryKindLabel(download.kind)} · ${formatBytes(download.size)} · ${formatDownloadTime(download.downloadedAt)}"
@@ -1033,68 +977,19 @@ private fun DownloadsScreen(
                                     "文件已不可用 · 仅保留历史记录"
                                 },
                                 color = if (available) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            download.sourceRepository?.let { repository ->
-                                Text(
-                                    repository,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
                         }
                         IconButton(enabled = available, onClick = { onShare(download) }) {
                             Icon(Icons.Outlined.Share, contentDescription = "分享 ${download.name}")
-                        }
-                        Box {
-                            IconButton(onClick = { expandedDownloadId = download.stableId }) {
-                                Icon(Icons.Outlined.MoreVert, contentDescription = "${download.name} 的更多操作")
-                            }
-                            DropdownMenu(
-                                expanded = expandedDownloadId == download.stableId,
-                                onDismissRequest = { expandedDownloadId = null }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("打开") },
-                                    enabled = available,
-                                    onClick = {
-                                        expandedDownloadId = null
-                                        onOpen(download)
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("分享到其他应用") },
-                                    enabled = available,
-                                    onClick = {
-                                        expandedDownloadId = null
-                                        onShare(download)
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("查看详情和保存位置") },
-                                    onClick = {
-                                        expandedDownloadId = null
-                                        detailDownload = download
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("移除历史记录") },
-                                    onClick = {
-                                        expandedDownloadId = null
-                                        onRemove(download)
-                                    }
-                                )
-                            }
                         }
                     }
                 }
                 if (index != filteredDownloads.lastIndex) {
                     HorizontalDivider(
-                        modifier = Modifier.padding(start = 58.dp),
+                        modifier = Modifier.padding(start = 36.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
@@ -1130,6 +1025,7 @@ private enum class DownloadHistoryFilter(val label: String) {
 @Composable
 private fun RepositoryListScreen(
     state: ViewerUiState,
+    listState: androidx.compose.foundation.lazy.LazyListState,
     onQueryChange: (String) -> Unit,
     onOpen: (GitHubRepository) -> Unit,
     onDownload: (GitHubRepository) -> Unit,
@@ -1143,39 +1039,37 @@ private fun RepositoryListScreen(
                 it.description.orEmpty().contains(query, ignoreCase = true)
         }
     }
-    val listState = rememberLazyListState()
     var removeCandidate by remember { mutableStateOf<GitHubRepository?>(null) }
 
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 4.dp,
+            bottom = 32.dp
+        ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         item {
             Column {
-                Text(
-                    "${state.repositories.size} 个项目 · 保存在这台手机",
-                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 10.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                SearchField(
+                PaperSearchField(
                     value = state.repositoryQuery,
                     onValueChange = onQueryChange,
                     placeholder = "搜索项目"
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
             }
         }
         if (filtered.isEmpty()) {
             item {
-                EmptyState(
-                    if (state.repositories.isEmpty()) "还没有项目" else "没有匹配的项目",
-                    if (state.repositories.isEmpty()) "添加 GitHub 仓库后，就能浏览和下载项目文件。" else "请更换搜索关键词。",
-                    if (state.repositories.isEmpty()) Icons.Outlined.FolderOpen else Icons.Outlined.Search,
-                    if (state.repositories.isEmpty()) "添加项目" else null,
-                    if (state.repositories.isEmpty()) onAdd else null
+                PaperEmptyState(
+                    title = if (state.repositories.isEmpty()) "还没有项目" else "没有匹配的项目",
+                    detail = if (state.repositories.isEmpty()) "添加 GitHub 仓库后，就能浏览和下载项目文件。" else "请更换搜索关键词。",
+                    icon = if (state.repositories.isEmpty()) Icons.Outlined.FolderOpen else Icons.Outlined.Search,
+                    actionLabel = if (state.repositories.isEmpty()) "添加项目" else null,
+                    onAction = if (state.repositories.isEmpty()) onAdd else null
                 )
             }
         } else {
@@ -1188,7 +1082,7 @@ private fun RepositoryListScreen(
                 )
                 if (index != filtered.lastIndex) {
                     HorizontalDivider(
-                        modifier = Modifier.padding(start = 50.dp),
+                        modifier = Modifier.padding(start = 36.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
@@ -1216,64 +1110,100 @@ private fun RepositoryListScreen(
 }
 
 @Composable
-private fun HomeSectionTitle(title: String, detail: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 7.dp)
-    ) {
-        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(2.dp))
-        Text(
-            detail,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium
-        )
-    }
-}
-
 @Composable
 private fun MobilePdfHomeCard(
     repository: GitHubRepository,
     output: MobilePdfOutput,
     progress: String?,
+    progressFraction: Float?,
     emphasized: Boolean,
     onOpen: () -> Unit
 ) {
     Surface(
         onClick = onOpen,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(if (emphasized) 18.dp else 8.dp),
-        color = if (emphasized) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-        contentColor = if (emphasized) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-        border = if (emphasized) BorderStroke(1.dp, MaterialTheme.colorScheme.primaryContainer) else null
+        shape = RoundedCornerShape(if (emphasized) 22.dp else 0.dp),
+        color = if (emphasized) MaterialTheme.colorScheme.inverseSurface else Color.Transparent,
+        contentColor = if (emphasized) MaterialTheme.colorScheme.inverseOnSurface else MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(
-                modifier = Modifier.size(if (emphasized) 48.dp else 42.dp),
-                shape = RoundedCornerShape(14.dp),
-                color = if (emphasized) MaterialTheme.colorScheme.surface.copy(alpha = 0.62f) else MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.PictureAsPdf, contentDescription = null, modifier = Modifier.size(24.dp))
+        if (emphasized) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Outlined.PictureAsPdf,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(Modifier.width(9.dp))
+                    Text(
+                        stateSafeProjectName(repository),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-            }
-            Spacer(Modifier.width(13.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(output.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.height(3.dp))
+                Spacer(Modifier.height(18.dp))
                 Text(
-                    listOfNotNull(stateSafeProjectName(repository), progress).joinToString(" · "),
-                    color = if (emphasized) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
+                    output.name,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+                Spacer(Modifier.height(16.dp))
+                progressFraction?.let { value ->
+                    LinearProgressIndicator(
+                        progress = { value },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp),
+                        color = MaterialTheme.colorScheme.secondary,
+                        trackColor = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.16f)
+                    )
+                    Spacer(Modifier.height(9.dp))
+                }
+                Text(
+                    progress ?: "打开文档",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f)
+                )
             }
-            Icon(Icons.Outlined.ChevronRight, contentDescription = "打开 ${output.name}")
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PaperFileTypeIcon(PaperFileType.PDF, size = 23.dp)
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        output.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        stateSafeProjectName(repository),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Icon(
+                    Icons.Outlined.ChevronRight,
+                    contentDescription = "打开 ${output.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
     }
 }
@@ -1291,45 +1221,34 @@ private fun RepositoryCard(
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.background,
+        shape = RoundedCornerShape(0.dp),
+        color = Color.Transparent,
         tonalElevation = 0.dp
     ) {
         Row(
-            modifier = Modifier.padding(start = 4.dp, top = 10.dp, bottom = 10.dp, end = 0.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(modifier = Modifier.size(38.dp), contentAlignment = Alignment.Center) {
-                Icon(
-                    Icons.Outlined.Folder,
-                    contentDescription = null,
-                    modifier = Modifier.size(29.dp),
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Spacer(Modifier.width(10.dp))
+            PaperFileTypeIcon(PaperFileType.FOLDER, size = 25.dp)
+            Spacer(Modifier.width(13.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     repository.name,
-                    fontSize = 17.sp,
-                    lineHeight = 22.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(3.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${repository.owner} · ${formatBytes(repository.sizeKb * 1024)}",
-                        modifier = Modifier.weight(1f, fill = false),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    PrivacyPill(repository.isPrivate)
-                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "${repository.owner} · ${if (repository.isPrivate) "私有" else "公开"}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
             Box {
                 IconButton(onClick = { menuExpanded = true }) {
@@ -1374,19 +1293,30 @@ private fun FileListScreen(
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 6.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 4.dp,
+            bottom = 32.dp
+        ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         item {
             Column {
                 ProjectBreadcrumb(repository.name, state.currentPath)
                 Spacer(Modifier.height(8.dp))
-                SearchField(value = state.fileQuery, onValueChange = onQueryChange, placeholder = "搜索当前文件夹")
-                Spacer(Modifier.height(10.dp))
+                PaperSearchField(value = state.fileQuery, onValueChange = onQueryChange, placeholder = "搜索当前文件夹")
+                Spacer(Modifier.height(14.dp))
             }
         }
         if (filtered.isEmpty()) {
-            item { EmptyState("这里没有文件", if (query.isEmpty()) "这个目录为空。" else "没有匹配的文件。") }
+            item {
+                PaperEmptyState(
+                    "这里没有文件",
+                    if (query.isEmpty()) "这个目录为空。" else "没有匹配的文件。",
+                    if (query.isEmpty()) Icons.Outlined.FolderOpen else Icons.Outlined.Search
+                )
+            }
         } else {
             itemsIndexed(filtered, key = { _, item -> item.path }) { index, item ->
                 FileRow(
@@ -1398,7 +1328,7 @@ private fun FileListScreen(
                 )
                 if (index != filtered.lastIndex) {
                     HorizontalDivider(
-                        modifier = Modifier.padding(start = 48.dp),
+                        modifier = Modifier.padding(start = 36.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
@@ -1433,65 +1363,6 @@ private fun ProjectBreadcrumb(projectName: String, path: String) {
 }
 
 @Composable
-private fun RepositorySummary(
-    repository: GitHubRepository,
-    path: String,
-    onDownloadProject: () -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.background,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(10.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(
-                modifier = Modifier.size(38.dp),
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(21.dp))
-                }
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        repository.fullName,
-                        modifier = Modifier.weight(1f, fill = false),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    PrivacyPill(repository.isPrivate)
-                }
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    "${if (path.isEmpty()) "项目根目录" else path} · ${repository.defaultBranch}",
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = onDownloadProject, shape = RoundedCornerShape(11.dp)) {
-                Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("ZIP")
-            }
-        }
-    }
-}
-
-@Composable
 private fun FileRow(
     item: GitHubContent,
     onClick: () -> Unit,
@@ -1503,35 +1374,21 @@ private fun FileRow(
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.background,
+        shape = RoundedCornerShape(0.dp),
+        color = Color.Transparent,
         tonalElevation = 0.dp
     ) {
         Row(
             modifier = Modifier
-                .padding(horizontal = 3.dp, vertical = 10.dp),
+                .fillMaxWidth()
+                .padding(vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                modifier = Modifier.size(36.dp),
-                shape = RoundedCornerShape(9.dp),
-                color = if (isFolder) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        when {
-                            isFolder -> Icons.Outlined.Folder
-                            isPdf -> Icons.Outlined.PictureAsPdf
-                            isText -> Icons.Outlined.Code
-                            else -> Icons.Outlined.Description
-                        },
-                        contentDescription = null,
-                        tint = if (isFolder) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-            }
-            Spacer(Modifier.width(11.dp))
+            PaperFileTypeIcon(
+                type = paperFileType(item.name, isFolder),
+                size = 23.dp
+            )
+            Spacer(Modifier.width(13.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     item.name,
@@ -1543,11 +1400,11 @@ private fun FileRow(
                 Text(
                     when {
                         isFolder -> "文件夹"
-                        isPdf -> "PDF · 内置 PDF 查看器"
-                        isText && item.size <= 1_500_000 -> "${formatBytes(item.size)} · 可直接阅读"
-                        else -> "${formatBytes(item.size)} · 在 GitHub 中查看"
+                        isPdf -> "PDF · ${formatBytes(item.size)}"
+                        isText -> "${item.name.substringAfterLast('.', "文本").uppercase()} · ${formatBytes(item.size)}"
+                        else -> formatBytes(item.size)
                     },
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -1560,14 +1417,6 @@ private fun FileRow(
                     )
                 }
             }
-            if (!isFolder && !isText && !isPdf) {
-                Icon(
-                    Icons.Outlined.OpenInNew,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
         }
     }
 }
@@ -1576,76 +1425,46 @@ private fun FileRow(
 private fun TextPreviewScreen(state: ViewerUiState, onDownload: (GitHubContent) -> Unit) {
     val document = state.document ?: return
     val sourceItem = state.contents.firstOrNull { it.path == document.path }
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .background(MaterialTheme.colorScheme.surface)
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Outlined.Article, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(document.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        document.path,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
-                ) {
-                    Text(
-                        "代码 · 只读",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-                if (sourceItem != null) {
-                    Spacer(Modifier.width(4.dp))
-                    IconButton(onClick = { onDownload(sourceItem) }) {
-                        Icon(Icons.Outlined.Download, contentDescription = "下载 ${document.name}")
-                    }
-                }
-            }
+        val vertical = rememberScrollState()
+        val horizontal = rememberScrollState()
+        SelectionContainer {
+            Text(
+                text = document.content,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(vertical)
+                    .horizontalScroll(horizontal)
+                    .padding(start = 18.dp, end = 18.dp, top = 16.dp, bottom = 72.dp),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                softWrap = false
+            )
         }
-        Spacer(Modifier.height(12.dp))
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-        ) {
-            val vertical = rememberScrollState()
-            val horizontal = rememberScrollState()
-            SelectionContainer {
-                Text(
-                    text = document.content,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(vertical)
-                        .horizontalScroll(horizontal)
-                        .padding(18.dp),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    softWrap = false
-                )
+        if (sourceItem != null) {
+            Surface(
+                onClick = { onDownload(sourceItem) },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shadowElevation = 3.dp
+            ) {
+                Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Outlined.Download,
+                        contentDescription = "下载 ${document.name}",
+                        modifier = Modifier.size(21.dp)
+                    )
+                }
             }
         }
     }
@@ -1684,31 +1503,27 @@ private fun SettingsScreen(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 4.dp,
+            bottom = 32.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item { SettingsSectionTitle("GitHub 与隐私") }
         item {
-            Card(
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
             ) {
                 Row(
                     modifier = Modifier.padding(18.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        modifier = Modifier.size(44.dp),
-                        shape = RoundedCornerShape(13.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.Key, contentDescription = null)
-                        }
-                    }
-                    Spacer(Modifier.width(12.dp))
+                    Icon(Icons.Outlined.Key, contentDescription = null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text("GitHub 访问", fontWeight = FontWeight.SemiBold)
                         Text(
@@ -1729,11 +1544,10 @@ private fun SettingsScreen(
         }
         item { SettingsSectionTitle("自动更新") }
         item {
-            Card(
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
             ) {
                 SettingSwitchRow(
                     title = "自动检查更新",
@@ -1753,31 +1567,23 @@ private fun SettingsScreen(
         }
         item { SettingsSectionTitle("客户端版本") }
         item {
-            Card(
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
             ) {
                 Column(
                     modifier = Modifier.padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(
-                            modifier = Modifier.size(46.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    Icons.Outlined.SystemUpdateAlt,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.secondary
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(12.dp))
+                        Icon(
+                            Icons.Outlined.SystemUpdateAlt,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Android 客户端", style = MaterialTheme.typography.titleMedium)
                             Text(
@@ -1879,11 +1685,10 @@ private fun SettingsScreen(
             }
         }
         item {
-            Card(
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                color = MaterialTheme.colorScheme.surfaceContainerLow
             ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
@@ -1918,12 +1723,7 @@ private fun SettingsScreen(
 
 @Composable
 private fun SettingsSectionTitle(title: String) {
-    Text(
-        title,
-        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
+    PaperSectionHeader(title)
 }
 
 @Composable
@@ -1957,11 +1757,10 @@ private fun DownloadCompleteBanner(
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        shadowElevation = 6.dp
+        shadowElevation = 3.dp
     ) {
         Row(
             modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 6.dp),
@@ -2004,7 +1803,7 @@ private fun TransferCard(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.inverseSurface,
         contentColor = MaterialTheme.colorScheme.inverseOnSurface,
-        shadowElevation = 8.dp
+        shadowElevation = 3.dp
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2059,105 +1858,6 @@ private fun TransferCard(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SearchField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
-    TextField(
-        value = value,
-        onValueChange = onValueChange,
-        modifier = Modifier.fillMaxWidth(),
-        placeholder = { Text(placeholder) },
-        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-        trailingIcon = if (value.isNotEmpty()) {
-            {
-                IconButton(onClick = { onValueChange("") }) {
-                    Icon(Icons.Outlined.Clear, contentDescription = "清除搜索")
-                }
-            }
-        } else null,
-        singleLine = true,
-        shape = RoundedCornerShape(14.dp),
-        colors = TextFieldDefaults.colors(
-            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-            focusedIndicatorColor = Color.Transparent,
-            unfocusedIndicatorColor = Color.Transparent,
-            disabledIndicatorColor = Color.Transparent
-        )
-    )
-}
-
-@Composable
-private fun PrivacyPill(isPrivate: Boolean) {
-    val background = if (isPrivate) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer
-    val foreground = if (isPrivate) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer
-    Surface(shape = RoundedCornerShape(999.dp), color = background, contentColor = foreground) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                if (isPrivate) Icons.Outlined.Lock else Icons.Outlined.Public,
-                contentDescription = null,
-                modifier = Modifier.size(12.dp)
-            )
-            Spacer(Modifier.width(4.dp))
-            Text(if (isPrivate) "私有" else "公开", style = MaterialTheme.typography.bodyMedium, fontSize = 12.sp)
-        }
-    }
-}
-
-@Composable
-private fun EmptyState(
-    title: String,
-    detail: String,
-    icon: ImageVector = Icons.Outlined.FolderOpen,
-    actionLabel: String? = null,
-    onAction: (() -> Unit)? = null
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 52.dp, horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant) {
-            Box(modifier = Modifier.size(54.dp), contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(5.dp))
-        Text(
-            detail,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium
-        )
-        if (actionLabel != null && onAction != null) {
-            Spacer(Modifier.height(18.dp))
-            Button(onClick = onAction, modifier = Modifier.height(48.dp)) {
-                Text(actionLabel)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ReadOnlyFooter() {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 22.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(Icons.Outlined.Lock, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(6.dp))
-        Text("只读浏览，不会修改 GitHub 文件", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

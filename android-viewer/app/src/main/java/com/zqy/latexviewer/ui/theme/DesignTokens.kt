@@ -16,12 +16,45 @@ object AppSpacing {
     val lg = 20.dp
     val xl = 24.dp
     val xxl = 32.dp
-    val section = 36.dp
+    val section = 40.dp
 
-    val screenHorizontal = 20.dp
-    val screenVertical = 16.dp
+    val screenHorizontal = 16.dp
+    val screenVertical = 12.dp
+
+    // Compatibility aliases for screens that adopted the first token set.
+    val minimumTouchTarget = AppSize.minimumTouchTarget
+    val listRowMinimum = AppSize.listRowCompact
+}
+
+object AppSize {
     val minimumTouchTarget = 48.dp
-    val listRowMinimum = 56.dp
+    val topBarHeight = 56.dp
+    val bottomBarHeight = 68.dp
+    val bottomIndicatorWidth = 56.dp
+    val bottomIndicatorHeight = 32.dp
+    val searchHeight = 48.dp
+    val listRowCompact = 56.dp
+    val listRow = 64.dp
+    val projectRow = 72.dp
+    val listIconContainer = 40.dp
+    val listIcon = 22.dp
+    val dividerInset = 56.dp
+}
+
+object AppRadius {
+    val icon = 10.dp
+    val control = 12.dp
+    val search = 14.dp
+    val card = 16.dp
+    val floating = 18.dp
+    val sheet = 24.dp
+    val pill = 999.dp
+}
+
+object AppElevation {
+    val none = 0.dp
+    val floating = 3.dp
+    val dialog = 6.dp
 }
 
 /**
@@ -29,11 +62,12 @@ object AppSpacing {
  * spatial changes use a smooth curve, and progress remains linear.
  */
 object AppMotion {
-    const val pressMillis = 120
-    const val exitMillis = 160
+    const val pressMillis = 100
+    const val exitMillis = 140
+    const val selectionMillis = 160
     const val enterMillis = 180
     const val stateChangeMillis = 220
-    const val containerMillis = 280
+    const val containerMillis = 260
 
     val enterEasing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
     val standardEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
