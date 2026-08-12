@@ -16,61 +16,129 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 private val LightColors = lightColorScheme(
-    primary = Color(0xFF171717),
+    // Green is the only interactive accent. Neutral colors carry hierarchy.
+    primary = Color(0xFF087A5B),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE8F5F1),
-    onPrimaryContainer = Color(0xFF075B48),
-    secondary = Color(0xFF10A37F),
+    primaryContainer = Color(0xFFDDF3EA),
+    onPrimaryContainer = Color(0xFF074C3B),
+    secondary = Color(0xFF087A5B),
     onSecondary = Color.White,
-    background = Color(0xFFFFFFFF),
-    onBackground = Color(0xFF111111),
+    secondaryContainer = Color(0xFFE7F2EE),
+    onSecondaryContainer = Color(0xFF23443B),
+    tertiary = Color(0xFF56615C),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFE1E6E3),
+    onTertiaryContainer = Color(0xFF3D4742),
+    background = Color(0xFFF7F7F5),
+    onBackground = Color(0xFF1B1D1B),
     surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF111111),
-    surfaceVariant = Color(0xFFF4F4F4),
-    onSurfaceVariant = Color(0xFF666666),
-    outline = Color(0xFFD9D9D9),
-    outlineVariant = Color(0xFFEDEDED),
-    error = Color(0xFFB42318),
-    errorContainer = Color(0xFFFFE9E7)
+    onSurface = Color(0xFF1B1D1B),
+    surfaceVariant = Color(0xFFF0F1EF),
+    onSurfaceVariant = Color(0xFF626762),
+    surfaceTint = Color(0xFF087A5B),
+    inverseSurface = Color(0xFF2F312F),
+    inverseOnSurface = Color(0xFFF3F4F1),
+    inversePrimary = Color(0xFF72D6B4),
+    outline = Color(0xFF767B76),
+    outlineVariant = Color(0xFFDADDD8),
+    scrim = Color.Black,
+    error = Color(0xFFBA1A1A),
+    onError = Color.White,
+    errorContainer = Color(0xFFFFDAD6),
+    onErrorContainer = Color(0xFF93000A)
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFFECECEC),
-    onPrimary = Color(0xFF171717),
-    primaryContainer = Color(0xFF173F36),
-    onPrimaryContainer = Color(0xFFA8E8D7),
-    secondary = Color(0xFF19C394),
-    onSecondary = Color(0xFF08251E),
-    background = Color(0xFF171717),
-    onBackground = Color(0xFFECECEC),
-    surface = Color(0xFF212121),
-    onSurface = Color(0xFFECECEC),
-    surfaceVariant = Color(0xFF2F2F2F),
-    onSurfaceVariant = Color(0xFFB8B8B8),
-    outline = Color(0xFF484848),
-    outlineVariant = Color(0xFF353535),
+    primary = Color(0xFF75DDB9),
+    onPrimary = Color(0xFF00382A),
+    primaryContainer = Color(0xFF0B513F),
+    onPrimaryContainer = Color(0xFFB3F0D9),
+    secondary = Color(0xFF75DDB9),
+    onSecondary = Color(0xFF00382A),
+    secondaryContainer = Color(0xFF173E34),
+    onSecondaryContainer = Color(0xFFC9EAE0),
+    tertiary = Color(0xFFC1C8C3),
+    onTertiary = Color(0xFF2B332F),
+    tertiaryContainer = Color(0xFF3E4742),
+    onTertiaryContainer = Color(0xFFDDE5DF),
+    background = Color(0xFF111311),
+    onBackground = Color(0xFFE5E7E3),
+    surface = Color(0xFF191B19),
+    onSurface = Color(0xFFE5E7E3),
+    surfaceVariant = Color(0xFF252825),
+    onSurfaceVariant = Color(0xFFBCC2BC),
+    surfaceTint = Color(0xFF75DDB9),
+    inverseSurface = Color(0xFFE5E7E3),
+    inverseOnSurface = Color(0xFF2E312E),
+    inversePrimary = Color(0xFF087A5B),
+    outline = Color(0xFF899089),
+    outlineVariant = Color(0xFF3E433F),
+    scrim = Color.Black,
     error = Color(0xFFFFB4AB),
-    errorContainer = Color(0xFF5C1B17)
+    onError = Color(0xFF690005),
+    errorContainer = Color(0xFF93000A),
+    onErrorContainer = Color(0xFFFFDAD6)
 )
 
 private val AppTypography = Typography(
+    displayLarge = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 48.sp,
+        lineHeight = 56.sp,
+        letterSpacing = (-0.5).sp
+    ),
+    displayMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 40.sp,
+        lineHeight = 48.sp,
+        letterSpacing = (-0.4).sp
+    ),
+    displaySmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 34.sp,
+        lineHeight = 42.sp,
+        letterSpacing = (-0.3).sp
+    ),
     headlineLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 30.sp,
-        lineHeight = 36.sp
+        lineHeight = 38.sp,
+        letterSpacing = (-0.2).sp
+    ),
+    headlineMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 24.sp,
+        lineHeight = 32.sp,
+        letterSpacing = (-0.1).sp
     ),
     headlineSmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 21.sp,
-        lineHeight = 27.sp
+        fontSize = 20.sp,
+        lineHeight = 28.sp
+    ),
+    titleLarge = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 18.sp,
+        lineHeight = 26.sp
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 16.sp,
-        lineHeight = 22.sp
+        lineHeight = 24.sp
+    ),
+    titleSmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
+        lineHeight = 20.sp
     ),
     bodyLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
@@ -84,18 +152,38 @@ private val AppTypography = Typography(
         fontSize = 14.sp,
         lineHeight = 21.sp
     ),
+    bodySmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 18.sp
+    ),
     labelLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
         fontSize = 14.sp,
         lineHeight = 20.sp
+    ),
+    labelMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+        lineHeight = 16.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 11.sp,
+        lineHeight = 16.sp
     )
 )
 
 private val AppShapes = Shapes(
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(22.dp)
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(22.dp)
 )
 
 @Composable
