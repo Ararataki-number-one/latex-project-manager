@@ -530,7 +530,8 @@ class GitHubApi(
             connection.outputStream.use { it.write(body) }
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val response = stream?.use { readLimited(it, MAX_JSON_BYTES) }.orEmpty().toString(Charsets.UTF_8)
+            val responseBytes = stream?.use { readLimited(it, MAX_JSON_BYTES) } ?: ByteArray(0)
+            val response = responseBytes.toString(Charsets.UTF_8)
             if (status !in 200..299) throw requestFailure(status, response, null, null)
             response
         } catch (failure: GitHubRequestException) {

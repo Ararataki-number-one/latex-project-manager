@@ -87,7 +87,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -370,8 +369,14 @@ private fun openPdfiumDocument(
         try {
             val pageCount = document.getPageCount()
             require(pageCount > 0) { "PDF 文档没有页面" }
-            val sizes = runCatching { document.getPageSizes(PDFIUM_LAYOUT_DPI) }
-                .getOrElse { emptyList() }
+            val sizes = runCatching {
+                List(pageCount) { pageIndex ->
+                    document.openPage(pageIndex).use { page ->
+                        page.getPageSize(PDFIUM_LAYOUT_DPI)
+                    }
+                }
+            }
+                .getOrElse { emptyList<PdfiumSize>() }
                 .takeIf { values ->
                     values.size == pageCount && values.all { it.width > 0 && it.height > 0 }
                 }
