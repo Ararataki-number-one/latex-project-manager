@@ -111,7 +111,7 @@ object ReleaseSecurity {
         val rawPublicKey = rawEd25519PublicKey(publicKeySubjectPublicKeyInfo)
         val verifier = Ed25519Signer()
         verifier.init(false, Ed25519PublicKeyParameters(rawPublicKey, 0))
-        verifier.blockUpdate(payload, 0, payload.size)
+        verifier.update(payload, 0, payload.size)
         return verifier.verifySignature(signature)
     }
 

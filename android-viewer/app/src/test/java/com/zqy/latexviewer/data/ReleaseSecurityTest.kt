@@ -68,7 +68,7 @@ class ReleaseSecurityTest {
         val payload = signed.toString().toByteArray(Charsets.UTF_8)
         val signer = Ed25519Signer()
         signer.init(true, privateKey)
-        signer.blockUpdate(payload, 0, payload.size)
+        signer.update(payload, 0, payload.size)
         val signature = signer.generateSignature()
         val root = JSONObject()
             .put("signed", signed)
