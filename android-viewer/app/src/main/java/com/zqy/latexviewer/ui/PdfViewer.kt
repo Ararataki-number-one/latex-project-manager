@@ -49,6 +49,7 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.ZoomOutMap
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -100,8 +101,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.PdfBookmark
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.rememberHazeState
 import io.legere.pdfiumandroid.PdfDocument as PdfiumDocument
 import io.legere.pdfiumandroid.PdfiumCore
 import io.legere.pdfiumandroid.api.Bookmark as PdfiumBookmark
@@ -157,7 +156,6 @@ internal fun PdfPreviewScreen(
     val source = state.pdfDocument ?: return
     val sourceItem = state.currentPdfSource
     val context = LocalContext.current
-    val hazeState = rememberHazeState()
     val documentKey = remember(source.repositoryFullName, source.path, source.sha, source.openedAt) {
         listOf(source.repositoryFullName.orEmpty(), source.path, source.sha.orEmpty(), source.openedAt.toString())
             .joinToString("|")
@@ -227,7 +225,7 @@ internal fun PdfPreviewScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .background(MaterialTheme.colorScheme.surface)
     ) {
         when {
             handleResult == null -> PdfStatusPane(
@@ -257,15 +255,14 @@ internal fun PdfPreviewScreen(
             else -> LazyColumn(
                 state = listState,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .liquidGlassSource(hazeState),
+                    .fillMaxSize(),
                 contentPadding = PaddingValues(
-                    start = PDF_PAGE_GUTTER,
-                    top = PDF_PAGE_GUTTER,
-                    end = PDF_PAGE_GUTTER,
-                    bottom = 88.dp
+                    start = 26.dp,
+                    top = 98.dp,
+                    end = 26.dp,
+                    bottom = 24.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(PDF_PAGE_GUTTER)
+                verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
                 items(count = pageCount, key = { index -> "$documentKey:$index" }) { pageIndex ->
                     PdfiumPage(
@@ -287,7 +284,7 @@ internal fun PdfPreviewScreen(
             visible = controlsVisible,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(horizontal = 10.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 6.dp),
             enter = fadeIn(),
             exit = fadeOut()
         ) {
@@ -303,7 +300,11 @@ internal fun PdfPreviewScreen(
                 offline = state.currentPdfOffline,
                 onKeepOffline = onKeepOffline,
                 onRemoveOffline = onRemoveOffline,
-                hazeState = hazeState
+                outlineAvailable = handle?.outline?.isNotEmpty() == true,
+                zoomed = zoom > MIN_PDF_ZOOM + 0.01f,
+                onOpenNavigator = { navigatorVisible = true },
+                onOpenPageJump = { pageJumpVisible = true },
+                onResetZoom = { zoom = MIN_PDF_ZOOM }
             )
         }
 
@@ -311,21 +312,26 @@ internal fun PdfPreviewScreen(
             AnimatedVisibility(
                 visible = controlsVisible,
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                    .align(Alignment.TopStart)
+                    .padding(start = 26.dp, top = 61.dp),
                 enter = fadeIn(),
                 exit = fadeOut()
             ) {
-                PdfBottomControls(
-                    currentPage = currentPage,
-                    pageCount = pageCount,
-                    zoom = zoom,
-                    outlineAvailable = handle.outline.isNotEmpty(),
-                    onOpenNavigator = { navigatorVisible = true },
-                    onOpenPageJump = { pageJumpVisible = true },
-                    onResetZoom = { zoom = MIN_PDF_ZOOM },
-                    hazeState = hazeState
-                )
+                Surface(
+                    onClick = { pageJumpVisible = true },
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color.White,
+                    contentColor = Color(0xFF111111),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFECECEA)),
+                    shadowElevation = 2.dp
+                ) {
+                    Text(
+                        text = "${currentPage + 1} / $pageCount",
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
     }
@@ -435,65 +441,79 @@ private fun PdfFloatingToolbar(
     offline: Boolean,
     onKeepOffline: () -> Unit,
     onRemoveOffline: () -> Unit,
-    hazeState: HazeState
+    outlineAvailable: Boolean,
+    zoomed: Boolean,
+    onOpenNavigator: () -> Unit,
+    onOpenPageJump: () -> Unit,
+    onResetZoom: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
-    LiquidGlassSurface(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 56.dp),
-        shape = RoundedCornerShape(22.dp),
-        elevation = 8.dp,
-        hazeState = hazeState
+            .heightIn(min = 50.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
-            }
-            Text(
-                text = documentName,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+        IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
+        }
+        Text(
+            text = documentName,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        IconButton(onClick = onOpenPageJump, modifier = Modifier.size(48.dp)) {
+            Icon(Icons.Outlined.Search, contentDescription = "Find a page")
+        }
+        IconButton(onClick = onToggleBookmark, modifier = Modifier.size(48.dp)) {
+            Icon(
+                imageVector = if (bookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
+                contentDescription = if (bookmarked) "Remove bookmark" else "Bookmark page",
+                tint = MaterialTheme.colorScheme.onSurface
             )
-            IconButton(onClick = onToggleBookmark, modifier = Modifier.size(48.dp)) {
-                Icon(
-                    imageVector = if (bookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
-                    contentDescription = if (bookmarked) "移除本页书签" else "为本页添加书签",
-                    tint = if (bookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                )
+        }
+        Box {
+            IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Outlined.MoreVert, contentDescription = "PDF tools")
             }
-            Box {
-                IconButton(onClick = { menuExpanded = true }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Outlined.MoreVert, contentDescription = "更多 PDF 操作")
-                }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                     DropdownMenuItem(
-                        text = { Text("在 GitHub 查看") },
+                        text = { Text("Contents & bookmarks") },
+                        leadingIcon = { Icon(Icons.Outlined.FormatListBulleted, contentDescription = null) },
+                        enabled = outlineAvailable,
+                        onClick = { menuExpanded = false; onOpenNavigator() }
+                    )
+                    if (zoomed) {
+                        DropdownMenuItem(
+                            text = { Text("Fit to width") },
+                            leadingIcon = { Icon(Icons.Outlined.ZoomOutMap, contentDescription = null) },
+                            onClick = { menuExpanded = false; onResetZoom() }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("View on GitHub") },
                         leadingIcon = { Icon(Icons.Outlined.OpenInNew, contentDescription = null) },
                         onClick = { menuExpanded = false; onOpenGitHub() }
                     )
                     DropdownMenuItem(
-                        text = { Text("用其他应用打开") },
+                        text = { Text("Open in another app") },
                         leadingIcon = { Icon(Icons.Outlined.PictureAsPdf, contentDescription = null) },
                         onClick = { menuExpanded = false; onOpenExternal() }
                     )
                     sourceItem?.let {
                         DropdownMenuItem(
-                            text = { Text("保存副本") },
+                            text = { Text("Save a copy") },
                             leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
                             onClick = { menuExpanded = false; onDownload() }
                         )
                     }
                     DropdownMenuItem(
                         text = {
-                            Text(if (offline) "取消离线保留" else "离线保留")
+                            Text(if (offline) "Remove offline copy" else "Keep offline")
                         },
                         leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
                         onClick = {
@@ -501,68 +521,6 @@ private fun PdfFloatingToolbar(
                             if (offline) onRemoveOffline() else onKeepOffline()
                         }
                     )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PdfBottomControls(
-    currentPage: Int,
-    pageCount: Int,
-    zoom: Float,
-    outlineAvailable: Boolean,
-    onOpenNavigator: () -> Unit,
-    onOpenPageJump: () -> Unit,
-    onResetZoom: () -> Unit,
-    hazeState: HazeState
-) {
-    LiquidGlassSurface(
-        shape = RoundedCornerShape(24.dp),
-        elevation = 8.dp,
-        hazeState = hazeState,
-        contentPadding = PaddingValues(horizontal = 4.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(
-                onClick = onOpenNavigator,
-                enabled = outlineAvailable,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    Icons.Outlined.FormatListBulleted,
-                    contentDescription = if (outlineAvailable) "文档目录和书签" else "此文档没有目录",
-                    tint = if (outlineAvailable) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                )
-            }
-            Surface(
-                onClick = onOpenPageJump,
-                modifier = Modifier.heightIn(min = 44.dp),
-                shape = RoundedCornerShape(999.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.42f),
-                contentColor = MaterialTheme.colorScheme.onSurface
-            ) {
-                Box(
-                    modifier = Modifier.padding(horizontal = 14.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "${currentPage + 1} / $pageCount",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-            IconButton(
-                onClick = onResetZoom,
-                enabled = zoom > MIN_PDF_ZOOM + 0.01f,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    Icons.Outlined.ZoomOutMap,
-                    contentDescription = if (zoom > MIN_PDF_ZOOM + 0.01f) "恢复适宽" else "当前已适宽"
-                )
             }
         }
     }

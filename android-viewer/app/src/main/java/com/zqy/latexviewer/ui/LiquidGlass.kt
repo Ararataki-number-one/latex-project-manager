@@ -335,32 +335,32 @@ internal fun LiquidGlassBottomBar(
         backdropBlurEnabled = backdropBlurEnabled
     ) {
         LiquidGlassBottomItem(
-            label = "项目",
+            label = "Projects",
             icon = Icons.Outlined.Folder,
             selected = selectedKey == LIQUID_PROJECTS,
             onClick = onProjects
         )
         LiquidGlassBottomItem(
-            label = "文件",
+            label = "Files",
             icon = Icons.Outlined.Description,
             selected = selectedKey == LIQUID_FILES,
             onClick = onFiles
         )
         LiquidGlassBottomItem(
-            label = "阅读",
+            label = "Reader",
             icon = Icons.Outlined.MenuBook,
             selected = selectedKey == LIQUID_READER,
             onClick = onReader
         )
         LiquidGlassBottomItem(
-            label = "下载",
+            label = "Downloads",
             icon = Icons.Outlined.Download,
             selected = selectedKey == LIQUID_DOWNLOADS,
             statusActive = downloadActive,
             onClick = onDownloads
         )
         LiquidGlassBottomItem(
-            label = "设置",
+            label = "Settings",
             icon = Icons.Outlined.Settings,
             selected = selectedKey == LIQUID_SETTINGS,
             onClick = onSettings

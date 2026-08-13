@@ -140,7 +140,7 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LaTeXViewerApp(viewModel: ViewerViewModel) {
+private fun LegacyLaTeXViewerApp(viewModel: ViewerViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val homeListState = rememberLazyListState()
