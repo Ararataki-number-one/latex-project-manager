@@ -51,7 +51,7 @@
     "vitest": "4.1.10"
   },
   "config": {
-    "betaVersion": "1.0.0-beta.4"
+    "betaVersion": "1.0.0-beta.5"
   },
   "build": {
     "appId": "local.latex.workbench",
