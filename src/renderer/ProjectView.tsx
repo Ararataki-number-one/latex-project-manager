@@ -11,13 +11,15 @@ import {
   Files,
   FolderKanban,
   FolderOpen,
-  GitFork,
   LoaderCircle,
+  ShieldCheck,
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
 import type {
   BuildProfile,
+  BackupSnapshot,
   DocumentTarget,
+  ProjectBackupSettings,
   ProjectManifest,
   ProjectPdfInfo,
   ProjectSummary,
@@ -34,7 +36,7 @@ interface ProjectViewProps {
   api: WorkbenchApi;
   project: ProjectSummary;
   isDemo: boolean;
-  initialTab?: "overview" | "github";
+  initialTab?: ProjectTab;
   onBack: () => void;
   onNotify: (message: string) => void;
   onProjectChange?: (project: ProjectSummary) => void;
@@ -136,12 +138,14 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
   async function openProjectInVsCode() {
     const vscode = getVsCodeApi(api);
     if (!vscode || vsCodeStatus?.available === false) {
-      onNotify("未检测到 VS Code 或 VSCodium");
+      onNotify(vsCodeStatus?.diagnostics?.[0] ?? "未检测到 VS Code 或 VSCodium；安装后请重启客户端");
       return;
     }
     try {
-      await vscode.openProject(project.rootPath);
-      onNotify(isDemo ? "演示模式：已模拟打开 VS Code 项目" : "已在 VS Code 中打开项目");
+      await vscode.openProject(project.id);
+      onNotify(isDemo ? "演示模式：已模拟打开 VS Code 项目" : vsCodeStatus?.latexWorkshop.state === "notFound"
+        ? "已在 VS Code 中打开项目；未检测到 LaTeX Workshop，编译功能可能不可用"
+        : "已在 VS Code 中打开项目");
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法在 VS Code 中打开项目");
     }
@@ -170,7 +174,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       return;
     }
     try {
-      await vscode.openFile(project.rootPath, relativePath, line);
+      await vscode.openFile(project.id, relativePath, line);
       onNotify(isDemo ? "演示模式：已模拟打开 VS Code 文件" : `已在 VS Code 中打开 ${relativePath}${line ? `:${line}` : ""}`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法在 VS Code 中打开文件");
@@ -186,14 +190,14 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
     ? [
         { id: "overview", label: "项目介绍", icon: BookOpen },
         { id: "files", label: "文件", icon: FolderOpen },
-        { id: "references", label: "原始文稿", icon: Files },
-        { id: "github", label: "同步", icon: GitFork }
+        { id: "references", label: "研究资料", icon: Files },
+        { id: "github", label: "保护", icon: ShieldCheck }
       ]
     : [
         { id: "overview", label: "项目介绍", icon: BookOpen },
         { id: "files", label: "文件", icon: FolderOpen },
-        { id: "references", label: "原始文稿", icon: Files },
-        { id: "github", label: "同步", icon: GitFork }
+        { id: "references", label: "研究资料", icon: Files },
+        { id: "github", label: "保护", icon: ShieldCheck }
       ];
 
   return (
@@ -206,14 +210,14 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
         </div>
         <div className="project-header-actions">
           <button className="button primary" onClick={() => void openProjectFolder()} disabled={!project.pathAvailable}><FolderOpen size={16} />打开文件夹</button>
-          <button className="button secondary" onClick={() => void openProjectInVsCode()} disabled={vsCodeStatus?.available === false}><Code2 size={16} />在 VS Code 中打开</button>
+          <button className="button secondary" onClick={() => void openProjectInVsCode()}><Code2 size={16} />在 VS Code 中打开</button>
         </div>
       </header>
 
       <nav className="project-tabs" aria-label="项目页面" role="tablist">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          return <button role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
+          return <button role="tab" aria-label={tab.label} title={tab.id === "github" ? "保护 · 同步与本地快照" : undefined} aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
         })}
       </nav>
 
@@ -239,7 +243,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       )}
       {activeTab === "files" && <ProjectFiles api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
       {activeTab === "references" && <ReferencesTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
-      {activeTab === "github" && <GitHubSyncTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
+      {activeTab === "github" && <ProjectProtectionTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} onProjectChange={onProjectChange} />}
     </section>
   );
 }
@@ -340,7 +344,7 @@ function ProjectIntroductionTab({
             <div><span>当前方案</span><strong>{profile.name}</strong></div>
             <div><span>文档类与引擎</span><strong>{target.classConfig.name} · {target.engine === "auto" ? "自动检测" : target.engine}</strong></div>
             <div><span>TeX 工具链</span><strong>{toolchain ? `${toolchain.name === "texlive" ? "TeX Live" : toolchain.name} ${toolchain.version ?? ""}` : "未检测到"}</strong></div>
-            <div><span>{editorLabel}</span><strong>{vsCodeStatus?.available ? "已就绪" : "未检测到"}</strong></div>
+            <div><span>{editorLabel}</span><strong>{vsCodeStatus?.available ? "已就绪" : "未检测到"}</strong>{vsCodeStatus?.executablePath && <small title={vsCodeStatus.executablePath}>{vsCodeStatus.executablePath}</small>}</div>
             <div><span>LaTeX Workshop</span><strong>{workshop}</strong></div>
             <div className="introduction-pdf"><span>最近 PDF</span><strong>{pdfName}</strong><small>{pdfDetail}</small></div>
           </div>
@@ -348,5 +352,138 @@ function ProjectIntroductionTab({
       </div>
       <MobilePdfCard api={api} project={project} manifest={manifest} isDemo={isDemo} onNotify={onNotify} />
     </main>
+  );
+}
+
+function ProjectProtectionTab({
+  api,
+  project,
+  isDemo,
+  onNotify,
+  onProjectChange
+}: {
+  api: WorkbenchApi;
+  project: ProjectSummary;
+  isDemo: boolean;
+  onNotify: (message: string) => void;
+  onProjectChange?: (project: ProjectSummary) => void;
+}) {
+  const protectedLocally = project.protectionState === "localBackup" || project.protectionState === "both";
+  const protectedRemotely = project.protectionState === "github" || project.protectionState === "both";
+  return <main className="desktop-v1-protection-page" aria-label="项目保护">
+    <header className="desktop-v1-protection-heading">
+      <span><ShieldCheck size={23} /></span>
+      <div><p className="eyebrow">Protection</p><h2>项目保护</h2><p>本地快照负责恢复，GitHub 负责异地同步；两种方式彼此独立。</p></div>
+      <div className={`desktop-v1-protection-summary protection-${project.protectionState ?? "unprotected"}`}>
+        <strong>{project.protectionState === "both" ? "双重保护" : project.protectionState === "github" ? "GitHub 已连接" : project.protectionState === "localBackup" ? "已有本地快照" : "尚未保护"}</strong>
+        <span>{protectedLocally ? "本地快照可用" : "未建立本地快照"} · {protectedRemotely ? "GitHub 已连接" : "未连接 GitHub"}</span>
+      </div>
+    </header>
+    <section className="desktop-v1-protection-stack">
+      <ProjectBackupCard api={api} project={project} onNotify={onNotify} onProjectChange={onProjectChange} />
+      <GitHubSyncTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />
+    </section>
+  </main>;
+}
+
+function ProjectBackupCard({
+  api,
+  project,
+  onNotify,
+  onProjectChange
+}: {
+  api: WorkbenchApi;
+  project: ProjectSummary;
+  onNotify: (message: string) => void;
+  onProjectChange?: (project: ProjectSummary) => void;
+}) {
+  const [snapshots, setSnapshots] = useState<BackupSnapshot[]>([]);
+  const [settings, setSettings] = useState<ProjectBackupSettings | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [showAllSnapshots, setShowAllSnapshots] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([api.projectBackups.list(project.id), api.projectBackups.settings(project.id)])
+      .then(([nextSnapshots, nextSettings]) => {
+        if (!cancelled) { setSnapshots(nextSnapshots); setSettings(nextSettings); }
+      })
+      .catch((error: unknown) => !cancelled && onNotify(error instanceof Error ? error.message : "无法读取项目快照"));
+    return () => { cancelled = true; };
+  }, [api, onNotify, project.id]);
+
+  async function createSnapshot() {
+    setBusy("create");
+    try {
+      const preview = await api.projectBackups.preview(project.id);
+      const snapshot = await api.projectBackups.create(project.id);
+      setSnapshots((current) => [snapshot, ...current.filter((item) => item.id !== snapshot.id)]);
+      onProjectChange?.({ ...project, protectionState: project.protectionState === "github" || project.protectionState === "both" ? "both" : "localBackup" });
+      onNotify(`项目快照已创建并校验：${preview.fileCount} 个文件，${(preview.totalBytes / 1024 / 1024).toFixed(1)} MB`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法创建项目快照");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveSettings(next: Pick<ProjectBackupSettings, "frequency" | "retainCount">) {
+    setBusy("settings");
+    try {
+      setSettings(await api.projectBackups.setSettings(project.id, next));
+      onNotify(next.frequency === "off" ? "已关闭定期项目快照" : `已开启${next.frequency === "daily" ? "每日" : "每周"}项目快照`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存备份设置");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function verify(snapshot: BackupSnapshot) {
+    setBusy(snapshot.id);
+    try {
+      const result = await api.projectBackups.verify(project.id, snapshot.id);
+      if (!result.valid) throw new Error(result.errors.join("；") || "快照校验失败");
+      setSnapshots((current) => current.map((item) => item.id === snapshot.id
+        ? { ...item, verified: true, verifiedAt: new Date().toISOString() }
+        : item));
+      onNotify(`快照校验通过：${result.checkedFiles} 个文件完整`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "快照校验失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function restore(snapshot: BackupSnapshot) {
+    setBusy(snapshot.id);
+    try {
+      const result = await api.projectBackups.restore(project.id, snapshot.id);
+      if (result) onNotify(
+        `已恢复到新目录：${result.destinationPath}${result.restoredLocalAttachments ? `（含 ${result.restoredLocalAttachments} 份仅本机资料）` : ""}`
+      );
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法恢复项目快照");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="overview-section project-backup-card">
+      <header>
+        <div><h3>项目保护</h3><p>快照保留源码和仅本机资料；排除 Git、构建缓存与撤销目录。恢复始终写入新目录。</p></div>
+        <button className="button primary" disabled={busy !== null} onClick={() => void createSnapshot()}><Files size={16} />{busy === "create" ? "正在校验…" : "立即创建快照"}</button>
+      </header>
+      <div className="backup-settings-row">
+        <label><span>定期快照</span><select value={settings?.frequency ?? "off"} disabled={!settings || busy !== null} onChange={(event) => void saveSettings({ frequency: event.target.value as ProjectBackupSettings["frequency"], retainCount: settings?.retainCount ?? 7 })}><option value="off">关闭</option><option value="daily">每日</option><option value="weekly">每周</option></select></label>
+        <label><span>保留份数</span><select value={settings?.retainCount ?? 7} disabled={!settings || busy !== null} onChange={(event) => void saveSettings({ frequency: settings?.frequency ?? "off", retainCount: Number(event.target.value) })}>{[3, 5, 7, 14, 30].map((value) => <option key={value} value={value}>{value} 份</option>)}</select></label>
+        <span className={`protection-state protection-${project.protectionState ?? "unprotected"}`}>{project.protectionState === "both" ? "GitHub + 本地快照" : project.protectionState === "github" ? "已连接 GitHub" : project.protectionState === "localBackup" ? "已有本地快照" : "尚未建立保护"}</span>
+      </div>
+      {snapshots.length > 0 ? <>
+        <div className="backup-snapshot-list">{(showAllSnapshots ? snapshots : snapshots.slice(0, 5)).map((snapshot) => <article key={snapshot.id}><div><strong>{new Date(snapshot.createdAt).toLocaleString("zh-CN")}</strong><small>{snapshot.fileCount} 个文件 · {(snapshot.size / 1024 / 1024).toFixed(1)} MB · {snapshot.kind === "scheduled" ? "定期" : "手动"}</small></div><span title={snapshot.verifiedAt ? `最近校验：${new Date(snapshot.verifiedAt).toLocaleString("zh-CN")}` : undefined}>{snapshot.verified ? "已校验" : "待复核"}</span><button className="button secondary" disabled={busy !== null} onClick={() => void verify(snapshot)}>校验</button><button className="button secondary" disabled={busy !== null} onClick={() => void restore(snapshot)}>恢复副本</button></article>)}</div>
+        {snapshots.length > 5 ? <button className="button tertiary backup-show-all" onClick={() => setShowAllSnapshots((value) => !value)}>{showAllSnapshots ? "收起快照" : `查看全部 ${snapshots.length} 份快照`}</button> : null}
+      </> : <p className="backup-empty">还没有项目快照。GitHub 同步与本地快照用途不同，建议至少启用一种保护方式。</p>}
+    </section>
   );
 }

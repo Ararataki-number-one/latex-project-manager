@@ -95,6 +95,9 @@ export interface ProjectManifest {
   assets: AssetPin[];
 }
 
+export type ProjectLifecycle = "active" | "paused" | "completed" | "archived";
+export type ProjectProtectionState = "unprotected" | "localBackup" | "github" | "both";
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -113,6 +116,10 @@ export interface ProjectSummary {
   pathAvailable: boolean;
   /** A local-only project note. It is never written into the LaTeX project. */
   description?: string;
+  /** Research lifecycle is independent from path/sync health. */
+  lifecycle?: ProjectLifecycle;
+  /** Cached protection summary; backups and GitHub remain separate mechanisms. */
+  protectionState?: ProjectProtectionState;
 }
 
 export interface CatalogStatus {
@@ -120,6 +127,143 @@ export interface CatalogStatus {
   persistent: boolean;
   databasePath: string;
   backupPath?: string;
+  warnings: string[];
+  /** readOnly is used when a newer catalog is opened by an older client. */
+  mode?: "readWrite" | "readOnly" | "unavailable";
+  writable?: boolean;
+  databaseSchemaVersion?: number;
+  readOnlyReason?: string;
+}
+
+export type OperationSnapshotKind =
+  | "import"
+  | "sync"
+  | "backup"
+  | "restore"
+  | "file"
+  | "cleanup"
+  | "export"
+  | "update"
+  | "index"
+  | "migration";
+
+export type OperationSnapshotState =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "succeeded"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "blocked";
+
+export interface OperationSnapshot {
+  id: string;
+  projectId?: string;
+  kind: OperationSnapshotKind;
+  state: OperationSnapshotState;
+  title: string;
+  message?: string;
+  failureCode?: string;
+  recoveryAction?: string;
+  progress?: number;
+  cancellable?: boolean;
+  retryable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export type ProjectHealthState = "healthy" | "attention" | "error";
+
+export interface ProjectStatusSnapshot {
+  projectId: string;
+  pathAvailable: boolean;
+  storageBytes?: number;
+  fileCount?: number;
+  mainPdfPath?: string;
+  mainPdfSize?: number;
+  researchCount?: number;
+  syncState?: GitHubSyncState;
+  syncMessage?: string;
+  health: ProjectHealthState;
+  issues: string[];
+  capturedAt: string;
+}
+
+export type ProjectStatusFreshness = "cached" | "fresh" | "stale";
+
+export interface ProjectStatusRecord {
+  snapshot: ProjectStatusSnapshot;
+  freshness: ProjectStatusFreshness;
+  refreshError?: string;
+}
+
+export interface ProjectStatusChangedEvent {
+  type: "changed";
+  projectId: string;
+  record: ProjectStatusRecord;
+}
+
+export type DesktopMigrationSourceKind = "stable0111" | "beta";
+
+export interface DesktopMigrationSource {
+  kind: DesktopMigrationSourceKind;
+  databasePath: string;
+  label?: string;
+}
+
+export type DesktopMigrationCandidateAction = "import" | "merge" | "conflict";
+
+export interface DesktopMigrationProjectCandidate {
+  id: string;
+  sourceKind: DesktopMigrationSourceKind;
+  sourceDatabasePath: string;
+  sourceProject: ProjectSummary;
+  canonicalRoot: string;
+  action: DesktopMigrationCandidateAction;
+  destinationProjectId?: string;
+  conflictId?: string;
+}
+
+export type DesktopMigrationConflictKind = "sameRootDifferentProject" | "sameProjectDifferentRoot";
+export type DesktopMigrationConflictResolution = "keepTarget" | "useSource";
+
+export interface DesktopMigrationConflict {
+  id: string;
+  kind: DesktopMigrationConflictKind;
+  canonicalRoot: string;
+  sourceProject: ProjectSummary;
+  destinationProject: ProjectSummary;
+  sourceKind: DesktopMigrationSourceKind;
+  resolutionOptions: DesktopMigrationConflictResolution[];
+}
+
+export interface DesktopMigrationPreview {
+  id: string;
+  createdAt: string;
+  targetDatabasePath: string;
+  sources: Array<DesktopMigrationSource & { schemaVersion: number; fingerprint: string }>;
+  projects: DesktopMigrationProjectCandidate[];
+  conflicts: DesktopMigrationConflict[];
+  warnings: string[];
+}
+
+export interface DesktopMigrationApplyOptions {
+  resolutions: Record<string, DesktopMigrationConflictResolution>;
+}
+
+export interface DesktopMigrationResult {
+  backupPath: string;
+  imported: number;
+  merged: number;
+  skipped: number;
+  appliedAt: string;
+  localResources: {
+    copied: number;
+    conflicts: string[];
+    failures: string[];
+  };
   warnings: string[];
 }
 
@@ -176,12 +320,13 @@ export interface MobilePdfOutput {
 }
 
 export interface MobileProjectIndex {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   projectId: string;
   name: string;
   updatedAt: string;
-  defaultOutputId: string;
+  defaultOutputId?: string;
   outputs: MobilePdfOutput[];
+  researchItems?: ProjectResearchItem[];
 }
 
 export interface MobilePdfCandidate {
@@ -237,13 +382,23 @@ export interface GitHubLargeFile {
   trackedByLfs: boolean;
 }
 
-export type SyncSecurityFindingKind = "secret" | "sensitiveFile" | "largeFile";
+export type SyncSecurityFindingKind = "secret" | "sensitiveFile" | "largeFile" | "researchCopyright";
+
+export type SyncSecurityRecoveryAction =
+  | "keepPrivate"
+  | "createCleanPublicRepository"
+  | "keepResearchLocalOnly"
+  | "approveResearchUpload";
 
 export interface SyncSecurityFinding {
   path: string;
   kind: SyncSecurityFindingKind;
   severity: "block" | "warning";
   message: string;
+  /** Stable recovery actions that the UI can render without parsing a message. */
+  recoveryActions?: SyncSecurityRecoveryAction[];
+  /** Related managed paths, for example every attachment found in private Git history. */
+  relatedPaths?: string[];
 }
 
 export interface GitHubSyncEvent {
@@ -321,6 +476,10 @@ export interface AppRuntimeSettings {
   theme: "system" | "light" | "dark";
   density: "comfortable" | "compact";
   glassMode: "auto" | "full" | "off";
+  /** Optional user-selected VS Code-compatible executable. */
+  editorExecutablePath?: string;
+  /** Set only after the user successfully applies or explicitly finishes the one-time desktop catalog migration. */
+  desktopMigrationCompletedAt?: string;
 }
 
 export interface DesktopEnvironmentStatus {
@@ -338,8 +497,20 @@ export type AppUpdateState =
   | "available"
   | "downloading"
   | "downloaded"
+  | "cancelled"
   | "unavailable"
   | "error";
+
+export type AppUpdatePhase =
+  | "idle"
+  | "checkingRelease"
+  | "verifyingManifest"
+  | "preparingDownload"
+  | "downloading"
+  | "verifyingPackage"
+  | "ready"
+  | "cancelled"
+  | "failed";
 
 export interface AppUpdateSettings {
   autoCheck: boolean;
@@ -355,6 +526,12 @@ export interface AppUpdateStatus extends AppUpdateSettings {
   releaseName?: string;
   publishedAt?: string;
   downloadedPath?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  progressPercent?: number;
+  phase?: AppUpdatePhase;
+  canCancel?: boolean;
+  canRetry?: boolean;
   checkedAt?: string;
   message?: string;
 }
@@ -368,6 +545,169 @@ export interface ReferenceDocumentInfo {
   modifiedAt: string;
   kind: ReferenceDocumentKind;
   lfsRecommended: boolean;
+}
+
+export type ResearchRole = "primarySource" | "reference" | "translationSource" | "data" | "supplement";
+export interface ResearchWorkMetadata {
+  title?: string;
+  authors?: string[];
+  year?: number;
+  doi?: string;
+  arxivId?: string;
+  isbn?: string;
+  language?: string;
+  canonicalUrl?: string;
+}
+
+/** A logical work in the local catalog. Its identity is not written into repositories. */
+export interface ResearchWork extends ResearchWorkMetadata {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchAttachment {
+  id: string;
+  name: string;
+  relativePath?: string;
+  mediaType: string;
+  size?: number;
+  sha256?: string;
+  gitBlobSha?: string;
+  versionLabel?: string;
+  availability: "repository" | "localOnly";
+  /**
+   * Explicit per-attachment copyright acknowledgement for publication.
+   * Omitted/false is the safe default and blocks this attachment in public repositories.
+   */
+  publicUploadApproved?: boolean;
+}
+
+export interface ResearchTargetLink {
+  /** null means that this material applies to the whole project. */
+  targetId: string | null;
+  role: ResearchRole;
+  preferredAttachmentId?: string;
+}
+
+export interface ProjectResearchItem {
+  id: string;
+  title?: string;
+  authors: string[];
+  year?: number;
+  language?: string;
+  doi?: string;
+  arxivId?: string;
+  isbn?: string;
+  attachments: ResearchAttachment[];
+  links: ResearchTargetLink[];
+  sortOrder?: number;
+}
+
+export interface CatalogProjectResearchItem {
+  projectId: string;
+  workId: string;
+  item: ProjectResearchItem;
+  createdAt: string;
+  updatedAt: string;
+  /** Local-only attachment paths keyed by attachment ID; never written to project metadata. */
+  localAttachmentPaths: Record<string, string>;
+}
+
+export interface LegacyResearchCandidate {
+  relativePath: string;
+  name: string;
+  size: number;
+  modifiedAt: string;
+  mediaType: string;
+  sha256: string;
+  duplicateItemIds: string[];
+  pendingTargetAssignment: true;
+}
+
+export interface ResearchSaveRequest {
+  items: ProjectResearchItem[];
+  localAttachmentPaths?: Record<string, string>;
+  /** Attachment IDs explicitly approved by the user in this exact save action. */
+  publicUploadApprovalIds?: string[];
+}
+
+export type ResearchSearchKind = "project" | "file" | "heading" | "label" | "citation" | "bib" | "research";
+
+export interface ResearchSearchHit {
+  id: string;
+  projectId: string;
+  kind: ResearchSearchKind;
+  title: string;
+  detail?: string;
+  relativePath?: string;
+  line?: number;
+  score: number;
+}
+
+export interface ProjectSearchIndexStatus {
+  projectId: string;
+  indexedFiles: number;
+  skippedFiles: number;
+  removedFiles: number;
+  indexedAt: string;
+}
+
+export interface CatalogBackupInfo {
+  path: string;
+  createdAt: string;
+  size: number;
+  kind: "automatic" | "manual" | "preMigration";
+}
+
+export interface CatalogRestoreResult {
+  backup: CatalogBackupInfo;
+  restartRequired: true;
+}
+
+export type ProjectBackupFrequency = "off" | "daily" | "weekly";
+
+export interface ProjectBackupSettings {
+  projectId: string;
+  frequency: ProjectBackupFrequency;
+  retainCount: number;
+  updatedAt: string;
+}
+
+export interface ProjectBackupPreview {
+  projectId: string;
+  fileCount: number;
+  totalBytes: number;
+  localOnlyAttachmentCount: number;
+  excludedPaths: string[];
+}
+
+export interface BackupSnapshot {
+  id: string;
+  projectId: string;
+  projectName: string;
+  path: string;
+  createdAt: string;
+  size: number;
+  fileCount: number;
+  kind: "manual" | "scheduled" | "preMigration";
+  verified: boolean;
+  verifiedAt?: string;
+}
+
+export interface BackupVerification {
+  snapshotId: string;
+  valid: boolean;
+  checkedFiles: number;
+  errors: string[];
+}
+
+export interface BackupRestoreResult {
+  snapshotId: string;
+  destinationPath: string;
+  restoredFiles: number;
+  restoredLocalAttachments?: number;
+  researchRecoveryPath?: string;
 }
 
 export interface ScanCandidate {
@@ -461,7 +801,8 @@ export interface VsCodeStatus {
   available: boolean;
   editor?: VsCodeEditor;
   executablePath?: string;
-  source?: "path" | "common";
+  source?: "configured" | "path" | "common";
+  diagnostics?: string[];
   latexWorkshop: {
     state: "installed" | "notFound" | "unknown";
     version?: string;
@@ -589,6 +930,17 @@ export interface TemplateInfo {
   name: string;
   description: string;
   rootPath: string;
+  source: "builtin" | "user";
+  category: "article" | "book" | "presentation" | "other";
+  createdAt: string;
+  fileCount: number;
+  totalBytes: number;
   className?: string;
   assetPins: AssetPin[];
+}
+
+export interface TemplateCreateOptions {
+  name: string;
+  description?: string;
+  category?: TemplateInfo["category"];
 }

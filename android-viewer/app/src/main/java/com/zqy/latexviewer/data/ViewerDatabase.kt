@@ -10,6 +10,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "repositories")
@@ -102,7 +104,10 @@ data class DownloadHistoryEntity(
 
 @Entity(
     tableName = "pdf_cache",
-    indices = [Index(value = ["repositoryFullName", "pdfPath", "sha"])]
+    indices = [
+        Index(value = ["repositoryFullName", "pdfPath", "sha"]),
+        Index(value = ["storageClass"])
+    ]
 )
 data class PdfCacheEntity(
     @androidx.room.PrimaryKey val cacheKey: String,
@@ -112,7 +117,8 @@ data class PdfCacheEntity(
     val repositoryFullName: String?,
     val pdfPath: String?,
     val sha: String?,
-    val knownGood: Boolean
+    val knownGood: Boolean,
+    val storageClass: String = "TEMPORARY"
 )
 
 @Entity(tableName = "metadata")
@@ -221,11 +227,23 @@ interface ViewerDao {
     @Query("SELECT * FROM pdf_cache ORDER BY lastAccessAt DESC")
     suspend fun pdfCacheEntries(): List<PdfCacheEntity>
 
+    @Query("SELECT * FROM pdf_cache WHERE storageClass = 'OFFLINE' ORDER BY lastAccessAt DESC")
+    suspend fun offlinePdfEntries(): List<PdfCacheEntity>
+
+    @Query("SELECT * FROM pdf_cache WHERE storageClass = :storageClass ORDER BY lastAccessAt DESC")
+    suspend fun pdfCacheEntriesByClass(storageClass: String): List<PdfCacheEntity>
+
+    @Query("SELECT * FROM pdf_cache WHERE cacheKey = :cacheKey LIMIT 1")
+    suspend fun pdfCacheEntry(cacheKey: String): PdfCacheEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertPdfCache(entity: PdfCacheEntity)
 
     @Query("DELETE FROM pdf_cache WHERE cacheKey = :cacheKey")
     suspend fun deletePdfCache(cacheKey: String)
+
+    @Query("DELETE FROM pdf_cache WHERE storageClass = 'TEMPORARY'")
+    suspend fun clearTemporaryPdfCacheIndex()
 
     @Query("DELETE FROM pdf_cache")
     suspend fun clearPdfCacheIndex()
@@ -248,7 +266,7 @@ interface ViewerDao {
         PdfCacheEntity::class,
         MetadataEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class ViewerDatabase : RoomDatabase() {
@@ -262,7 +280,14 @@ abstract class ViewerDatabase : RoomDatabase() {
                 context.applicationContext,
                 ViewerDatabase::class.java,
                 "latex_viewer.db"
-            ).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+        }
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE pdf_cache ADD COLUMN storageClass TEXT NOT NULL DEFAULT 'TEMPORARY'")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pdf_cache_storageClass ON pdf_cache(storageClass)")
+            }
         }
     }
 }

@@ -5,13 +5,14 @@
 ## 能做什么
 
 - 多个 GitHub 仓库会持久保存在手机项目库中，可以添加、切换或移除本机入口。
-- 首页优先显示“继续阅读”和各项目 `.latex-project.json` 指定的最新主 PDF，再显示全部项目。
+- 首页依次显示“继续阅读、发现新版本、离线资料、最近主 PDF”；所有曾阅读 PDF 都能进入继续阅读，不限于项目主 PDF。
 - 私有仓库优先通过 GitHub Device Flow 在官方浏览器授权；公开仓库不需要登录，fine-grained PAT 仅保留为高级入口。
 - 不登录时可以直接输入 `owner/repository` 或完整 GitHub 地址添加公开仓库。
 - 浏览仓库目录和默认分支。
 - 使用内置代码查看器阅读 `.tex`、`.bib`、`.cls`、`.sty`、Markdown、纯文本和常见源码文件。
 - 使用 PDFium 分块渲染器连续阅读 PDF，支持双指缩放、双击适宽、页码跳转、目录、本地书签、旋转保持位置和外部应用兜底；打开前先检查 GitHub 上的最新 SHA。
-- 每个仓库和 PDF 独立记录阅读页码；PDF 缓存采用 512 MB LRU 上限，可在设置中查看并清理。
+- 每个仓库和 PDF 独立记录阅读页码；临时阅读缓存采用 512 MB LRU，用户明确保留的离线资料不会被自动清理，导出下载单独进入系统下载目录和历史。
+- `.latex-project.json` v3 中的研究资料按文档目标分组展示；仅本机附件会明确标记“仅电脑可用”。
 - 每个普通文件都能单独下载，每个仓库都能整体下载为 ZIP。
 - 普通下载默认保存到 `内部存储/Download/LaTeX项目`；下载完成后显示文件位置，并提供“现在打开”。
 - 文件、项目 ZIP、PDF 和 APK 更新均由 Android 持久后台任务下载；熄屏、切换应用或短时断网不会丢失任务和进度。
@@ -38,6 +39,7 @@
 - “设置与更新”中可以分别开启自动检查和自动下载。
 - Android 不允许普通应用静默安装 APK；首次更新时需要允许“安装未知应用”，每次安装仍由系统界面确认。
 - 正式 Release 使用固定签名密钥。只有签名一致、版本号更高的 APK 才能覆盖安装旧版本。
+- 下载固定到不可变 commit/blob，支持断点恢复并校验大小、Git blob SHA 或 LFS 内容 SHA；失败不会覆盖上一份可读 PDF。
 
 ## 推荐令牌权限
 
@@ -59,14 +61,18 @@
 用 Android Studio 打开本目录，等待 Gradle 同步后运行 `app`。命令行也可以使用：
 
 ```powershell
-.\gradlew.bat assembleDebug
+.\gradlew.bat assembleStableDebug
+.\gradlew.bat assembleBetaDebug
 ```
 
-调试 APK 会生成到：
+正式版和 Beta 调试 APK 分别生成到：
 
 ```text
-app\build\outputs\apk\debug\app-debug.apk
+app\build\outputs\apk\stable\debug\app-stable-debug.apk
+app\build\outputs\apk\beta\debug\app-beta-debug.apk
 ```
+
+Beta 使用 `com.zqy.latexviewer.beta`、独立的“LaTeX 项目 Beta”桌面名称和独立应用数据目录，因此可以与当前 `com.zqy.latexviewer` 正式版并行安装，Room 数据、登录和下载记录不会混用。正式版仍为 `0.11.1`；Beta 为 `1.0.0-beta.1`。
 
 首次构建会从官方 Gradle、Google Maven 和 Maven Central 下载构建依赖。
 

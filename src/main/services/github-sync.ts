@@ -20,7 +20,11 @@ import type {
   GitHubSyncStatus,
   SyncSecurityFinding
 } from "../../shared/types";
-import { scanSyncSecuritySnapshot } from "./sync-security";
+import {
+  managedRepositoryResearchAttachments,
+  scanPublicResearchCopyright,
+  scanSyncSecuritySnapshot
+} from "./sync-security";
 
 const LARGE_FILE_WARNING = 50 * 1024 * 1024;
 const CONFIG_VERSION = 1;
@@ -32,6 +36,7 @@ const MANAGED_IGNORES = [
   ".latex-workbench/snapshots/",
   ".latex-workbench/trash/",
   ".latex-workbench/undo/",
+  ".latex-workbench/local-research-recovered/",
   "*.aux",
   "*.bcf",
   "*.blg",
@@ -115,10 +120,22 @@ interface CandidateSecuritySnapshot {
 }
 
 const MANAGED_UNDO_PREFIX = ".latex-workbench/undo/";
+const MANAGED_LOCAL_RESEARCH_PREFIX = ".latex-workbench/local-research-recovered/";
+const PORTABLE_PROJECT_INDEX = ".latex-project.json";
+const MAX_RESEARCH_HISTORY_COMMITS = 10_000;
 
 function isManagedUndoPath(path: string): boolean {
   const normalized = portablePath(path).replace(/^\.\//, "");
   return normalized === MANAGED_UNDO_PREFIX.slice(0, -1) || normalized.startsWith(MANAGED_UNDO_PREFIX);
+}
+
+function isManagedLocalResearchPath(path: string): boolean {
+  const normalized = portablePath(path).replace(/^\.\//, "");
+  return normalized === MANAGED_LOCAL_RESEARCH_PREFIX.slice(0, -1) || normalized.startsWith(MANAGED_LOCAL_RESEARCH_PREFIX);
+}
+
+function isManagedPrivatePath(path: string): boolean {
+  return isManagedUndoPath(path) || isManagedLocalResearchPath(path);
 }
 
 class SyncNeedsPullError extends Error {
@@ -452,7 +469,8 @@ export class GitHubSyncService {
     await this.ensureRepository(root);
     await ensureManagedGitIgnore(root);
     await this.run(root, ["add", "-A", "--", "."]);
-    return (await this.candidateSecuritySnapshot(root, includeTracked)).findings;
+    const visibility = await this.repositoryVisibility(projectId);
+    return (await this.candidateSecuritySnapshot(root, includeTracked, visibility === "public")).findings;
   }
 
   async acknowledgeWarnings(projectId: string, root: string, paths: string[]): Promise<GitHubSyncStatus> {
@@ -463,7 +481,7 @@ export class GitHubSyncService {
     await this.ensureRepository(root);
     await ensureManagedGitIgnore(root);
     await this.run(root, ["add", "-A", "--", "."]);
-    const snapshot = await this.candidateSecuritySnapshot(root, false);
+    const snapshot = await this.candidateSecuritySnapshot(root, false, config.visibility === "public");
     const findings = snapshot.findings;
     const allowed = new Set(findings.filter((finding) => finding.severity === "warning").map((finding) => finding.path));
     if (!safePaths.length || safePaths.some((path) => !allowed.has(path))) throw new Error("需要确认的同步警告已经变化，请重新检查。");
@@ -626,6 +644,11 @@ export class GitHubSyncService {
     if (config?.autoSync) this.scheduleSync(projectId);
   }
 
+  /** The locally verified visibility, if this client created or changed the repository. */
+  async repositoryVisibility(projectId: string): Promise<GitHubRepositoryVisibility | undefined> {
+    return (await this.readConfig(projectId))?.visibility;
+  }
+
   async configure(projectId: string, root: string, settings: GitHubSyncSettings): Promise<GitHubSyncStatus> {
     const remoteUrl = normalizeGitHubRemoteUrl(settings.remoteUrl);
     if (typeof settings.autoSync !== "boolean" || typeof settings.useLfsForDocuments !== "boolean") {
@@ -723,7 +746,7 @@ export class GitHubSyncService {
     await this.ensureRepository(root);
     await ensureManagedGitIgnore(root);
     await this.run(root, ["add", "-A", "--", "."]);
-    const preflightSnapshot = await this.candidateSecuritySnapshot(root, true);
+    const preflightSnapshot = await this.candidateSecuritySnapshot(root, true, options.visibility === "public");
     const preflight = preflightSnapshot.findings;
     const blocked = preflight.filter((finding) => finding.severity === "block");
     if (blocked.length) {
@@ -789,9 +812,16 @@ export class GitHubSyncService {
       await this.ensureRepository(root);
       await ensureManagedGitIgnore(root);
       await this.run(root, ["add", "-A", "--", "."]);
-      const publicSnapshot = await this.candidateSecuritySnapshot(root, true);
+      const publicSnapshot = await this.candidateSecuritySnapshot(root, true, true);
       publicPreflight = publicSnapshot.findings;
       publicTreeHash = publicSnapshot.treeHash;
+      if (config.visibility !== "public") {
+        // Visibility exposes every reachable remote commit, not just the
+        // currently checked-out branch. Refresh all remote refs before the
+        // history audit so a stale local clone cannot hide an old attachment.
+        await this.run(root, ["fetch", "--all", "--prune"], [0], false);
+        publicPreflight.push(...await this.historicalManagedResearchFindings(root));
+      }
       const blocked = publicPreflight.filter((finding) => finding.severity === "block");
       if (blocked.length) {
         this.setLive(projectId, "blocked", blocked[0].message, "error", { securityFindings: publicPreflight });
@@ -1057,7 +1087,10 @@ export class GitHubSyncService {
       }
 
       await this.run(root, ["add", "-A", "--", "."]);
-      const candidate = await this.candidateSecuritySnapshot(root, false);
+      // Unknown visibility is treated conservatively. Repositories created by
+      // this client always have a verified value; manually connected remotes
+      // must not silently publish unapproved research files.
+      const candidate = await this.candidateSecuritySnapshot(root, false, config.visibility !== "private");
       findings = candidate.findings;
       const hardBlocks = findings.filter((finding) => finding.severity === "block");
       if (hardBlocks.length) throw new SyncSecurityBlockedError(hardBlocks[0].message, findings);
@@ -1326,7 +1359,11 @@ export class GitHubSyncService {
     await this.run(root, updateArgs);
   }
 
-  private async candidateSecuritySnapshot(root: string, includeTracked: boolean): Promise<CandidateSecuritySnapshot> {
+  private async candidateSecuritySnapshot(
+    root: string,
+    includeTracked: boolean,
+    enforcePublicResearchPolicy = false
+  ): Promise<CandidateSecuritySnapshot> {
     const tree = (await this.run(root, ["write-tree"])).stdout.trim();
     if (!/^[a-f0-9]{40,64}$/i.test(tree)) throw new Error("无法生成待同步候选树。请检查 Git 索引后重试。");
 
@@ -1339,12 +1376,14 @@ export class GitHubSyncService {
       const metadata = record.slice(0, tab).trim().split(/\s+/);
       if (metadata.length < 3 || metadata[2] !== "0" || !/^[a-f0-9]{40,64}$/i.test(metadata[1])) continue;
       const path = portablePath(record.slice(tab + 1));
-      if (isManagedUndoPath(path)) {
+      if (isManagedPrivatePath(path)) {
         managedUndoFindings.push({
           path,
           kind: "sensitiveFile",
           severity: "block",
-          message: "撤销快照只允许保存在本机。该路径已被 Git 跟踪，请先从 Git 索引中移除 .latex-workbench/undo 后再同步。"
+          message: isManagedUndoPath(path)
+            ? "撤销快照只允许保存在本机。该路径已被 Git 跟踪，请先从 Git 索引中移除 .latex-workbench/undo 后再同步。"
+            : "恢复出的仅本机研究资料禁止上传。请先从 Git 索引中移除 .latex-workbench/local-research-recovered 后再同步。"
         });
         continue;
       }
@@ -1372,9 +1411,32 @@ export class GitHubSyncService {
       });
     }
 
+    const researchFindings: SyncSecurityFinding[] = [];
+    if (enforcePublicResearchPolicy) {
+      const projectIndex = entries.get(PORTABLE_PROJECT_INDEX);
+      if (projectIndex) {
+        const sizeResult = await this.run(root, ["cat-file", "-s", projectIndex.objectId]);
+        const size = Number.parseInt(sizeResult.stdout.trim(), 10);
+        if (!Number.isSafeInteger(size) || size < 0 || size > 2 * 1024 * 1024) {
+          researchFindings.push({
+            path: PORTABLE_PROJECT_INDEX,
+            kind: "researchCopyright",
+            severity: "block",
+            message: "The managed research index is too large or invalid to verify before publication.",
+            recoveryActions: ["keepPrivate", "keepResearchLocalOnly"]
+          });
+        } else {
+          projectIndex.size = size;
+          const blob = await this.run(root, ["cat-file", "blob", projectIndex.objectId]);
+          researchFindings.push(...scanPublicResearchCopyright(Buffer.from(blob.stdout, "utf8"), entries.keys()));
+        }
+      }
+    }
+
     const findings = [
       ...managedUndoFindings,
-      ...await scanSyncSecuritySnapshot(changes.filter((change) => !isManagedUndoPath(change.path)), largeFiles, async (path) => {
+      ...researchFindings,
+      ...await scanSyncSecuritySnapshot(changes.filter((change) => !isManagedPrivatePath(change.path)), largeFiles, async (path) => {
       const entry = entries.get(path);
       if (!entry || (entry.size ?? Number.POSITIVE_INFINITY) > 2 * 1024 * 1024) return null;
       const blob = await this.run(root, ["cat-file", "blob", entry.objectId]);
@@ -1384,6 +1446,58 @@ export class GitHubSyncService {
     const verifiedTree = (await this.run(root, ["write-tree"])).stdout.trim();
     if (verifiedTree !== tree) throw new Error("安全检查期间候选树发生变化，已停止同步；请重新检查后再试。");
     return { treeHash: tree, changes, largeFiles, findings };
+  }
+
+  private async historicalManagedResearchFindings(root: string): Promise<SyncSecurityFinding[]> {
+    const history = await this.run(
+      root,
+      ["log", "--all", `--max-count=${MAX_RESEARCH_HISTORY_COMMITS + 1}`, "--format=%H", "--", PORTABLE_PROJECT_INDEX],
+      [0, 128]
+    );
+    if (history.code !== 0 || !history.stdout.trim()) return [];
+    const commits = history.stdout.trim().split(/\r?\n/).filter((commit) => /^[a-f0-9]{40,64}$/i.test(commit));
+    if (commits.length > MAX_RESEARCH_HISTORY_COMMITS) {
+      return [{
+        path: PORTABLE_PROJECT_INDEX,
+        kind: "researchCopyright",
+        severity: "block",
+        message: "The repository contains too much managed research history to verify safely before making it public.",
+        recoveryActions: ["keepPrivate", "createCleanPublicRepository"]
+      }];
+    }
+    const historical = new Map<string, string>();
+    for (const commit of commits) {
+      const historicalSize = await this.run(root, ["cat-file", "-s", `${commit}:${PORTABLE_PROJECT_INDEX}`], [0, 128]);
+      const size = Number.parseInt(historicalSize.stdout.trim(), 10);
+      if (historicalSize.code !== 0) continue;
+      if (!Number.isSafeInteger(size) || size < 0 || size > 2 * 1024 * 1024) {
+        return [{
+          path: PORTABLE_PROJECT_INDEX,
+          kind: "researchCopyright",
+          severity: "block",
+          message: "A historical managed research index is too large or invalid to audit safely before publication.",
+          recoveryActions: ["keepPrivate", "createCleanPublicRepository"]
+        }];
+      }
+      const index = await this.run(root, ["show", `${commit}:${PORTABLE_PROJECT_INDEX}`], [0, 128]);
+      if (index.code !== 0) continue;
+      for (const attachment of managedRepositoryResearchAttachments(index.stdout)) {
+        if (historical.has(attachment.path)) continue;
+        const listed = await this.run(root, ["ls-tree", "-r", "--name-only", "-z", commit, "--", attachment.path]);
+        if (listed.stdout.split("\0").some((path) => portablePath(path) === attachment.path)) {
+          historical.set(attachment.path, commit);
+        }
+      }
+    }
+    const paths = [...historical.keys()].sort((left, right) => left.localeCompare(right));
+    return paths.map((path) => ({
+      path,
+      kind: "researchCopyright" as const,
+      severity: "block" as const,
+      message: `Managed research attachment “${path}” already exists in private Git history. Changing visibility would publish that history.`,
+      recoveryActions: ["keepPrivate", "createCleanPublicRepository"],
+      relatedPaths: paths
+    }));
   }
 
   private async largeChangedFiles(root: string, changes: GitHubChangedFile[]): Promise<GitHubLargeFile[]> {

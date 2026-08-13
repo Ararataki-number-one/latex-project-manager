@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { VsCodeService } from "../src/main/services/vscode";
+import { launchVsCodeProcess, VsCodeService } from "../src/main/services/vscode";
 
 const temporaryDirectories: string[] = [];
 
@@ -99,11 +99,11 @@ describe("VS Code integration", () => {
       { executablePath: executable, args: ["--reuse-window", project] },
       {
         executablePath: executable,
-        args: ["--reuse-window", project, "--goto", `${join(project, "chapters", "chapter one.tex")}:12`]
+        args: ["--reuse-window", "--goto", `${join(project, "chapters", "chapter one.tex")}:12:1`, project]
       },
       {
         executablePath: executable,
-        args: ["--reuse-window", project, join(project, "main.tex")]
+        args: ["--reuse-window", join(project, "main.tex"), project]
       }
     ]);
     await expect(stat(join(project, ".vscode"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -116,7 +116,97 @@ describe("VS Code integration", () => {
       exists: () => false
     });
 
-    expect(service.status()).toEqual({ available: false, latexWorkshop: { state: "unknown" } });
-    await expect(service.openProject("C:\\project")).rejects.toThrow("VS Code or VSCodium was not found");
+    expect(service.status()).toEqual({
+      available: false,
+      diagnostics: [expect.stringContaining("可在设置中选择 Code.exe")],
+      latexWorkshop: { state: "unknown" }
+    });
+    await expect(service.openProject("C:\\project")).rejects.toThrow("未检测到 VS Code 或 VSCodium");
+  });
+
+  it("prefers an explicitly configured executable and preserves Chinese paths", async () => {
+    const executable = "C:\\便携软件\\Visual Studio Code\\Code.exe";
+    const launches: string[][] = [];
+    const service = new VsCodeService({
+      platform: "win32",
+      env: { PATH: "", VSCODE_EXECUTABLE: executable },
+      exists: (path) => path === executable,
+      launch: async (_path, args) => { launches.push([...args]); }
+    });
+    await service.openFile("D:\\数学笔记\\图论 项目", "D:\\数学笔记\\图论 项目\\章节 一.tex", 7);
+    expect(service.status()).toMatchObject({ available: true, executablePath: executable, source: "configured" });
+    expect(launches[0]).toEqual([
+      "--reuse-window", "--goto", "D:\\数学笔记\\图论 项目\\章节 一.tex:7:1", "D:\\数学笔记\\图论 项目"
+    ]);
+  });
+
+  it("reports an immediate non-zero launcher exit instead of claiming success", async () => {
+    await expect(launchVsCodeProcess(process.execPath, ["-e", "process.stderr.write('bad launch');process.exit(7)"]))
+      .rejects.toThrow(/退出代码 7.*bad launch/);
+  });
+
+  it("accepts a runtime-selected VSCodium executable and can clear it again", () => {
+    const executable = "C:\\Portable Apps\\VSCodium\\VSCodium.exe";
+    const service = new VsCodeService({
+      platform: "win32",
+      env: { PATH: "" },
+      exists: (path) => path === executable
+    });
+
+    expect(service.status().available).toBe(false);
+    expect(service.setPreferredExecutablePath(executable)).toMatchObject({
+      available: true,
+      editor: "codium",
+      source: "configured",
+      executablePath: executable
+    });
+    expect(service.setPreferredExecutablePath(null).available).toBe(false);
+  });
+
+  it("detects LaTeX Workshop in a portable installation data directory", () => {
+    const root = "C:\\Portable\\VSCode";
+    const executable = join(root, "app", "Code.exe");
+    const extensions = join(root, "data", "extensions");
+    const service = new VsCodeService({
+      platform: "win32",
+      env: { PATH: "", VSCODE_EXECUTABLE: executable },
+      exists: (path) => path === executable || path === extensions,
+      readDirectory: (path) => path === extensions ? ["james-yu.latex-workshop-10.11.0"] : []
+    });
+
+    expect(service.status()).toMatchObject({
+      available: true,
+      executablePath: executable,
+      latexWorkshop: { state: "installed", version: "10.11.0" }
+    });
+  });
+
+  it("keeps a diagnostic when a preferred editor moved and falls back safely", () => {
+    const fallback = "C:\\Program Files\\Microsoft VS Code\\Code.exe";
+    const missing = "D:\\Removed\\Code.exe";
+    const service = new VsCodeService({
+      platform: "win32",
+      env: { PATH: "", ProgramFiles: "C:\\Program Files" },
+      exists: (path) => path === fallback
+    });
+
+    expect(service.setPreferredExecutablePath(missing)).toMatchObject({
+      available: true,
+      executablePath: fallback,
+      diagnostics: [expect.stringContaining("已经移动或删除")]
+    });
+  });
+
+  it("surfaces the selected executable when the launcher handshake fails", async () => {
+    const executable = "C:\\VS Code\\Code.exe";
+    const service = new VsCodeService({
+      platform: "win32",
+      env: { PATH: "", VSCODE_EXECUTABLE: executable },
+      exists: (path) => path === executable,
+      launch: async () => { throw new Error("Windows 拒绝执行该文件"); }
+    });
+
+    await expect(service.openProject("C:\\研究项目"))
+      .rejects.toThrow(/编辑器启动失败.*C:\\VS Code\\Code.exe.*Windows 拒绝执行/);
   });
 });

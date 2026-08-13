@@ -37,7 +37,8 @@ describe("catalog v2 settings and sync history", () => {
       syncPaused: true,
       theme: "dark",
       density: "compact",
-      glassMode: "off"
+      glassMode: "off",
+      editorExecutablePath: "C:\\Tools\\Code.exe"
     });
     for (let index = 0; index < 105; index += 1) {
       catalog.appendSyncEvent({
@@ -51,6 +52,8 @@ describe("catalog v2 settings and sync history", () => {
     }
     expect(catalog.syncHistory("project-one", 200)).toHaveLength(100);
     expect(catalog.syncHistory("project-one", 1)[0].message).toBe("event 104");
+    const paused = catalog.update("project-one", { lifecycle: "paused", protectionState: "localBackup" });
+    expect(paused).toMatchObject({ lifecycle: "paused", protectionState: "localBackup", archived: false });
     catalog.close();
 
     catalog = new ProjectCatalog(database);
@@ -60,9 +63,13 @@ describe("catalog v2 settings and sync history", () => {
       syncPaused: true,
       theme: "dark",
       density: "compact",
-      glassMode: "off"
+      glassMode: "off",
+      editorExecutablePath: "C:\\Tools\\Code.exe"
     });
     expect(catalog.syncHistory("project-one", 200)).toHaveLength(100);
+    expect(catalog.get("project-one")).toMatchObject({ lifecycle: "paused", protectionState: "localBackup" });
+    const archived = catalog.update("project-one", { lifecycle: "archived" });
+    expect(archived).toMatchObject({ lifecycle: "archived", archived: true });
     catalog.close();
   });
 });

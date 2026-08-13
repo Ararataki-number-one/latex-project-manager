@@ -2,8 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
-import "./styles-v06.css";
 
+performance.mark("latex-app-render-start");
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

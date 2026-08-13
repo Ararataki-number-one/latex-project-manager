@@ -18,6 +18,9 @@ class ViewerViewModelTest {
         assertTrue(ViewerViewModel.isNewerVersion("v1.0.0", "0.9.9"))
         assertFalse(ViewerViewModel.isNewerVersion("0.2.0", "0.2.0"))
         assertFalse(ViewerViewModel.isNewerVersion("0.1.9", "0.2.0"))
+        assertTrue(ViewerViewModel.isNewerVersion("1.0.0-beta.2", "1.0.0-beta.1"))
+        assertFalse(ViewerViewModel.isNewerVersion("1.0.0-beta.1", "1.0.0-beta.2"))
+        assertTrue(ViewerViewModel.isNewerVersion("1.0.0", "1.0.0-beta.9"))
     }
 
     @Test

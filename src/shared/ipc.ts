@@ -3,7 +3,16 @@ import type {
   AppUpdateStatus,
   AppRuntimeSettings,
   CatalogStatus,
+  CatalogBackupInfo,
+  BackupRestoreResult,
+  BackupSnapshot,
+  BackupVerification,
+  CatalogProjectResearchItem,
+  CatalogRestoreResult,
   DesktopEnvironmentStatus,
+  DesktopMigrationApplyOptions,
+  DesktopMigrationPreview,
+  DesktopMigrationResult,
   ExportResult,
   GitIdentity,
   GitHubAccountStatus,
@@ -15,27 +24,38 @@ import type {
   MigrationPreview,
   MobilePdfCandidate,
   MobileProjectIndex,
+  OperationSnapshot,
   ProjectManifest,
   ProjectCollection,
+  ProjectBackupPreview,
+  ProjectBackupSettings,
   ProjectFileEntry,
   ProjectFileListOptions,
   ProjectFileOperationPlan,
   ProjectFileOperationRequest,
   ProjectFileOperationResult,
+  ProjectFileOperationHistoryEntry,
   ProjectFileUndoResult,
   ProjectPdfInfo,
   ProjectStorageInfo,
+  ProjectSearchIndexStatus,
   ProjectSummary,
+  ProjectStatusChangedEvent,
+  ProjectStatusRecord,
   ReferenceDocumentInfo,
+  LegacyResearchCandidate,
+  ResearchSaveRequest,
+  ResearchSearchHit,
   ScanCandidate,
   ScanOptions,
+  TemplateCreateOptions,
   TemplateInfo,
   TemporaryCleanupPreview,
   TemporaryCleanupResult,
   ToolchainInfo,
   VsCodeStatus,
-  SyncSecurityFinding
-  ,SmartView
+  SyncSecurityFinding,
+  SmartView
 } from "./types";
 
 export const IPC = {
@@ -56,6 +76,26 @@ export const IPC = {
   libraryCleanupPreview: "library:cleanup-preview",
   libraryCleanupApply: "library:cleanup-apply",
   libraryStorageInfo: "library:storage-info",
+  projectStatusList: "project-status:list",
+  projectStatusGet: "project-status:get",
+  projectStatusRefresh: "project-status:refresh",
+  projectStatusEvent: "project-status:event",
+  operationsList: "operations:list",
+  operationsCancel: "operations:cancel",
+  operationsRetry: "operations:retry",
+  operationsEvent: "operations:event",
+  desktopMigrationPreview: "desktop-migration:preview",
+  desktopMigrationApply: "desktop-migration:apply",
+  catalogBackupsList: "catalog-backups:list",
+  catalogBackupsCreate: "catalog-backups:create",
+  catalogBackupsStageRestore: "catalog-backups:stage-restore",
+  projectBackupsPreview: "project-backups:preview",
+  projectBackupsCreate: "project-backups:create",
+  projectBackupsList: "project-backups:list",
+  projectBackupsVerify: "project-backups:verify",
+  projectBackupsRestore: "project-backups:restore",
+  projectBackupsSettings: "project-backups:settings",
+  projectBackupsSetSettings: "project-backups:set-settings",
   collectionsList: "collections:list",
   collectionsCreate: "collections:create",
   collectionsUpdate: "collections:update",
@@ -93,13 +133,23 @@ export const IPC = {
   updatesSetSettings: "updates:set-settings",
   updatesCheck: "updates:check",
   updatesDownload: "updates:download",
+  updatesCancel: "updates:cancel",
   updatesInstall: "updates:install",
   updatesOpenRelease: "updates:open-release",
+  updatesEvent: "updates:event",
   referencesList: "references:list",
   referencesImport: "references:import",
   referencesOpen: "references:open",
   referencesOpenFolder: "references:open-folder",
   referencesRemove: "references:remove",
+  researchList: "research:list",
+  researchListGlobal: "research:list-global",
+  researchDiscoverLegacy: "research:discover-legacy",
+  researchSave: "research:save",
+  researchOpenAttachment: "research:open-attachment",
+  researchSearchIndex: "research-search:index",
+  researchSearchIndexAll: "research-search:index-all",
+  researchSearchQuery: "research-search:query",
   manifestRead: "manifest:read",
   manifestWrite: "manifest:write",
   migrationPreview: "migration:preview",
@@ -124,16 +174,24 @@ export const IPC = {
   filePlan: "file:plan",
   fileApply: "file:apply",
   fileUndo: "file:undo",
+  fileHistory: "file:history",
   fileOpen: "file:open",
   fileReveal: "file:reveal",
   templatesList: "templates:list",
   templatesCreate: "templates:create",
+  templatesCreateFromProject: "templates:create-from-project",
+  templatesDelete: "templates:delete",
   templatesInstantiate: "templates:instantiate",
   toolchainsList: "toolchains:list",
   vscodeStatus: "vscode:status",
   vscodeOpenProject: "vscode:open-project",
   vscodeOpenFile: "vscode:open-file",
   vscodeOpenProfile: "vscode:open-profile",
+  editorStatus: "editor:status",
+  editorSelectExecutable: "editor:select-executable",
+  editorResetExecutable: "editor:reset-executable",
+  editorOpenProject: "editor:open-project",
+  editorOpenFile: "editor:open-file",
   dialogOpenDirectory: "dialog:open-directory",
   dialogOpenFile: "dialog:open-file",
   editorOpenExternal: "editor:open-external"
@@ -147,7 +205,7 @@ export interface WorkbenchApi {
     importMany(candidates: ScanCandidate[]): Promise<ProjectSummary[]>;
     catalogStatus(): Promise<CatalogStatus>;
     relink(projectId: string, rootPath: string): Promise<ProjectSummary>;
-    update(projectId: string, patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>): Promise<ProjectSummary>;
+    update(projectId: string, patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags" | "lifecycle" | "protectionState">>): Promise<ProjectSummary>;
     openFolder(projectId: string): Promise<void>;
     openInVsCode(projectId: string): Promise<void>;
     copy(projectId: string, destinationParent: string, name: string): Promise<ProjectSummary>;
@@ -164,6 +222,36 @@ export interface WorkbenchApi {
     create(input: Pick<ProjectCollection, "name" | "color" | "projectIds">): Promise<ProjectCollection>;
     update(id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>): Promise<ProjectCollection>;
     delete(id: string): Promise<void>;
+  };
+  projectStatus: {
+    list(): Promise<ProjectStatusRecord[]>;
+    get(projectId: string): Promise<ProjectStatusRecord | null>;
+    refresh(projectId: string): Promise<ProjectStatusRecord>;
+    onEvent(listener: (event: ProjectStatusChangedEvent) => void): () => void;
+  };
+  operations: {
+    list(projectId?: string, limit?: number): Promise<OperationSnapshot[]>;
+    cancel(operationId: string): Promise<OperationSnapshot>;
+    retry(operationId: string): Promise<OperationSnapshot>;
+    onEvent(listener: (snapshot: OperationSnapshot) => void): () => void;
+  };
+  desktopMigration: {
+    preview(): Promise<DesktopMigrationPreview | null>;
+    apply(previewId: string, options: DesktopMigrationApplyOptions): Promise<DesktopMigrationResult>;
+  };
+  catalogBackups: {
+    list(): Promise<CatalogBackupInfo[]>;
+    create(): Promise<CatalogBackupInfo | null>;
+    stageRestore(): Promise<CatalogRestoreResult | null>;
+  };
+  projectBackups: {
+    preview(projectId: string): Promise<ProjectBackupPreview>;
+    create(projectId: string): Promise<BackupSnapshot>;
+    list(projectId: string): Promise<BackupSnapshot[]>;
+    verify(projectId: string, snapshotId: string): Promise<BackupVerification>;
+    restore(projectId: string, snapshotId: string): Promise<BackupRestoreResult | null>;
+    settings(projectId: string): Promise<ProjectBackupSettings>;
+    setSettings(projectId: string, settings: Pick<ProjectBackupSettings, "frequency" | "retainCount">): Promise<ProjectBackupSettings>;
   };
   smartViews: {
     list(): Promise<SmartView[]>;
@@ -207,8 +295,10 @@ export interface WorkbenchApi {
     setSettings(settings: AppUpdateSettings): Promise<AppUpdateStatus>;
     check(): Promise<AppUpdateStatus>;
     download(): Promise<AppUpdateStatus>;
+    cancel(): Promise<AppUpdateStatus>;
     install(): Promise<void>;
     openRelease(): Promise<void>;
+    onEvent(listener: (status: AppUpdateStatus) => void): () => void;
   };
   references: {
     list(projectId: string): Promise<ReferenceDocumentInfo[]>;
@@ -216,6 +306,18 @@ export interface WorkbenchApi {
     open(projectId: string, relativePath: string): Promise<void>;
     openFolder(projectId: string): Promise<void>;
     remove(projectId: string, relativePath: string): Promise<ReferenceDocumentInfo[]>;
+  };
+  research: {
+    list(projectId: string): Promise<CatalogProjectResearchItem[]>;
+    listGlobal(): Promise<CatalogProjectResearchItem[]>;
+    discoverLegacy(projectId: string): Promise<LegacyResearchCandidate[]>;
+    save(projectId: string, request: ResearchSaveRequest): Promise<CatalogProjectResearchItem[]>;
+    openAttachment(projectId: string, itemId: string, attachmentId: string): Promise<void>;
+  };
+  researchSearch: {
+    index(projectId: string): Promise<ProjectSearchIndexStatus>;
+    indexAll(): Promise<ProjectSearchIndexStatus[]>;
+    query(query: string, projectIds?: string[], limit?: number): Promise<ResearchSearchHit[]>;
   };
   manifest: {
     read(projectRoot: string): Promise<ProjectManifest>;
@@ -232,6 +334,7 @@ export interface WorkbenchApi {
     plan(projectId: string, request: ProjectFileOperationRequest): Promise<ProjectFileOperationPlan>;
     apply(projectId: string, planId: string): Promise<ProjectFileOperationResult>;
     undo(projectId: string, undoId: string): Promise<ProjectFileUndoResult>;
+    history(projectId: string, limit?: number): Promise<ProjectFileOperationHistoryEntry[]>;
     open(projectId: string, path: string): Promise<void>;
     reveal(projectId: string, path: string): Promise<void>;
     rename(projectId: string, fromPath: string, toPath: string, expectedHash?: string): Promise<void>;
@@ -242,6 +345,8 @@ export interface WorkbenchApi {
   templates: {
     list(): Promise<TemplateInfo[]>;
     create(sourceRoot: string, name: string): Promise<TemplateInfo>;
+    createFromProject(projectId: string, options: TemplateCreateOptions): Promise<TemplateInfo>;
+    delete(templateId: string): Promise<void>;
     instantiate(templateId: string, parentRoot: string, name: string): Promise<string>;
   };
   toolchains: {
@@ -253,12 +358,17 @@ export interface WorkbenchApi {
     openFile(projectRoot: string, relativePath: string, line?: number): Promise<void>;
     openProfile(projectRoot: string, targetId: string, profileId: string): Promise<string>;
   };
+  editor: {
+    status(): Promise<VsCodeStatus>;
+    selectExecutable(): Promise<VsCodeStatus | null>;
+    resetExecutable(): Promise<VsCodeStatus>;
+    openProject(projectId: string): Promise<void>;
+    openFile(projectId: string, relativePath: string, line?: number, column?: number): Promise<void>;
+    openExternal(path: string, line?: number): Promise<void>;
+  };
   dialogs: {
     openDirectory(): Promise<string | null>;
     openFile(filters?: Array<{ name: string; extensions: string[] }>): Promise<string | null>;
-  };
-  editor: {
-    openExternal(path: string, line?: number): Promise<void>;
   };
 }
 

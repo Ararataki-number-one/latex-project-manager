@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   BookOpen,
@@ -17,6 +17,7 @@ import {
   Mail,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
   Trash2,
   UserRound,
@@ -25,13 +26,20 @@ import {
 
 import type { WorkbenchApi } from "@/shared/ipc";
 import type {
+  CatalogProjectResearchItem,
   GitHubAccountStatus,
   GitHubRepositoryVisibility,
   GitHubSyncEvent,
   GitHubSyncState,
   GitHubSyncStatus,
+  LegacyResearchCandidate,
+  ProjectManifest,
+  ProjectResearchItem,
   ProjectSummary,
   ReferenceDocumentInfo,
+  ResearchAttachment,
+  ResearchRole,
+  ResearchTargetLink,
   SyncSecurityFinding
 } from "@/shared/types";
 
@@ -459,11 +467,28 @@ function DocumentIcon({ item }: { item: ReferenceDocumentInfo }) {
   return <FileText size={19} />;
 }
 
-export function ReferencesTab({ api, project, isDemo, onNotify }: SharedProps) {
+export function LegacyReferencesTab({ api, project, isDemo, onNotify }: SharedProps) {
   const [items, setItems] = useState<ReferenceDocumentInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "pdf" | "reading" | "large">("all");
+  const [query, setQuery] = useState("");
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+
+  const visibleItems = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return items.filter((item) => {
+      if (filter === "pdf" && item.kind !== "pdf") return false;
+      if (filter === "reading" && !new Set(["pdf", "ebook", "document"]).has(item.kind)) return false;
+      if (filter === "large" && !item.lfsRecommended) return false;
+      return !normalized || `${item.name} ${item.relativePath}`.toLocaleLowerCase().includes(normalized);
+    });
+  }, [filter, items, query]);
+
+  const selectedItem = visibleItems.find((item) => item.relativePath === selectedPath)
+    ?? visibleItems[0]
+    ?? null;
 
   const refresh = useCallback(async () => {
     try {
@@ -523,31 +548,535 @@ export function ReferencesTab({ api, project, isDemo, onNotify }: SharedProps) {
   return (
     <section className="resource-page references-page">
       <header className="resource-heading">
-        <div className="resource-heading-copy"><span className="resource-heading-icon"><BookOpen size={22} /></span><div><p className="eyebrow">随项目保存的阅读材料</p><h2>原始文稿</h2><p>英文论文、中文 PDF 和电子书会复制到项目根目录的 <code>references</code> 文件夹。</p></div></div>
-        <div className="resource-heading-actions"><button className="button secondary" onClick={() => void openFolder()}><FolderOpen size={16} />打开 references 文件夹</button><button className="button primary" onClick={() => void importDocuments()} disabled={busy}>{busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}添加文稿</button></div>
+        <div className="resource-heading-copy"><span className="resource-heading-icon"><BookOpen size={22} /></span><div><p className="eyebrow">随项目保存的阅读材料</p><h2 aria-label="原始文稿">研究资料</h2><p>把论文、中文 PDF 与电子书和项目放在一起；资料只管理，不在这里编辑。</p></div></div>
+        <div className="resource-heading-actions"><button className="button secondary" onClick={() => void openFolder()}><FolderOpen size={16} />打开资料文件夹</button><button className="button primary" onClick={() => void importDocuments()} disabled={busy}>{busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}添加资料</button></div>
       </header>
 
-      <div className="reference-location"><FolderOpen size={18} /><div><strong>文稿保存位置</strong><code title={`${project.rootPath}\\references`}>{project.rootPath}\references</code></div><span>复制项目、导出 ZIP 与 GitHub 同步都会包含这里的文件</span></div>
+      <div className="reference-location"><FolderOpen size={18} /><div><strong>研究资料文件夹</strong><code title={`${project.rootPath}\\references`}>{project.rootPath}\references</code></div><span>复制项目、导出 ZIP 与 GitHub 同步都会包含这里的文件</span></div>
 
       {loading ? (
-        <div className="resource-loading"><LoaderCircle size={20} className="spin" />正在读取原始文稿…</div>
+        <div className="resource-loading"><LoaderCircle size={20} className="spin" />正在读取研究资料…</div>
       ) : items.length === 0 ? (
-        <div className="reference-empty"><span><BookOpen size={28} /></span><h3>还没有原始文稿</h3><p>添加你正在阅读的论文或 PDF。客户端会复制文件，不会移动或修改原文件。</p><button className="button primary" onClick={() => void importDocuments()} disabled={busy}><Plus size={16} />选择文稿</button></div>
+        <div className="reference-empty"><span><BookOpen size={28} /></span><h3>还没有研究资料</h3><p>添加你正在阅读的论文或 PDF。客户端会复制文件，不会移动或修改原文件。</p><button className="button primary" onClick={() => void importDocuments()} disabled={busy}><Plus size={16} />选择资料</button></div>
       ) : (
-        <div className="reference-list" role="list" aria-label="原始文稿列表">
-          {items.map((item) => (
-            <article className="reference-row" role="listitem" key={item.relativePath}>
-              <span className="reference-icon"><DocumentIcon item={item} /></span>
-              <button className="reference-main" onClick={() => void openDocument(item)}><strong>{item.name}</strong><span>{item.relativePath}</span></button>
-              <div className="reference-meta"><strong>{formatBytes(item.size)}</strong><span>{formatTime(item.modifiedAt)}</span></div>
-              {item.lfsRecommended ? <span className="reference-lfs-badge" title="GitHub 对大文件有限制，建议使用 Git LFS">建议 Git LFS</span> : <span />}
-              <div className="reference-actions">
-                {confirmRemove === item.relativePath ? <><button className="button danger compact-button" onClick={() => void removeDocument(item)} disabled={busy}><Trash2 size={14} />确认移除</button><button className="icon-button" aria-label={`取消移除 ${item.name}`} onClick={() => setConfirmRemove(null)}><X size={16} /></button></> : <><button className="icon-button" aria-label={`打开原始文稿 ${item.name}`} onClick={() => void openDocument(item)}><ExternalLink size={17} /></button><button className="icon-button danger-hover" aria-label={`移除原始文稿 ${item.name}`} onClick={() => setConfirmRemove(item.relativePath)}><Trash2 size={17} /></button></>}
-              </div>
-            </article>
-          ))}
+        <div className="reference-browser">
+          <aside className="reference-filters" aria-label="研究资料分类">
+            <strong>资料库</strong>
+            {([
+              ["all", "全部资料", items.length],
+              ["pdf", "PDF", items.filter((item) => item.kind === "pdf").length],
+              ["reading", "可阅读文稿", items.filter((item) => new Set(["pdf", "ebook", "document"]).has(item.kind)).length],
+              ["large", "大型文件", items.filter((item) => item.lfsRecommended).length]
+            ] as const).map(([id, label, count]) => <button key={id} className={filter === id ? "active" : ""} aria-pressed={filter === id} onClick={() => setFilter(id)}><span>{label}</span><small>{count}</small></button>)}
+            <div className="reference-filter-note"><ShieldCheck size={15} /><span>公开同步前，请检查版权与隐私。</span></div>
+          </aside>
+          <section className="reference-collection">
+            <label className="reference-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索研究资料" placeholder="搜索名称或路径" />{query && <button aria-label="清除资料搜索" onClick={() => setQuery("")}><X size={14} /></button>}</label>
+            <div className="reference-list" role="list" aria-label="原始文稿列表">
+              {visibleItems.map((item) => (
+                <article className={`reference-row ${selectedItem?.relativePath === item.relativePath ? "selected" : ""}`} role="listitem" key={item.relativePath}>
+                  <span className="reference-icon"><DocumentIcon item={item} /></span>
+                  <button className="reference-main" aria-pressed={selectedItem?.relativePath === item.relativePath} onClick={() => setSelectedPath(item.relativePath)} onDoubleClick={() => void openDocument(item)}><strong>{item.name}</strong><span>{item.relativePath}</span></button>
+                  <div className="reference-meta"><strong>{formatBytes(item.size)}</strong><span>{formatTime(item.modifiedAt)}</span></div>
+                  {item.lfsRecommended ? <span className="reference-lfs-badge" title="GitHub 对大文件有限制，建议使用 Git LFS">建议 Git LFS</span> : <span />}
+                </article>
+              ))}
+              {!visibleItems.length && <div className="reference-filter-empty">没有符合当前分类或搜索条件的资料。</div>}
+            </div>
+          </section>
+          <aside className="reference-inspector" aria-label={selectedItem ? `资料详情 ${selectedItem.name}` : "资料详情"}>
+            {selectedItem ? <>
+              <span className="reference-preview-icon"><DocumentIcon item={selectedItem} /></span>
+              <h3>{selectedItem.name}</h3>
+              <p title={selectedItem.relativePath}>{selectedItem.relativePath}</p>
+              <dl><div><dt>类型</dt><dd>{selectedItem.kind.toLocaleUpperCase()}</dd></div><div><dt>大小</dt><dd>{formatBytes(selectedItem.size)}</dd></div><div><dt>最近修改</dt><dd>{formatTime(selectedItem.modifiedAt)}</dd></div><div><dt>Git LFS</dt><dd>{selectedItem.lfsRecommended ? "建议使用" : "无需"}</dd></div></dl>
+              <div className="reference-inspector-actions"><button className="button primary" aria-label={`打开原始文稿 ${selectedItem.name}`} onClick={() => void openDocument(selectedItem)}><ExternalLink size={16} />打开资料</button>{confirmRemove === selectedItem.relativePath ? <><button className="button danger" onClick={() => void removeDocument(selectedItem)} disabled={busy}><Trash2 size={14} />确认移除</button><button className="button secondary" onClick={() => setConfirmRemove(null)}>取消</button></> : <button className="button secondary danger-text" aria-label={`移除原始文稿 ${selectedItem.name}`} onClick={() => setConfirmRemove(selectedItem.relativePath)}><Trash2 size={15} />移入回收站</button>}</div>
+            </> : <div className="reference-inspector-empty"><BookOpen size={24} /><span>选择资料查看详情</span></div>}
+          </aside>
         </div>
       )}
+    </section>
+  );
+}
+
+const researchRoleLabels: Record<ResearchRole, string> = {
+  primarySource: "主要原稿",
+  reference: "普通参考",
+  translationSource: "翻译原稿",
+  data: "数据",
+  supplement: "补充材料"
+};
+
+export const PROJECT_RESEARCH_SCOPE = "__project__";
+
+export interface ResearchLinkDraftEntry {
+  targetKey: string;
+  enabled: boolean;
+  role: ResearchRole;
+  preferredAttachmentId?: string;
+}
+
+/** Build one editable row per target while retaining links to removed targets. */
+export function createResearchLinkDraft(
+  links: ResearchTargetLink[],
+  targetIds: string[]
+): ResearchLinkDraftEntry[] {
+  const keys = [
+    PROJECT_RESEARCH_SCOPE,
+    ...targetIds,
+    ...links.map((link) => link.targetId === null ? PROJECT_RESEARCH_SCOPE : link.targetId)
+  ].filter((key, index, all) => all.indexOf(key) === index);
+  return keys.map((targetKey) => {
+    const link = links.find((candidate) => (candidate.targetId === null ? PROJECT_RESEARCH_SCOPE : candidate.targetId) === targetKey);
+    return {
+      targetKey,
+      enabled: Boolean(link),
+      role: link?.role ?? "reference",
+      preferredAttachmentId: link?.preferredAttachmentId
+    };
+  });
+}
+
+/**
+ * Metadata-only saves return the original links byte-for-byte in meaning and
+ * order. Once link controls are touched, each enabled row keeps its own role
+ * and preferred attachment instead of inheriting a global role.
+ */
+export function materializeResearchLinks(
+  entries: ResearchLinkDraftEntry[],
+  originalLinks: ResearchTargetLink[],
+  linksTouched: boolean
+): ResearchTargetLink[] {
+  if (!linksTouched) return originalLinks.map((link) => ({ ...link }));
+  return entries.filter((entry) => entry.enabled).map((entry) => ({
+    targetId: entry.targetKey === PROJECT_RESEARCH_SCOPE ? null : entry.targetKey,
+    role: entry.role,
+    ...(entry.preferredAttachmentId ? { preferredAttachmentId: entry.preferredAttachmentId } : {})
+  }));
+}
+
+interface ResearchMetadataDraft {
+  title: string;
+  authors: string;
+  year: string;
+  doi: string;
+  arxivId: string;
+  isbn: string;
+  linkEntries: ResearchLinkDraftEntry[];
+  linksTouched: boolean;
+}
+
+type ProjectResearchFilter = "all" | "pending" | "localOnly" | ResearchRole;
+
+interface ProjectResearchRow {
+  key: string;
+  record?: CatalogProjectResearchItem;
+  attachment?: ResearchAttachment;
+  legacy?: LegacyResearchCandidate;
+  file?: ReferenceDocumentInfo;
+  title: string;
+  subtitle: string;
+  size: number;
+  pending: boolean;
+  localOnly: boolean;
+}
+
+function titleFromFileName(name: string): string {
+  return name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || name;
+}
+
+function attachmentKind(attachment?: ResearchAttachment, file?: ReferenceDocumentInfo): string {
+  if (file) return file.kind.toLocaleUpperCase();
+  if (!attachment) return "FILE";
+  if (attachment.mediaType === "application/pdf") return "PDF";
+  if (attachment.mediaType.includes("epub")) return "EPUB";
+  if (attachment.mediaType.includes("bibtex")) return "BIB";
+  return attachment.name.split(".").pop()?.toLocaleUpperCase() || "FILE";
+}
+
+function ResearchRowIcon({ row }: { row: ProjectResearchRow }) {
+  if (row.file) return <DocumentIcon item={row.file} />;
+  if (row.attachment?.mediaType === "application/pdf") return <FileText size={19} />;
+  return <BookOpen size={19} />;
+}
+
+function ResearchLinksEditor({
+  entries,
+  targetNames,
+  attachments,
+  onToggle,
+  onRoleChange,
+  onPreferredAttachmentChange
+}: {
+  entries: ResearchLinkDraftEntry[];
+  targetNames: Map<string, string>;
+  attachments: ResearchAttachment[];
+  onToggle: (targetKey: string, enabled: boolean) => void;
+  onRoleChange: (targetKey: string, role: ResearchRole) => void;
+  onPreferredAttachmentChange: (targetKey: string, attachmentId?: string) => void;
+}) {
+  return <fieldset className="research-link-editor">
+    <legend>关联文档目标</legend>
+    <p className="research-link-help">每个目标可单独设置资料角色与首选附件；不勾选任何目标时保留在“待关联”。</p>
+    <div className="research-link-list">
+      {entries.map((entry) => {
+        const targetName = entry.targetKey === PROJECT_RESEARCH_SCOPE
+          ? "整个项目"
+          : targetNames.get(entry.targetKey) ?? `已移除的目标 · ${entry.targetKey}`;
+        const preferredExists = !entry.preferredAttachmentId || attachments.some((attachment) => attachment.id === entry.preferredAttachmentId);
+        return <div className={`research-link-row ${entry.enabled ? "active" : ""}`} key={entry.targetKey}>
+          <label className="research-target-check">
+            <input
+              type="checkbox"
+              aria-label={`关联到${targetName}`}
+              checked={entry.enabled}
+              onChange={(event) => onToggle(entry.targetKey, event.target.checked)}
+            />
+            <span><strong>{targetName}</strong><small>{entry.enabled ? `已关联 · ${researchRoleLabels[entry.role]}` : "未关联"}</small></span>
+          </label>
+          <div className="research-link-controls">
+            <label><span>角色</span><select
+              aria-label={`${targetName}的资料角色`}
+              value={entry.role}
+              disabled={!entry.enabled}
+              onChange={(event) => onRoleChange(entry.targetKey, event.target.value as ResearchRole)}
+            >{Object.entries(researchRoleLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+            <label><span>首选附件</span><select
+              aria-label={`${targetName}的首选附件`}
+              value={entry.preferredAttachmentId ?? ""}
+              disabled={!entry.enabled || attachments.length === 0}
+              onChange={(event) => onPreferredAttachmentChange(entry.targetKey, event.target.value || undefined)}
+            >
+              <option value="">自动选择</option>
+              {!preferredExists && <option value={entry.preferredAttachmentId}>已缺失 · {entry.preferredAttachmentId}</option>}
+              {attachments.map((attachment) => <option key={attachment.id} value={attachment.id}>{attachment.name}</option>)}
+            </select></label>
+          </div>
+        </div>;
+      })}
+    </div>
+  </fieldset>;
+}
+
+export function ReferencesTab({ api, project, isDemo, onNotify }: SharedProps) {
+  const [files, setFiles] = useState<ReferenceDocumentInfo[]>([]);
+  const [records, setRecords] = useState<CatalogProjectResearchItem[]>([]);
+  const [legacy, setLegacy] = useState<LegacyResearchCandidate[]>([]);
+  const [manifest, setManifest] = useState<ProjectManifest | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [filter, setFilter] = useState<ProjectResearchFilter>("all");
+  const [query, setQuery] = useState("");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [confirmBatch, setConfirmBatch] = useState(false);
+  const [confirmRemoveRecord, setConfirmRemoveRecord] = useState(false);
+  const [draft, setDraft] = useState<ResearchMetadataDraft>({
+    title: "", authors: "", year: "", doi: "", arxivId: "", isbn: "", linkEntries: [], linksTouched: false
+  });
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [nextFiles, nextRecords, nextLegacy, nextManifest] = await Promise.all([
+        api.references.list(project.id),
+        api.research.list(project.id),
+        api.research.discoverLegacy(project.id),
+        api.manifest.read(project.rootPath)
+      ]);
+      setFiles(nextFiles);
+      setRecords(nextRecords);
+      setLegacy(nextLegacy);
+      setManifest(nextManifest);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法读取研究资料");
+    } finally {
+      setLoading(false);
+    }
+  }, [api, onNotify, project.id, project.rootPath]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const rows = useMemo<ProjectResearchRow[]>(() => {
+    const filesByPath = new Map(files.map((file) => [file.relativePath.replaceAll("\\", "/"), file]));
+    const knownHashes = new Set(records.flatMap((record) => record.item.attachments.map((attachment) => attachment.sha256?.toLocaleLowerCase()).filter(Boolean)));
+    const output: ProjectResearchRow[] = [];
+    const usedPaths = new Set<string>();
+    for (const record of records) {
+      for (const attachment of record.item.attachments) {
+        const relativePath = attachment.relativePath?.replaceAll("\\", "/");
+        const file = relativePath ? filesByPath.get(relativePath) : undefined;
+        if (relativePath) usedPaths.add(relativePath);
+        output.push({
+          key: `${record.item.id}:${attachment.id}`,
+          record,
+          attachment,
+          file,
+          title: record.item.title || attachment.name,
+          subtitle: [attachment.name, record.item.authors.join("、"), record.item.year].filter(Boolean).join(" · "),
+          size: attachment.size ?? file?.size ?? 0,
+          pending: record.item.links.length === 0,
+          localOnly: attachment.availability === "localOnly"
+        });
+      }
+    }
+    for (const candidate of legacy) {
+      if (knownHashes.has(candidate.sha256.toLocaleLowerCase())) continue;
+      const relativePath = candidate.relativePath.replaceAll("\\", "/");
+      if (usedPaths.has(relativePath)) continue;
+      usedPaths.add(relativePath);
+      output.push({
+        key: `legacy:${candidate.sha256}`,
+        legacy: candidate,
+        file: filesByPath.get(relativePath),
+        title: titleFromFileName(candidate.name),
+        subtitle: `${candidate.name} · 待整理`,
+        size: candidate.size,
+        pending: true,
+        localOnly: false
+      });
+    }
+    for (const file of files) {
+      const relativePath = file.relativePath.replaceAll("\\", "/");
+      if (usedPaths.has(relativePath)) continue;
+      output.push({ key: `file:${relativePath}`, file, title: titleFromFileName(file.name), subtitle: `${file.name} · 尚未建立资料索引`, size: file.size, pending: true, localOnly: false });
+    }
+    return output.sort((left, right) => left.title.localeCompare(right.title, "zh-CN"));
+  }, [files, legacy, records]);
+
+  const visibleRows = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return rows.filter((row) => {
+      if (filter === "pending" && !row.pending) return false;
+      if (filter === "localOnly" && !row.localOnly) return false;
+      if (filter !== "all" && filter !== "pending" && filter !== "localOnly" && !row.record?.item.links.some((link) => link.role === filter)) return false;
+      return !normalized || `${row.title} ${row.subtitle} ${row.record?.item.doi ?? ""} ${row.record?.item.arxivId ?? ""}`.toLocaleLowerCase().includes(normalized);
+    });
+  }, [filter, query, rows]);
+  const selected = visibleRows.find((row) => row.key === selectedKey) ?? visibleRows[0] ?? null;
+  const targetIds = manifest?.targets.map((target) => target.id) ?? [];
+  const targetIdentity = targetIds.join("\0");
+  const targetNames = useMemo(
+    () => new Map(manifest?.targets.map((target) => [target.id, target.name]) ?? []),
+    [manifest]
+  );
+
+  useEffect(() => {
+    if (!selected) return;
+    const item = selected.record?.item;
+    setDraft({
+      title: item?.title ?? selected.title,
+      authors: item?.authors.join("、") ?? "",
+      year: item?.year ? String(item.year) : "",
+      doi: item?.doi ?? "",
+      arxivId: item?.arxivId ?? "",
+      isbn: item?.isbn ?? "",
+      linkEntries: createResearchLinkDraft(item?.links ?? [], targetIds),
+      linksTouched: false
+    });
+    setConfirmRemoveRecord(false);
+  }, [selected?.key, selected?.record?.updatedAt, targetIdentity]);
+
+  function localAttachmentPaths(current = records): Record<string, string> {
+    return Object.assign({}, ...current.map((entry) => entry.localAttachmentPaths));
+  }
+
+  function toggleDraftTarget(targetKey: string, enabled: boolean) {
+    setDraft((current) => ({
+      ...current,
+      linksTouched: true,
+      linkEntries: current.linkEntries.map((entry) => {
+        if (entry.targetKey === targetKey) return { ...entry, enabled };
+        if (!enabled) return entry;
+        if (targetKey === PROJECT_RESEARCH_SCOPE || entry.targetKey === PROJECT_RESEARCH_SCOPE) return { ...entry, enabled: false };
+        return entry;
+      })
+    }));
+  }
+
+  function updateDraftLink(targetKey: string, patch: Partial<Pick<ResearchLinkDraftEntry, "role" | "preferredAttachmentId">>) {
+    setDraft((current) => ({
+      ...current,
+      linksTouched: true,
+      linkEntries: current.linkEntries.map((entry) => entry.targetKey === targetKey ? { ...entry, ...patch } : entry)
+    }));
+  }
+
+  function itemFromSelected(): ProjectResearchItem {
+    const existing = selected?.record?.item;
+    const candidate = selected?.legacy;
+    const fallbackFile = selected?.file;
+    const attachment = selected?.attachment ?? (candidate ? {
+      id: crypto.randomUUID(), name: candidate.name, relativePath: candidate.relativePath,
+      mediaType: candidate.mediaType, size: candidate.size, sha256: candidate.sha256, availability: "repository" as const
+    } : fallbackFile ? {
+      id: crypto.randomUUID(), name: fallbackFile.name, relativePath: fallbackFile.relativePath,
+      mediaType: fallbackFile.kind === "pdf" ? "application/pdf" : "application/octet-stream", size: fallbackFile.size,
+      availability: "repository" as const
+    } : undefined);
+    if (!attachment) throw new Error("所选资料没有可保存的附件");
+    const year = draft.year.trim() ? Number(draft.year) : undefined;
+    if (year !== undefined && (!Number.isInteger(year) || year < 1000 || year > 3000)) throw new Error("年份应为四位数字");
+    return {
+      ...(existing ?? { id: crypto.randomUUID(), attachments: [attachment], links: [] }),
+      title: draft.title.trim() || undefined,
+      authors: draft.authors.split(/[，,、;]/).map((value) => value.trim()).filter(Boolean),
+      year,
+      doi: draft.doi.trim() || undefined,
+      arxivId: draft.arxivId.trim() || undefined,
+      isbn: draft.isbn.trim() || undefined,
+      links: materializeResearchLinks(draft.linkEntries, existing?.links ?? [], draft.linksTouched)
+    };
+  }
+
+  async function saveSelected() {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const nextItem = itemFromSelected();
+      const nextItems = selected.record
+        ? records.map((entry) => entry.item.id === selected.record!.item.id ? nextItem : entry.item)
+        : [...records.map((entry) => entry.item), nextItem];
+      const next = await api.research.save(project.id, { items: nextItems, localAttachmentPaths: localAttachmentPaths() });
+      setRecords(next);
+      setLegacy(await api.research.discoverLegacy(project.id));
+      setSelectedKey(`${nextItem.id}:${nextItem.attachments[0].id}`);
+      onNotify(isDemo ? "演示模式：资料信息已更新" : "资料信息与目标关联已保存；移动索引将进入安全同步队列");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法保存资料信息");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function organizePending() {
+    const pending = legacy.filter((candidate) => !records.some((record) => record.item.attachments.some((attachment) => attachment.sha256 === candidate.sha256)));
+    if (!pending.length) return;
+    if (!confirmBatch) { setConfirmBatch(true); return; }
+    setBusy(true);
+    try {
+      const uniqueTarget = manifest?.targets.length === 1 ? manifest.targets[0].id : null;
+      const additions: ProjectResearchItem[] = pending.map((candidate) => ({
+        id: crypto.randomUUID(),
+        title: titleFromFileName(candidate.name),
+        authors: [],
+        attachments: [{ id: crypto.randomUUID(), name: candidate.name, relativePath: candidate.relativePath, mediaType: candidate.mediaType, size: candidate.size, sha256: candidate.sha256, availability: "repository" }],
+        links: uniqueTarget ? [{ targetId: uniqueTarget, role: "reference" }] : []
+      }));
+      const next = await api.research.save(project.id, { items: [...records.map((entry) => entry.item), ...additions], localAttachmentPaths: localAttachmentPaths() });
+      setRecords(next);
+      setLegacy(await api.research.discoverLegacy(project.id));
+      setConfirmBatch(false);
+      onNotify(uniqueTarget ? `已整理 ${additions.length} 份资料，并关联到唯一文档目标` : `已整理 ${additions.length} 份资料；已放入待关联`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "批量整理失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importDocuments() {
+    setBusy(true);
+    try {
+      await api.references.import(project.id);
+      await refresh();
+      if (!isDemo) onNotify("资料已加入待整理箱；公开仓库会默认仅保存在本机");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "添加研究资料失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openRow(row: ProjectResearchRow) {
+    try {
+      if (row.record && row.attachment) await api.research.openAttachment(project.id, row.record.item.id, row.attachment.id);
+      else if (row.file) await api.references.open(project.id, row.file.relativePath);
+      else throw new Error("这份资料当前无法在本机打开");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法打开研究资料");
+    }
+  }
+
+  async function openSelected() {
+    if (selected) await openRow(selected);
+  }
+
+  async function removeRecordKeepFile() {
+    if (!selected?.record) return;
+    if (!confirmRemoveRecord) { setConfirmRemoveRecord(true); return; }
+    setBusy(true);
+    try {
+      const nextRecords = records.filter((entry) => entry.item.id !== selected.record!.item.id);
+      const next = await api.research.save(project.id, { items: nextRecords.map((entry) => entry.item), localAttachmentPaths: localAttachmentPaths(nextRecords) });
+      setRecords(next);
+      setLegacy(await api.research.discoverLegacy(project.id));
+      setSelectedKey(null);
+      setConfirmRemoveRecord(false);
+      onNotify("已从项目资料视图移除；物理文件仍保留在原位置");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法移除资料记录");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openFolder() {
+    try {
+      await api.references.openFolder(project.id);
+      if (isDemo) onNotify("演示模式：已模拟打开 references 文件夹");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "无法打开 references 文件夹");
+    }
+  }
+
+  const filterItems: Array<{ id: ProjectResearchFilter; label: string; count: number }> = [
+    { id: "all", label: "全部资料", count: rows.length },
+    { id: "pending", label: "待关联", count: rows.filter((row) => row.pending).length },
+    { id: "localOnly", label: "仅本机", count: rows.filter((row) => row.localOnly).length },
+    ...Object.entries(researchRoleLabels).map(([id, label]) => ({ id: id as ResearchRole, label, count: rows.filter((row) => row.record?.item.links.some((link) => link.role === id)).length }))
+  ];
+  const pendingCount = rows.filter((row) => row.pending && row.legacy).length;
+
+  return (
+    <section className="resource-page references-page research-workbench-page">
+      <header className="resource-heading">
+        <div className="resource-heading-copy"><span className="resource-heading-icon"><BookOpen size={22} /></span><div><p className="eyebrow">资料与文档目标的关系</p><h2 aria-label="原始文稿">研究资料</h2><p>管理书目信息、附件版本和目标关联；不会在这里编辑原文件。</p></div></div>
+        <div className="resource-heading-actions"><button className="button secondary" onClick={() => void openFolder()}><FolderOpen size={16} />打开资料文件夹</button>{pendingCount > 0 && <button className={`button secondary ${confirmBatch ? "warning" : ""}`} onClick={() => void organizePending()} disabled={busy}><CheckCircle2 size={16} />{confirmBatch ? `确认整理 ${pendingCount} 项` : `整理 ${pendingCount} 项`}</button>}<button className="button primary" onClick={() => void importDocuments()} disabled={busy}>{busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}添加资料</button></div>
+      </header>
+      <div className="reference-location"><FolderOpen size={18} /><div><strong>项目资料位置</strong><code title={`${project.rootPath}\\references`}>{project.rootPath}\references</code></div><span>仓库附件可同步；“仅本机”附件受安全规则保护，绝不进入 Git</span></div>
+
+      {loading ? <div className="resource-loading"><LoaderCircle size={20} className="spin" />正在建立资料视图…</div> : rows.length === 0 ? <div className="reference-empty"><span><BookOpen size={28} /></span><h3>还没有研究资料</h3><p>添加论文、书籍或数据。文件会复制到项目目录，原文件保持不变。</p><button className="button primary" onClick={() => void importDocuments()} disabled={busy}><Plus size={16} />选择资料</button></div> : <div className="reference-browser research-browser">
+        <aside className="reference-filters" aria-label="研究资料分类"><strong>资料视图</strong>{filterItems.map((item) => <button key={item.id} className={filter === item.id ? "active" : ""} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}><span>{item.label}</span><small>{item.count}</small></button>)}<div className="reference-filter-note"><ShieldCheck size={15} /><span>公开同步前会再次检查版权与隐私。</span></div></aside>
+        <section className="reference-collection"><label className="reference-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索研究资料" placeholder="搜索标题、作者、DOI 或附件" />{query && <button aria-label="清除资料搜索" onClick={() => setQuery("")}><X size={14} /></button>}</label><div className="reference-list" role="list" aria-label="原始文稿列表">{visibleRows.map((row) => <article className={`reference-row ${selected?.key === row.key ? "selected" : ""}`} role="listitem" key={row.key}><span className="reference-icon"><ResearchRowIcon row={row} /></span><button className="reference-main" aria-pressed={selected?.key === row.key} onClick={() => setSelectedKey(row.key)} onDoubleClick={() => void openRow(row)}><strong>{row.title}</strong><span>{row.subtitle}</span></button><div className="reference-meta"><strong>{formatBytes(row.size)}</strong><span>{row.localOnly ? "仅本机" : row.pending ? "待整理" : "已关联"}</span></div><span className={`reference-lfs-badge ${row.pending ? "pending" : row.localOnly ? "local" : ""}`}>{row.pending ? "待关联" : row.localOnly ? "仅电脑可用" : row.record?.item.links.map((link) => researchRoleLabels[link.role]).filter((value, index, all) => all.indexOf(value) === index).join("、")}</span></article>)}{!visibleRows.length && <div className="reference-filter-empty">没有符合当前视图或搜索条件的资料。</div>}</div></section>
+        <aside className="reference-inspector research-metadata-inspector" aria-label={selected ? `资料详情 ${selected.title}` : "资料详情"}>
+          {selected ? <>
+            <span className="reference-preview-icon"><ResearchRowIcon row={selected} /></span>
+            <div className="research-inspector-title"><h3>{selected.title}</h3><p>{selected.attachment?.name ?? selected.legacy?.name ?? selected.file?.name}</p></div>
+            <div className="research-metadata-form">
+              <label><span>标题</span><input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} /></label>
+              <label><span>作者</span><input value={draft.authors} onChange={(event) => setDraft((current) => ({ ...current, authors: event.target.value }))} placeholder="用逗号分隔" /></label>
+              <div className="research-metadata-pair">
+                <label><span>年份</span><input inputMode="numeric" value={draft.year} onChange={(event) => setDraft((current) => ({ ...current, year: event.target.value }))} /></label>
+                <label><span>DOI</span><input value={draft.doi} onChange={(event) => setDraft((current) => ({ ...current, doi: event.target.value }))} /></label>
+              </div>
+              <label><span>arXiv / ISBN</span><div className="research-metadata-pair"><input value={draft.arxivId} onChange={(event) => setDraft((current) => ({ ...current, arxivId: event.target.value }))} placeholder="arXiv ID" /><input value={draft.isbn} onChange={(event) => setDraft((current) => ({ ...current, isbn: event.target.value }))} placeholder="ISBN" /></div></label>
+              <ResearchLinksEditor
+                entries={draft.linkEntries}
+                targetNames={targetNames}
+                attachments={selected.record?.item.attachments ?? (selected.attachment ? [selected.attachment] : [])}
+                onToggle={toggleDraftTarget}
+                onRoleChange={(targetKey, role) => updateDraftLink(targetKey, { role })}
+                onPreferredAttachmentChange={(targetKey, preferredAttachmentId) => updateDraftLink(targetKey, { preferredAttachmentId })}
+              />
+            </div>
+            <div className="reference-inspector-actions">
+              <button className="button primary" onClick={() => void saveSelected()} disabled={busy}><CheckCircle2 size={16} />{selected.record ? "保存资料信息" : "建立资料记录"}</button>
+              <button className="button secondary" aria-label={`打开原始文稿 ${selected.attachment?.name ?? selected.file?.name ?? selected.title}`} onClick={() => void openSelected()}><ExternalLink size={16} />打开附件</button>
+              {selected.record && <button className="button secondary danger-text" onClick={() => void removeRecordKeepFile()} disabled={busy}><Trash2 size={15} />{confirmRemoveRecord ? "确认移除记录（保留文件）" : "从资料视图移除"}</button>}
+            </div>
+          </> : <div className="reference-inspector-empty"><BookOpen size={24} /><span>选择资料查看详情</span></div>}
+        </aside>
+      </div>}
     </section>
   );
 }

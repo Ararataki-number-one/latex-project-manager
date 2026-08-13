@@ -5,7 +5,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AppUpdateService, compareVersions, type UpdateCommandRunner } from "../src/main/services/app-updates";
+import {
+  AppUpdateService,
+  compareVersions,
+  detectWindowsUpdateInstallMode,
+  type UpdateCommandRunner
+} from "../src/main/services/app-updates";
 
 const temporaryDirectories: string[] = [];
 
@@ -18,6 +23,64 @@ describe("application updates", () => {
     expect(compareVersions("0.3.1", "0.3.0")).toBe(1);
     expect(compareVersions("v1.0.0", "1.0.0")).toBe(0);
     expect(compareVersions("2.0.0", "10.0.0")).toBe(-1);
+    expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBe(1);
+    expect(compareVersions("1.0.0-beta.9", "1.0.0")).toBe(-1);
+    expect(compareVersions("1.0.0-rc.1", "1.0.0-beta.9")).toBe(1);
+    expect(compareVersions("1.0.0-rc.2", "1.0.0-rc.1")).toBe(1);
+    expect(compareVersions("1.0.0", "1.0.0-rc.2")).toBe(1);
+  });
+
+  it("recognizes electron-builder portable and installed update modes", () => {
+    expect(detectWindowsUpdateInstallMode({})).toBe("installed");
+    expect(detectWindowsUpdateInstallMode({ PORTABLE_EXECUTABLE_FILE: "D:\\Apps\\LaTeX.exe" })).toBe("portable");
+    expect(detectWindowsUpdateInstallMode({ PORTABLE_EXECUTABLE_DIR: "D:\\Apps" })).toBe("portable");
+  });
+
+  it("selects the newest beta prerelease without changing the stable channel", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "latex-manager-beta-updates-"));
+    temporaryDirectories.push(directory);
+    const commands: string[][] = [];
+    const runner: UpdateCommandRunner = async (_executable, _cwd, args) => {
+      commands.push(args);
+      if (args[0] === "--version") return { code: 0, stdout: "gh version 2.76.0\n", stderr: "" };
+      if (args[0] === "release" && args[1] === "list") {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            { tagName: "v1.0.0-beta.1", isDraft: false, isPrerelease: true },
+            { tagName: "v0.11.1", isDraft: false, isPrerelease: false },
+            { tagName: "v1.0.0-beta.3", isDraft: false, isPrerelease: true }
+          ]),
+          stderr: ""
+        };
+      }
+      if (args[0] === "release" && args[1] === "view") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            tagName: "v1.0.0-beta.3",
+            name: "Beta 3",
+            url: "https://example.invalid/beta-3",
+            isDraft: false,
+            isPrerelease: true,
+            assets: []
+          }),
+          stderr: ""
+        };
+      }
+      throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+    };
+    const service = new AppUpdateService(directory, {
+      currentVersion: "1.0.0-beta.1",
+      releaseChannel: "beta",
+      ghExecutable: "gh.exe",
+      runner
+    });
+
+    await service.check(false);
+
+    expect(commands.some((args) => args[0] === "release" && args[1] === "list")).toBe(true);
+    expect(commands.find((args) => args[0] === "release" && args[1] === "view")?.[2]).toBe("v1.0.0-beta.3");
   });
 
   it("checks, downloads and verifies a private GitHub release asset", async () => {
@@ -81,11 +144,18 @@ describe("application updates", () => {
       }
       throw new Error(`Unexpected gh command: ${args.join(" ")}`);
     };
+    const installerLaunches: Array<{ path: string; mode: string }> = [];
+    let failInstallerLaunch = false;
     const service = new AppUpdateService(directory, {
       currentVersion: "0.3.0",
       ghExecutable: "gh.exe",
       runner,
-      publicKeyPem: publicKey
+      publicKeyPem: publicKey,
+      installMode: "portable",
+      installerLauncher: async (path, mode) => {
+        installerLaunches.push({ path, mode });
+        if (failInstallerLaunch) throw new Error("installer was blocked");
+      }
     });
 
     const available = await service.check(false);
@@ -96,11 +166,57 @@ describe("application updates", () => {
     expect(downloaded.state).toBe("downloaded");
     expect(downloaded.downloadedPath).toContain(assetName);
     expect(await readFile(await service.downloadedInstaller())).toEqual(bytes);
+    await expect(service.launchDownloadedInstaller()).resolves.toMatchObject({ mode: "portable", path: expect.stringContaining(assetName) });
+    expect(installerLaunches).toEqual([{ path: expect.stringContaining(assetName), mode: "portable" }]);
+    failInstallerLaunch = true;
+    await expect(service.launchDownloadedInstaller()).rejects.toThrow("installer was blocked");
+    expect((await service.status()).state).toBe("downloaded");
     expect(commands.some((command) => command.includes("--clobber"))).toBe(true);
     await service.download();
     expect(commands.filter((command) => command[0] === "release" && command[1] === "download" && command.includes(assetName))).toHaveLength(1);
 
     const settings = await service.setSettings({ autoCheck: false, autoDownload: false });
     expect(settings).toMatchObject({ autoCheck: false, autoDownload: false });
+
+    await rm(downloaded.downloadedPath!, { force: true });
+    let started!: () => void;
+    const downloadStarted = new Promise<void>((resolve) => { started = resolve; });
+    const interrupted = new AppUpdateService(directory, {
+      currentVersion: "0.3.0",
+      ghExecutable: "gh.exe",
+      runner,
+      publicKeyPem: publicKey,
+      downloader: async (_url, destination, options) => {
+        const partial = bytes.subarray(0, 8);
+        await writeFile(destination, partial);
+        options.onProgress({ downloadedBytes: partial.length, totalBytes: bytes.length });
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true });
+        });
+      }
+    });
+    await interrupted.check(false);
+    const interruptedJob = interrupted.download();
+    await downloadStarted;
+    const cancelled = await interrupted.cancel();
+    expect(cancelled).toMatchObject({ state: "cancelled", downloadedBytes: 8, totalBytes: bytes.length, canRetry: true });
+    await interruptedJob;
+
+    let resumedFrom = -1;
+    const resumed = new AppUpdateService(directory, {
+      currentVersion: "0.3.0",
+      ghExecutable: "gh.exe",
+      runner,
+      publicKeyPem: publicKey,
+      downloader: async (_url, destination, options) => {
+        resumedFrom = options.resumeFrom;
+        await writeFile(destination, bytes.subarray(options.resumeFrom), { flag: "a" });
+        options.onProgress({ downloadedBytes: bytes.length, totalBytes: bytes.length });
+      }
+    });
+    const resumedStatus = await resumed.download();
+    expect(resumedFrom).toBe(8);
+    expect(resumedStatus).toMatchObject({ state: "downloaded", downloadedBytes: bytes.length, totalBytes: bytes.length, progressPercent: 100 });
   });
 });

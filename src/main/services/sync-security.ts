@@ -1,9 +1,13 @@
 import { lstat, readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
-import type { GitHubChangedFile, GitHubLargeFile, SyncSecurityFinding } from "../../shared/types";
+import type { GitHubChangedFile, GitHubLargeFile, SyncSecurityFinding, SyncSecurityRecoveryAction } from "../../shared/types";
 
 const MAX_TEXT_SCAN_BYTES = 2 * 1024 * 1024;
+const RESEARCH_DOCUMENT_EXTENSIONS = new Set([
+  ".pdf", ".epub", ".djvu", ".mobi", ".azw3", ".doc", ".docx", ".odt", ".rtf",
+  ".txt", ".md", ".html", ".htm", ".tex", ".bib", ".zip"
+]);
 const SENSITIVE_FILE_NAMES = new Set([
   ".env",
   ".env.local",
@@ -23,6 +27,102 @@ const SECRET_PATTERNS: Array<{ label: string; expression: RegExp }> = [
 ];
 
 export type SyncSecurityContentLoader = (path: string) => Promise<Buffer | null>;
+
+export interface ManagedRepositoryResearchAttachment {
+  path: string;
+  name: string;
+  publicUploadApproved: boolean;
+}
+
+/**
+ * Read the portable project index defensively. This intentionally does not rely
+ * on the full schema parser: security checks must still work when newer clients
+ * add fields that this version does not understand.
+ */
+export function managedRepositoryResearchAttachments(content: Buffer | string): ManagedRepositoryResearchAttachment[] {
+  try {
+    const value = JSON.parse(Buffer.isBuffer(content) ? content.toString("utf8") : content) as {
+      schemaVersion?: unknown;
+      researchItems?: unknown;
+    };
+    if (value.schemaVersion !== 3 || !Array.isArray(value.researchItems)) return [];
+    const found = new Map<string, ManagedRepositoryResearchAttachment>();
+    for (const item of value.researchItems) {
+      if (!item || typeof item !== "object" || !Array.isArray((item as { attachments?: unknown }).attachments)) continue;
+      for (const raw of (item as { attachments: unknown[] }).attachments) {
+        if (!raw || typeof raw !== "object") continue;
+        const attachment = raw as Record<string, unknown>;
+        if (attachment.availability !== "repository" || typeof attachment.relativePath !== "string") continue;
+        const path = attachment.relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+        if (!path || path.startsWith("/") || /^[a-zA-Z]:/.test(path) || path.split("/").includes("..")) continue;
+        found.set(path, {
+          path,
+          name: typeof attachment.name === "string" && attachment.name.trim() ? attachment.name.trim() : basename(path),
+          publicUploadApproved: attachment.publicUploadApproved === true
+        });
+      }
+    }
+    return [...found.values()];
+  } catch {
+    return [];
+  }
+}
+
+export function scanPublicResearchCopyright(
+  projectIndexContent: Buffer | string | null,
+  candidatePaths: Iterable<string>
+): SyncSecurityFinding[] {
+  const present = new Set([...candidatePaths].map((path) => path.replace(/\\/g, "/").replace(/^\.\//, "")));
+  const managed = new Map((projectIndexContent ? managedRepositoryResearchAttachments(projectIndexContent) : [])
+    .map((attachment) => [attachment.path, attachment] as const));
+  const candidates = new Set<string>();
+  for (const path of present) {
+    const normalized = path.toLocaleLowerCase("en-US");
+    const extension = normalized.includes(".") ? normalized.slice(normalized.lastIndexOf(".")) : "";
+    if (normalized.startsWith("references/") && RESEARCH_DOCUMENT_EXTENSIONS.has(extension)) candidates.add(path);
+  }
+  for (const attachment of managed.values()) {
+    if (present.has(attachment.path) && !attachment.publicUploadApproved) candidates.add(attachment.path);
+  }
+  return [...candidates]
+    .filter((path) => managed.get(path)?.publicUploadApproved !== true)
+    .map((path) => ({
+      path,
+      kind: "researchCopyright" as const,
+      severity: "block" as const,
+      message: `Research attachment “${managed.get(path)?.name ?? basename(path)}” has not been explicitly approved for publication. It will remain blocked from a public repository.`,
+      recoveryActions: ["keepResearchLocalOnly", "approveResearchUpload"] as SyncSecurityRecoveryAction[]
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function localOnlyResearchLeak(path: string, content: string): SyncSecurityFinding | null {
+  if (path.replace(/\\/g, "/").toLocaleLowerCase("en-US") !== ".latex-project.json") return null;
+  try {
+    const value = JSON.parse(content) as { schemaVersion?: unknown; researchItems?: unknown };
+    if (value.schemaVersion !== 3 || !Array.isArray(value.researchItems)) return null;
+    for (const item of value.researchItems) {
+      if (!item || typeof item !== "object" || !Array.isArray((item as { attachments?: unknown }).attachments)) continue;
+      for (const attachment of (item as { attachments: unknown[] }).attachments) {
+        if (!attachment || typeof attachment !== "object") continue;
+        const candidate = attachment as Record<string, unknown>;
+        if (candidate.availability !== "localOnly") continue;
+        if (["relativePath", "externalPath", "localPath", "absolutePath", "gitBlobSha"].some((key) => key in candidate)) {
+          return {
+            path,
+            kind: "sensitiveFile",
+            severity: "block",
+            message: "Local-only research attachments must not expose a local path or Git object in .latex-project.json. Save the research metadata again before syncing."
+          };
+        }
+      }
+    }
+  } catch {
+    // Invalid project metadata is handled by the project-index parser. The
+    // general secret scanner still checks its text below.
+  }
+  return null;
+}
 
 /**
  * Scan a stable content snapshot. Git synchronization uses this entry point
@@ -64,6 +164,8 @@ export async function scanSyncSecuritySnapshot(
     const bytes = await loadContent(change.path);
     if (!bytes || bytes.length > MAX_TEXT_SCAN_BYTES || bytes.includes(0)) continue;
     const content = bytes.toString("utf8");
+    const researchLeak = localOnlyResearchLeak(change.path, content);
+    if (researchLeak) findings.push(researchLeak);
     for (const pattern of SECRET_PATTERNS) {
       if (!pattern.expression.test(content)) continue;
       findings.push({

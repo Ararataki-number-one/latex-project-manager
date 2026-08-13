@@ -54,6 +54,14 @@ function index(): MobileProjectIndex {
 }
 
 describe("mobile project index", () => {
+  it("validates the shared cross-platform v3 contract fixtures", async () => {
+    const fixtureRoot = join(process.cwd(), "contracts", "mobile-index");
+    const valid = JSON.parse(await readFile(join(fixtureRoot, "v3-valid.json"), "utf8")) as unknown;
+    const unsafe = JSON.parse(await readFile(join(fixtureRoot, "v3-invalid-path.json"), "utf8")) as unknown;
+    expect(parseMobileProjectIndex(valid)).toMatchObject({ schemaVersion: 3, projectId: "project-contract" });
+    expect(() => parseMobileProjectIndex(unsafe)).toThrow();
+  });
+
   it("writes UTF-8/LF atomically and reads the validated project-relative PDF", async () => {
     const root = await mkdtemp(join(tmpdir(), "latex-mobile-index-"));
     temporaryDirectories.push(root);
@@ -97,6 +105,64 @@ describe("mobile project index", () => {
       }]
     }).schemaVersion).toBe(2);
     expect(() => parseMobileProjectIndex({ ...index(), schemaVersion: 2 })).toThrow(/blobSha/);
+  });
+
+  it("writes the cross-platform v3 research contract without requiring a PDF output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "latex-mobile-v3-"));
+    temporaryDirectories.push(root);
+    await mkdir(join(root, "references"));
+    await writeFile(join(root, "references", "paper.pdf"), "%PDF research\n", "utf8");
+    const value: MobileProjectIndex = {
+      schemaVersion: 3,
+      projectId: "project-mobile",
+      name: "Mobile",
+      updatedAt: "2026-08-11T00:00:00.000Z",
+      outputs: [],
+      researchItems: [{
+        id: "research-paper",
+        title: "A paper",
+        authors: ["Ada"],
+        year: 2026,
+        language: "en",
+        attachments: [{
+          id: "attachment-repository",
+          name: "paper.pdf",
+          relativePath: "references/paper.pdf",
+          mediaType: "application/pdf",
+          availability: "repository"
+        }, {
+          id: "attachment-local",
+          name: "private-notes.pdf",
+          mediaType: "application/pdf",
+          availability: "localOnly"
+        }],
+        links: [{ targetId: "target-main", role: "primarySource", preferredAttachmentId: "attachment-repository" }]
+      }]
+    };
+
+    const saved = await new MobileIndexService().write(root, manifest(), value);
+    expect(saved).toMatchObject({ schemaVersion: 3, outputs: [], researchItems: [{ id: "research-paper" }] });
+    expect(saved.defaultOutputId).toBeUndefined();
+    const stored = JSON.parse(await readFile(join(root, ".latex-project.json"), "utf8"));
+    expect(stored.researchItems[0].attachments[0]).toMatchObject({
+      relativePath: "references/paper.pdf", size: 14, sha256: expect.stringMatching(/^[a-f0-9]{64}$/), gitBlobSha: expect.stringMatching(/^[a-f0-9]{40}$/)
+    });
+    expect(stored.researchItems[0].attachments[1]).toEqual({
+      id: "attachment-local", name: "private-notes.pdf", mediaType: "application/pdf", availability: "localOnly"
+    });
+  });
+
+  it("keeps v1/v2 output requirements while v3 permits a research-only project", () => {
+    expect(() => parseMobileProjectIndex({ ...index(), outputs: [], defaultOutputId: undefined })).toThrow(/v1\/v2/);
+    expect(() => parseMobileProjectIndex({ ...index(), schemaVersion: 2, outputs: [], defaultOutputId: undefined })).toThrow(/v1\/v2/);
+    expect(parseMobileProjectIndex({
+      schemaVersion: 3,
+      projectId: "project-mobile",
+      name: "Mobile",
+      updatedAt: "2026-08-11T00:00:00.000Z",
+      outputs: [],
+      researchItems: []
+    })).toMatchObject({ schemaVersion: 3, outputs: [] });
   });
 
   it("does not suggest references or isolated build output", async () => {

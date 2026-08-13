@@ -1,19 +1,37 @@
-import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
   AppRuntimeSettings,
   BuildStatus,
+  CatalogBackupInfo,
   CatalogStatus,
   GitHubSyncEvent,
+  OperationSnapshot,
+  ProjectStatusSnapshot,
   ProjectCollection,
+  CatalogProjectResearchItem,
+  ProjectResearchItem,
+  ResearchSearchHit,
+  ResearchWork,
   ProjectManifest,
   ProjectFileOperationHistoryEntry,
   ProjectSummary,
   SmartView
 } from "../../shared/types";
+
+export const CATALOG_SCHEMA_VERSION = 5;
+
+export class CatalogWriteUnavailableError extends Error {
+  readonly code = "CATALOG_NOT_WRITABLE";
+
+  constructor(reason: string) {
+    super(`Catalog is not writable: ${reason}`);
+    this.name = "CatalogWriteUnavailableError";
+  }
+}
 
 interface CatalogRow {
   id: string;
@@ -31,6 +49,20 @@ interface CatalogRow {
   tags: string;
   thumbnail_path: string | null;
   description: string;
+  lifecycle: string;
+  protection_state: string;
+  path_available: number;
+}
+
+export interface CatalogMigrationSourceData {
+  databasePath: string;
+  tables: Record<string, Array<Record<string, unknown>>>;
+  projectIds: Record<string, string>;
+}
+
+export interface CatalogMigrationProjectIdRemap {
+  fromProjectId: string;
+  toProjectId: string;
 }
 
 const BUILD_STATUSES = new Set<BuildStatus>([
@@ -62,6 +94,12 @@ function parseStringArray(value: string): string[] {
 }
 
 function fromRow(row: CatalogRow): ProjectSummary {
+  const validLifecycle = (["active", "paused", "completed", "archived"] as const).includes(row.lifecycle as any)
+    ? row.lifecycle as ProjectSummary["lifecycle"]
+    : undefined;
+  const lifecycle = row.archived === 1 || validLifecycle === "archived"
+    ? "archived"
+    : (validLifecycle ?? "active");
   return {
     id: row.id,
     name: row.name,
@@ -74,13 +112,17 @@ function fromRow(row: CatalogRow): ProjectSummary {
       ? (row.last_build_status as BuildStatus)
       : undefined,
     favorite: row.favorite === 1,
-    archived: row.archived === 1,
+    archived: lifecycle === "archived",
     trashed: row.trashed === 1,
     trashedAt: row.trashed_at ?? undefined,
     tags: parseStringArray(row.tags),
     thumbnailPath: row.thumbnail_path ?? undefined,
-    pathAvailable: existsSync(row.root_path)
-    ,description: row.description
+    pathAvailable: row.path_available === 1,
+    description: row.description,
+    lifecycle,
+    protectionState: (["unprotected", "localBackup", "github", "both"] as const).includes(row.protection_state as any)
+      ? row.protection_state as ProjectSummary["protectionState"]
+      : "unprotected"
   };
 }
 
@@ -109,25 +151,55 @@ export function projectSummaryFromManifest(
     tags: previous?.tags ?? [],
     thumbnailPath: previous?.thumbnailPath,
     pathAvailable: existsSync(rootPath),
-    description: previous?.description ?? ""
+    description: previous?.description ?? "",
+    lifecycle: previous?.lifecycle ?? (previous?.archived ? "archived" : "active"),
+    protectionState: previous?.protectionState ?? "unprotected"
   };
 }
 
 export class ProjectCatalog {
-  private readonly memory = new Map<string, ProjectSummary>();
-  private readonly memorySyncEvents = new Map<string, GitHubSyncEvent[]>();
-  private memoryRuntimeSettings: AppRuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS };
-  private readonly memoryCollections = new Map<string, ProjectCollection>();
-  private readonly memorySmartViews = new Map<string, SmartView>();
   private database: DatabaseSync | null = null;
+  private writableState = false;
+  private databaseSchemaVersion = 0;
+  private readOnlyReason?: string;
   readonly fallbackReason?: string;
   private readonly migrationWarnings: string[] = [];
   private migrationBackupPath?: string;
+  private projectPathAvailableColumn = false;
 
   constructor(public readonly databasePath: string) {
     let fallbackReason: string | undefined;
     try {
       mkdirSync(dirname(databasePath), { recursive: true });
+      if (existsSync(databasePath)) {
+        const probe = new DatabaseSync(databasePath, { readOnly: true, timeout: 5_000 });
+        try {
+          const integrity = probe.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: string }>;
+          if (!integrity.length || integrity.some((row) => row.integrity_check !== "ok")) {
+            throw new Error("SQLite integrity validation failed.");
+          }
+          const version = Number((probe.prepare("PRAGMA user_version").get() as { user_version?: number })?.user_version ?? 0);
+          this.databaseSchemaVersion = version;
+          if (version > CATALOG_SCHEMA_VERSION) {
+            this.database = probe;
+            this.projectPathAvailableColumn = this.tableHasColumn(probe, "projects", "path_available");
+            this.writableState = false;
+            this.readOnlyReason = `Catalog schema ${version} is newer than supported schema ${CATALOG_SCHEMA_VERSION}.`;
+            this.migrationWarnings.push("A newer catalog was opened read-only. No database bytes were changed.");
+            return;
+          }
+        } finally {
+          if (this.database !== probe) probe.close();
+        }
+      }
+      const pendingRestore = `${databasePath}.restore-pending`;
+      if (existsSync(pendingRestore)) {
+        this.assertValidBackup(pendingRestore);
+        if (existsSync(databasePath)) copyFileSync(databasePath, `${databasePath}.before-restore.bak`);
+        copyFileSync(pendingRestore, databasePath);
+        unlinkSync(pendingRestore);
+        for (const suffix of ["-wal", "-shm"]) if (existsSync(`${databasePath}${suffix}`)) unlinkSync(`${databasePath}${suffix}`);
+      }
       const databaseExisted = existsSync(databasePath);
       this.database = new DatabaseSync(databasePath, { timeout: 5_000 });
       const integrity = this.database.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: string }>;
@@ -144,9 +216,10 @@ export class ProjectCatalog {
         this.migrationBackupPath = backupOne;
       }
       const currentVersion = Number((this.database.prepare("PRAGMA user_version").get() as { user_version?: number })?.user_version ?? 0);
-      if (databaseExisted && currentVersion < 3) {
+      this.databaseSchemaVersion = currentVersion;
+      if (databaseExisted && currentVersion < CATALOG_SCHEMA_VERSION) {
         this.database.exec("PRAGMA wal_checkpoint(FULL)");
-        const backupPath = `${databasePath}.pre-v3.bak`;
+        const backupPath = `${databasePath}.pre-v5.bak`;
         if (!existsSync(backupPath)) copyFileSync(databasePath, backupPath);
         this.migrationBackupPath = backupPath;
       }
@@ -169,6 +242,9 @@ export class ProjectCatalog {
           tags TEXT NOT NULL DEFAULT '[]',
           thumbnail_path TEXT,
           description TEXT NOT NULL DEFAULT '',
+          lifecycle TEXT NOT NULL DEFAULT 'active',
+          protection_state TEXT NOT NULL DEFAULT 'unprotected',
+          path_available INTEGER NOT NULL DEFAULT 1,
           updated_at TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS projects_root_path ON projects(root_path);
@@ -213,6 +289,94 @@ export class ProjectCatalog {
         );
         CREATE INDEX IF NOT EXISTS file_operation_project_time
           ON file_operation_history(project_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS research_works (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          authors TEXT NOT NULL DEFAULT '[]',
+          year INTEGER,
+          doi TEXT,
+          arxiv_id TEXT,
+          isbn TEXT,
+          language TEXT,
+          canonical_url TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS research_works_doi ON research_works(doi) WHERE doi IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS research_works_arxiv ON research_works(arxiv_id) WHERE arxiv_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS project_research_items (
+          id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          work_id TEXT NOT NULL,
+          item TEXT NOT NULL,
+          local_attachment_paths TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, id),
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+          FOREIGN KEY (work_id) REFERENCES research_works(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS project_research_work ON project_research_items(work_id);
+        CREATE TABLE IF NOT EXISTS search_documents (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL,
+          detail TEXT,
+          relative_path TEXT,
+          line INTEGER,
+          search_text TEXT NOT NULL,
+          source_hash TEXT,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS search_documents_project ON search_documents(project_id);
+        CREATE TABLE IF NOT EXISTS search_sources (
+          project_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          modified_ms REAL NOT NULL,
+          source_hash TEXT NOT NULL,
+          indexed_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, relative_path),
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS operation_snapshots (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          title TEXT NOT NULL,
+          message TEXT,
+          failure_code TEXT,
+          recovery_action TEXT,
+          progress REAL,
+          cancellable INTEGER NOT NULL DEFAULT 0,
+          retryable INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS operation_snapshots_project_time
+          ON operation_snapshots(project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS operation_snapshots_state_time
+          ON operation_snapshots(state, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS project_status_snapshots (
+          project_id TEXT PRIMARY KEY,
+          path_available INTEGER NOT NULL,
+          storage_bytes INTEGER,
+          file_count INTEGER,
+          main_pdf_path TEXT,
+          main_pdf_size INTEGER,
+          research_count INTEGER,
+          sync_state TEXT,
+          sync_message TEXT,
+          health TEXT NOT NULL,
+          issues TEXT NOT NULL DEFAULT '[]',
+          captured_at TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
         `);
         const columns = new Set(
           (this.database.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((column) => column.name)
@@ -220,7 +384,28 @@ export class ProjectCatalog {
         if (!columns.has("trashed")) this.database.exec("ALTER TABLE projects ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
         if (!columns.has("trashed_at")) this.database.exec("ALTER TABLE projects ADD COLUMN trashed_at TEXT");
         if (!columns.has("description")) this.database.exec("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''");
-        this.database.exec("PRAGMA user_version = 3; COMMIT;");
+        if (!columns.has("lifecycle")) this.database.exec("ALTER TABLE projects ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active'");
+        if (!columns.has("protection_state")) this.database.exec("ALTER TABLE projects ADD COLUMN protection_state TEXT NOT NULL DEFAULT 'unprotected'");
+        if (!columns.has("path_available")) this.database.exec("ALTER TABLE projects ADD COLUMN path_available INTEGER NOT NULL DEFAULT 1");
+        this.projectPathAvailableColumn = true;
+        const operationColumns = new Set(
+          (this.database.prepare("PRAGMA table_info(operation_snapshots)").all() as Array<{ name: string }>).map((column) => column.name)
+        );
+        if (!operationColumns.has("failure_code")) this.database.exec("ALTER TABLE operation_snapshots ADD COLUMN failure_code TEXT");
+        if (!operationColumns.has("recovery_action")) this.database.exec("ALTER TABLE operation_snapshots ADD COLUMN recovery_action TEXT");
+        this.database.exec(`
+          UPDATE projects
+             SET lifecycle = CASE
+               WHEN archived = 1 OR lifecycle = 'archived' THEN 'archived'
+               WHEN lifecycle IN ('active', 'paused', 'completed') THEN lifecycle
+               ELSE 'active'
+             END;
+          UPDATE projects SET archived = CASE WHEN lifecycle = 'archived' THEN 1 ELSE 0 END;
+          PRAGMA user_version = 5;
+          COMMIT;
+        `);
+        this.databaseSchemaVersion = CATALOG_SCHEMA_VERSION;
+        this.writableState = true;
       } catch (error) {
         try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
         throw error;
@@ -230,9 +415,10 @@ export class ProjectCatalog {
       try {
         this.database?.close();
       } catch {
-        // The in-memory catalog remains usable even if native SQLite cleanup fails.
+        // Reads remain available as empty/default values even if native SQLite cleanup fails.
       }
       this.database = null;
+      this.writableState = false;
     }
     this.fallbackReason = fallbackReason;
   }
@@ -241,29 +427,35 @@ export class ProjectCatalog {
     return this.database !== null;
   }
 
+  get writable(): boolean {
+    return this.database !== null && this.writableState;
+  }
+
   status(): CatalogStatus {
     return {
-      schemaVersion: 3,
+      schemaVersion: CATALOG_SCHEMA_VERSION,
       persistent: this.persistent,
       databasePath: this.databasePath,
       backupPath: this.migrationBackupPath,
+      mode: this.writable ? "readWrite" : this.persistent ? "readOnly" : "unavailable",
+      writable: this.writable,
+      databaseSchemaVersion: this.databaseSchemaVersion || undefined,
+      readOnlyReason: this.readOnlyReason,
       warnings: [
         ...this.migrationWarnings,
-        ...(this.fallbackReason ? [`SQLite 索引不可用，当前使用临时内存索引：${this.fallbackReason}`] : [])
+        ...(this.fallbackReason ? [`SQLite 索引不可用，持久化写入已禁用：${this.fallbackReason}`] : [])
       ]
     };
   }
 
   list(): ProjectSummary[] {
-    if (!this.database) {
-      return [...this.memory.values()]
-        .map(cloneSummary)
-        .sort((left, right) => (right.lastOpenedAt ?? "").localeCompare(left.lastOpenedAt ?? ""));
-    }
+    if (!this.database) return [];
+    const pathAvailable = this.projectPathAvailableColumn ? "path_available" : "1 AS path_available";
     const rows = this.database
       .prepare(
         `SELECT id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description
+                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, lifecycle, protection_state,
+                ${pathAvailable}
            FROM projects
           ORDER BY favorite DESC, COALESCE(last_opened_at, updated_at) DESC, name COLLATE NOCASE`
       )
@@ -272,14 +464,13 @@ export class ProjectCatalog {
   }
 
   get(projectId: string): ProjectSummary | undefined {
-    if (!this.database) {
-      const summary = this.memory.get(projectId);
-      return summary ? cloneSummary(summary) : undefined;
-    }
+    if (!this.database) return undefined;
+    const pathAvailable = this.projectPathAvailableColumn ? "path_available" : "1 AS path_available";
     const row = this.database
       .prepare(
         `SELECT id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description
+                last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, lifecycle, protection_state,
+                ${pathAvailable}
            FROM projects WHERE id = ?`
       )
       .get(projectId) as CatalogRow | undefined;
@@ -287,24 +478,50 @@ export class ProjectCatalog {
   }
 
   upsert(summary: ProjectSummary): ProjectSummary {
-    const normalized = cloneSummary({ ...summary, pathAvailable: existsSync(summary.rootPath) });
-    if (!this.database) {
-      for (const [id, current] of this.memory) {
-        if (id !== normalized.id && current.rootPath.toLowerCase() === normalized.rootPath.toLowerCase()) this.memory.delete(id);
-      }
-      this.memory.set(normalized.id, normalized);
-      return cloneSummary(normalized);
-    }
+    return this.upsertManyAtomically([summary])[0];
+  }
+
+  /**
+   * Persist a group of project rows as one indivisible change.
+   *
+   * Desktop catalog migration deliberately uses this instead of repeatedly
+   * calling `upsert`: a constraint, full disk, or I/O failure on any row rolls
+   * back every preceding row in the group.
+   */
+  upsertManyAtomically(summaries: ProjectSummary[]): ProjectSummary[] {
+    this.requireWritableDatabase();
+    const normalized = summaries.map((summary) => this.normalizeProjectSummary(summary));
+    if (!normalized.length) return [];
+    this.withWriteTransaction((database) => {
+      for (const summary of normalized) this.writeProjectRow(database, summary);
+    });
+    return normalized.map((summary) => this.get(summary.id)!);
+  }
+
+  private normalizeProjectSummary(summary: ProjectSummary): ProjectSummary {
+    const lifecycle = summary.lifecycle ?? (summary.archived ? "archived" : "active");
+    return cloneSummary({
+      ...summary,
+      lifecycle,
+      archived: lifecycle === "archived",
+      pathAvailable: Boolean(summary.pathAvailable)
+    });
+  }
+
+  private writeProjectRow(database: DatabaseSync, normalized: ProjectSummary): void {
     // A project imported before its manifest is written can have a legacy ID
-    // for the same root. Remove that row before the ID-based upsert so the
-    // unique root_path index cannot turn migration into a database error.
-    this.database.prepare("DELETE FROM projects WHERE root_path = ? AND id <> ?").run(normalized.rootPath, normalized.id);
-    this.database
+    // for the same root. Remap that identity (including every dependent row)
+    // rather than deleting it through cascading foreign keys.
+    const sameRoot = database.prepare("SELECT id FROM projects WHERE root_path = ? AND id <> ?")
+      .get(normalized.rootPath, normalized.id) as { id?: string } | undefined;
+    if (sameRoot?.id) this.remapProjectIdentity(database, sameRoot.id, normalized.id);
+    database
       .prepare(
         `INSERT INTO projects (
            id, name, root_path, target_count, class_names, last_opened_at, last_build_at,
-           last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           last_build_status, favorite, archived, trashed, trashed_at, tags, thumbnail_path, description, lifecycle, protection_state,
+           path_available, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            root_path = excluded.root_path,
@@ -320,6 +537,9 @@ export class ProjectCatalog {
            tags = excluded.tags,
            thumbnail_path = excluded.thumbnail_path,
            description = excluded.description,
+           lifecycle = excluded.lifecycle,
+           protection_state = excluded.protection_state,
+           path_available = excluded.path_available,
            updated_at = excluded.updated_at`
       )
       .run(
@@ -338,9 +558,36 @@ export class ProjectCatalog {
         JSON.stringify(normalized.tags),
         normalized.thumbnailPath ?? null,
         normalized.description ?? "",
+        normalized.lifecycle ?? (normalized.archived ? "archived" : "active"),
+        normalized.protectionState ?? "unprotected",
+        normalized.pathAvailable ? 1 : 0,
         new Date().toISOString()
       );
-    return this.get(normalized.id)!;
+  }
+
+  /**
+   * Apply project rows and all portable catalog data from older installations
+   * in one transaction. Existing target rows win on opaque/global ID clashes;
+   * project-scoped rows are remapped to the identity chosen by the user.
+   */
+  applyDesktopMigrationAtomically(
+    summaries: ProjectSummary[],
+    sources: CatalogMigrationSourceData[],
+    targetRemaps: CatalogMigrationProjectIdRemap[]
+  ): ProjectSummary[] {
+    this.requireWritableDatabase();
+    const normalized = summaries.map((summary) => this.normalizeProjectSummary(summary));
+    this.withWriteTransaction((database) => {
+      for (const remap of targetRemaps) {
+        if (remap.fromProjectId !== remap.toProjectId) {
+          this.remapProjectIdentity(database, remap.fromProjectId, remap.toProjectId);
+        }
+      }
+      for (const summary of normalized) this.writeProjectRow(database, summary);
+      for (const source of sources) this.importMigrationSource(database, source);
+    });
+    return normalized.map((summary) => this.get(summary.id))
+      .filter((summary): summary is ProjectSummary => Boolean(summary));
   }
 
   upsertManifest(rootPath: string, manifest: ProjectManifest): ProjectSummary {
@@ -349,59 +596,64 @@ export class ProjectCatalog {
   }
 
   relink(projectId: string, rootPath: string): ProjectSummary {
+    this.requireWritableDatabase();
     const current = this.require(projectId);
     return this.upsert({ ...current, rootPath, pathAvailable: existsSync(rootPath) });
   }
 
   update(
     projectId: string,
-    patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags">>
+    patch: Partial<Pick<ProjectSummary, "name" | "description" | "favorite" | "archived" | "trashed" | "tags" | "lifecycle" | "protectionState">>
   ): ProjectSummary {
+    this.requireWritableDatabase();
     const current = this.require(projectId);
     const trashedAt = patch.trashed === true
       ? (current.trashedAt ?? new Date().toISOString())
       : patch.trashed === false
         ? undefined
         : current.trashedAt;
+    const lifecycle = patch.lifecycle
+      ?? (patch.archived === true ? "archived" : patch.archived === false && current.lifecycle === "archived" ? "active" : current.lifecycle)
+      ?? "active";
+    const archived = lifecycle === "archived";
     return this.upsert({
       ...current,
       ...patch,
+      lifecycle,
+      archived,
       trashedAt,
       tags: patch.tags ? [...new Set(patch.tags.map((tag) => tag.trim()).filter(Boolean))] : current.tags
     });
   }
 
   markOpened(projectId: string, at = new Date().toISOString()): ProjectSummary {
+    this.requireWritableDatabase();
     return this.upsert({ ...this.require(projectId), lastOpenedAt: at });
   }
 
   markBuild(projectId: string, status: BuildStatus, at = new Date().toISOString()): ProjectSummary {
+    this.requireWritableDatabase();
     return this.upsert({ ...this.require(projectId), lastBuildAt: at, lastBuildStatus: status });
   }
 
   appendSyncEvent(event: GitHubSyncEvent): void {
-    if (!this.database) {
-      const events = [event, ...(this.memorySyncEvents.get(event.projectId) ?? [])]
-        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
-        .slice(0, 100);
-      this.memorySyncEvents.set(event.projectId, events);
-      return;
-    }
-    this.database.prepare(
-      "INSERT OR REPLACE INTO sync_events (id, project_id, occurred_at, state, level, message) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(event.id, event.projectId, event.occurredAt, event.state, event.level, event.message);
-    this.database.prepare(`
-      DELETE FROM sync_events
-       WHERE project_id = ?
-         AND id NOT IN (
-           SELECT id FROM sync_events WHERE project_id = ? ORDER BY occurred_at DESC LIMIT 100
-         )
-    `).run(event.projectId, event.projectId);
+    this.withWriteTransaction((database) => {
+      database.prepare(
+        "INSERT OR REPLACE INTO sync_events (id, project_id, occurred_at, state, level, message) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(event.id, event.projectId, event.occurredAt, event.state, event.level, event.message);
+      database.prepare(`
+        DELETE FROM sync_events
+         WHERE project_id = ?
+           AND id NOT IN (
+             SELECT id FROM sync_events WHERE project_id = ? ORDER BY occurred_at DESC LIMIT 100
+           )
+      `).run(event.projectId, event.projectId);
+    });
   }
 
   syncHistory(projectId: string, limit = 100): GitHubSyncEvent[] {
     const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
-    if (!this.database) return (this.memorySyncEvents.get(projectId) ?? []).slice(0, safeLimit).map((event) => ({ ...event }));
+    if (!this.database || !this.tableExists(this.database, "sync_events")) return [];
     return this.database.prepare(`
       SELECT id, project_id, occurred_at, state, level, message
         FROM sync_events
@@ -419,7 +671,7 @@ export class ProjectCatalog {
   }
 
   runtimeSettings(): AppRuntimeSettings {
-    if (!this.database) return { ...this.memoryRuntimeSettings };
+    if (!this.database || !this.tableExists(this.database, "app_settings")) return { ...DEFAULT_RUNTIME_SETTINGS };
     const row = this.database.prepare("SELECT value FROM app_settings WHERE key = ?").get("runtime") as { value?: string } | undefined;
     if (!row?.value) return { ...DEFAULT_RUNTIME_SETTINGS };
     try {
@@ -430,7 +682,13 @@ export class ProjectCatalog {
         syncPaused: typeof parsed.syncPaused === "boolean" ? parsed.syncPaused : false,
         theme: parsed.theme === "light" || parsed.theme === "dark" ? parsed.theme : "system",
         density: parsed.density === "compact" ? "compact" : "comfortable",
-        glassMode: parsed.glassMode === "full" || parsed.glassMode === "off" ? parsed.glassMode : "auto"
+        glassMode: parsed.glassMode === "full" || parsed.glassMode === "off" ? parsed.glassMode : "auto",
+        editorExecutablePath: typeof parsed.editorExecutablePath === "string" && parsed.editorExecutablePath.trim()
+          ? parsed.editorExecutablePath.trim()
+          : undefined,
+        desktopMigrationCompletedAt: typeof parsed.desktopMigrationCompletedAt === "string" && parsed.desktopMigrationCompletedAt.trim()
+          ? parsed.desktopMigrationCompletedAt.trim()
+          : undefined
       };
     } catch {
       return { ...DEFAULT_RUNTIME_SETTINGS };
@@ -444,21 +702,20 @@ export class ProjectCatalog {
       syncPaused: Boolean(settings.syncPaused),
       theme: settings.theme === "light" || settings.theme === "dark" ? settings.theme : "system",
       density: settings.density === "compact" ? "compact" : "comfortable",
-      glassMode: settings.glassMode === "full" || settings.glassMode === "off" ? settings.glassMode : "auto"
+      glassMode: settings.glassMode === "full" || settings.glassMode === "off" ? settings.glassMode : "auto",
+      editorExecutablePath: settings.editorExecutablePath?.trim() || undefined,
+      desktopMigrationCompletedAt: settings.desktopMigrationCompletedAt?.trim() || undefined
     };
-    if (!this.database) {
-      this.memoryRuntimeSettings = normalized;
-      return { ...normalized };
-    }
-    this.database.prepare(`
-      INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run("runtime", JSON.stringify(normalized), new Date().toISOString());
+    this.withWrite((database) => database.prepare(`
+        INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `).run("runtime", JSON.stringify(normalized), new Date().toISOString()));
     return normalized;
   }
 
   listCollections(): ProjectCollection[] {
-    if (!this.database) return [...this.memoryCollections.values()].map((item) => ({ ...item, projectIds: [...item.projectIds] }));
+    if (!this.database || !this.tableExists(this.database, "collections")
+      || !this.tableExists(this.database, "collection_projects")) return [];
     const rows = this.database.prepare(`
       SELECT c.id, c.name, c.color, c.created_at, c.updated_at,
              COALESCE(json_group_array(cp.project_id) FILTER (WHERE cp.project_id IS NOT NULL), '[]') AS project_ids
@@ -478,25 +735,17 @@ export class ProjectCatalog {
       createdAt: now, updatedAt: now
     };
     if (!collection.name) throw new Error("集合名称不能为空。");
-    if (!this.database) {
-      this.memoryCollections.set(collection.id, collection);
-      return { ...collection, projectIds: [...collection.projectIds] };
-    }
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.prepare("INSERT INTO collections (id, name, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+    return this.withWriteTransaction((database) => {
+      database.prepare("INSERT INTO collections (id, name, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
         .run(collection.id, collection.name, collection.color ?? null, now, now);
-      const insert = this.database.prepare("INSERT INTO collection_projects (collection_id, project_id, position) VALUES (?, ?, ?)");
+      const insert = database.prepare("INSERT INTO collection_projects (collection_id, project_id, position) VALUES (?, ?, ?)");
       collection.projectIds.forEach((projectId, index) => insert.run(collection.id, projectId, index));
-      this.database.exec("COMMIT");
       return collection;
-    } catch (error) {
-      try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
-      throw error;
-    }
+    });
   }
 
   updateCollection(id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>): ProjectCollection {
+    this.requireWritableDatabase();
     const current = this.listCollections().find((item) => item.id === id);
     if (!current) throw new Error("集合不存在。");
     const updated: ProjectCollection = {
@@ -506,34 +755,24 @@ export class ProjectCatalog {
       projectIds: patch.projectIds ? [...new Set(patch.projectIds)] : current.projectIds,
       updatedAt: new Date().toISOString()
     };
-    if (!this.database) {
-      this.memoryCollections.set(id, updated);
-      return { ...updated, projectIds: [...updated.projectIds] };
-    }
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      this.database.prepare("UPDATE collections SET name = ?, color = ?, updated_at = ? WHERE id = ?")
+    return this.withWriteTransaction((database) => {
+      database.prepare("UPDATE collections SET name = ?, color = ?, updated_at = ? WHERE id = ?")
         .run(updated.name, updated.color ?? null, updated.updatedAt, id);
       if (patch.projectIds) {
-        this.database.prepare("DELETE FROM collection_projects WHERE collection_id = ?").run(id);
-        const insert = this.database.prepare("INSERT INTO collection_projects (collection_id, project_id, position) VALUES (?, ?, ?)");
+        database.prepare("DELETE FROM collection_projects WHERE collection_id = ?").run(id);
+        const insert = database.prepare("INSERT INTO collection_projects (collection_id, project_id, position) VALUES (?, ?, ?)");
         updated.projectIds.forEach((projectId, index) => insert.run(id, projectId, index));
       }
-      this.database.exec("COMMIT");
       return updated;
-    } catch (error) {
-      try { this.database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
-      throw error;
-    }
+    });
   }
 
   deleteCollection(id: string): void {
-    if (!this.database) { this.memoryCollections.delete(id); return; }
-    this.database.prepare("DELETE FROM collections WHERE id = ?").run(id);
+    this.withWrite((database) => database.prepare("DELETE FROM collections WHERE id = ?").run(id));
   }
 
   listSmartViews(): SmartView[] {
-    if (!this.database) return [...this.memorySmartViews.values()].map((item) => ({ ...item, filter: { ...item.filter, tags: item.filter.tags ? [...item.filter.tags] : undefined } }));
+    if (!this.database || !this.tableExists(this.database, "smart_views")) return [];
     return (this.database.prepare("SELECT id, name, filter, created_at, updated_at FROM smart_views ORDER BY name COLLATE NOCASE").all() as Array<Record<string, unknown>>)
       .map((row) => {
         let filter: SmartView["filter"] = {};
@@ -546,42 +785,39 @@ export class ProjectCatalog {
     const now = new Date().toISOString();
     const view: SmartView = { id: randomUUID(), name: input.name.trim(), filter: { ...input.filter }, createdAt: now, updatedAt: now };
     if (!view.name) throw new Error("智能视图名称不能为空。");
-    if (!this.database) { this.memorySmartViews.set(view.id, view); return view; }
-    this.database.prepare("INSERT INTO smart_views (id, name, filter, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-      .run(view.id, view.name, JSON.stringify(view.filter), now, now);
+    this.withWrite((database) => database.prepare("INSERT INTO smart_views (id, name, filter, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .run(view.id, view.name, JSON.stringify(view.filter), now, now));
     return view;
   }
 
   updateSmartView(id: string, patch: Partial<Pick<SmartView, "name" | "filter">>): SmartView {
+    this.requireWritableDatabase();
     const current = this.listSmartViews().find((item) => item.id === id);
     if (!current) throw new Error("智能视图不存在。");
     const updated: SmartView = {
       ...current, name: patch.name?.trim() || current.name, filter: patch.filter ? { ...patch.filter } : current.filter,
       updatedAt: new Date().toISOString()
     };
-    if (!this.database) { this.memorySmartViews.set(id, updated); return updated; }
-    this.database.prepare("UPDATE smart_views SET name = ?, filter = ?, updated_at = ? WHERE id = ?")
-      .run(updated.name, JSON.stringify(updated.filter), updated.updatedAt, id);
+    this.withWrite((database) => database.prepare("UPDATE smart_views SET name = ?, filter = ?, updated_at = ? WHERE id = ?")
+      .run(updated.name, JSON.stringify(updated.filter), updated.updatedAt, id));
     return updated;
   }
 
   deleteSmartView(id: string): void {
-    if (!this.database) { this.memorySmartViews.delete(id); return; }
-    this.database.prepare("DELETE FROM smart_views WHERE id = ?").run(id);
+    this.withWrite((database) => database.prepare("DELETE FROM smart_views WHERE id = ?").run(id));
   }
 
   appendFileOperation(entry: ProjectFileOperationHistoryEntry): void {
-    if (!this.database) return;
-    this.database.prepare(`
+    this.withWrite((database) => database.prepare(`
       INSERT OR REPLACE INTO file_operation_history
         (id, project_id, operation, source_path, destination_path, created_at, undo_expires_at, result)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(entry.id, entry.projectId, entry.operation, entry.sourcePath, entry.destinationPath ?? null,
-      entry.createdAt, entry.undoExpiresAt ?? null, entry.result);
+      entry.createdAt, entry.undoExpiresAt ?? null, entry.result));
   }
 
   fileOperationHistory(projectId: string, limit = 50): ProjectFileOperationHistoryEntry[] {
-    if (!this.database) return [];
+    if (!this.database || !this.tableExists(this.database, "file_operation_history")) return [];
     return (this.database.prepare(`
       SELECT id, project_id, operation, source_path, destination_path, created_at, undo_expires_at, result
         FROM file_operation_history WHERE project_id = ? ORDER BY created_at DESC LIMIT ?
@@ -593,15 +829,523 @@ export class ProjectCatalog {
     }));
   }
 
+  listBackups(): CatalogBackupInfo[] {
+    const candidates: Array<[string, CatalogBackupInfo["kind"]]> = [
+      [`${this.databasePath}.backup-1`, "automatic"], [`${this.databasePath}.backup-2`, "automatic"],
+      [`${this.databasePath}.pre-v5.bak`, "preMigration"], [`${this.databasePath}.pre-v4.bak`, "preMigration"],
+      [`${this.databasePath}.pre-v3.bak`, "preMigration"],
+      [`${this.databasePath}.before-restore.bak`, "automatic"]
+    ];
+    return candidates.flatMap(([path, kind]) => {
+      if (!existsSync(path)) return [];
+      const metadata = statSync(path);
+      return [{ path, kind, size: metadata.size, createdAt: metadata.mtime.toISOString() }];
+    }).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  backupTo(destination: string): CatalogBackupInfo {
+    this.requireWritableDatabase();
+    const resolved = resolve(destination);
+    if (resolved === resolve(this.databasePath)) throw new Error("A backup cannot overwrite the active catalog.");
+    this.withWrite((database) => database.exec("PRAGMA wal_checkpoint(FULL)"));
+    const temporary = `${resolved}.${randomUUID()}.tmp`;
+    copyFileSync(this.databasePath, temporary);
+    try {
+      this.assertValidBackup(temporary);
+      renameSync(temporary, resolved);
+    } catch (error) {
+      if (existsSync(temporary)) unlinkSync(temporary);
+      throw error;
+    }
+    const metadata = statSync(resolved);
+    return { path: resolved, kind: "manual", size: metadata.size, createdAt: metadata.mtime.toISOString() };
+  }
+
+  stageRestore(source: string): CatalogBackupInfo {
+    this.requireWritableDatabase();
+    const resolved = resolve(source);
+    this.assertValidBackup(resolved);
+    this.withWrite((database) => database.exec("PRAGMA wal_checkpoint(FULL)"));
+    const pending = `${this.databasePath}.restore-pending`;
+    copyFileSync(resolved, pending);
+    this.assertValidBackup(pending);
+    const metadata = statSync(resolved);
+    return { path: resolved, kind: "manual", size: metadata.size, createdAt: metadata.mtime.toISOString() };
+  }
+
+  upsertResearchWork(work: ResearchWork): ResearchWork {
+    this.requireWritableDatabase();
+    const normalized: ResearchWork = {
+      ...work,
+      title: work.title?.trim() || undefined,
+      authors: work.authors?.map((author) => author.trim()).filter(Boolean),
+      doi: work.doi?.trim() || undefined,
+      arxivId: work.arxivId?.trim() || undefined,
+      isbn: work.isbn?.trim() || undefined,
+      language: work.language?.trim() || undefined,
+      canonicalUrl: work.canonicalUrl?.trim() || undefined
+    };
+    this.withWrite((database) => database.prepare(`
+      INSERT INTO research_works
+        (id, title, authors, year, doi, arxiv_id, isbn, language, canonical_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET title=excluded.title, authors=excluded.authors, year=excluded.year,
+        doi=excluded.doi, arxiv_id=excluded.arxiv_id, isbn=excluded.isbn, language=excluded.language,
+        canonical_url=excluded.canonical_url, updated_at=excluded.updated_at
+    `).run(normalized.id, normalized.title ?? null, JSON.stringify(normalized.authors ?? []), normalized.year ?? null,
+      normalized.doi ?? null, normalized.arxivId ?? null, normalized.isbn ?? null, normalized.language ?? null,
+      normalized.canonicalUrl ?? null, normalized.createdAt, normalized.updatedAt));
+    return normalized;
+  }
+
+  researchWorks(): ResearchWork[] {
+    if (!this.database || !this.tableExists(this.database, "research_works")) return [];
+    return (this.database.prepare(`
+      SELECT id, title, authors, year, doi, arxiv_id, isbn, language, canonical_url, created_at, updated_at
+        FROM research_works ORDER BY COALESCE(title, id) COLLATE NOCASE
+    `).all() as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id), title: row.title ? String(row.title) : undefined, authors: parseStringArray(String(row.authors)),
+      year: row.year === null ? undefined : Number(row.year), doi: row.doi ? String(row.doi) : undefined,
+      arxivId: row.arxiv_id ? String(row.arxiv_id) : undefined, isbn: row.isbn ? String(row.isbn) : undefined,
+      language: row.language ? String(row.language) : undefined, canonicalUrl: row.canonical_url ? String(row.canonical_url) : undefined,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+    }));
+  }
+
+  upsertOperationSnapshot(snapshot: OperationSnapshot): OperationSnapshot {
+    this.requireWritableDatabase();
+    const progress = snapshot.progress === undefined
+      ? null
+      : Math.max(0, Math.min(1, Number.isFinite(snapshot.progress) ? snapshot.progress : 0));
+    this.withWrite((database) => database.prepare(`
+      INSERT INTO operation_snapshots
+        (id, project_id, kind, state, title, message, failure_code, recovery_action, progress, cancellable, retryable, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        project_id=excluded.project_id, kind=excluded.kind, state=excluded.state, title=excluded.title,
+        message=excluded.message, failure_code=excluded.failure_code, recovery_action=excluded.recovery_action,
+        progress=excluded.progress, cancellable=excluded.cancellable,
+        retryable=excluded.retryable, updated_at=excluded.updated_at, completed_at=excluded.completed_at
+    `).run(snapshot.id, snapshot.projectId ?? null, snapshot.kind, snapshot.state, snapshot.title,
+      snapshot.message ?? null, snapshot.failureCode ?? null, snapshot.recoveryAction ?? null,
+      progress, snapshot.cancellable ? 1 : 0, snapshot.retryable ? 1 : 0,
+      snapshot.createdAt, snapshot.updatedAt, snapshot.completedAt ?? null));
+    return { ...snapshot, progress: progress ?? undefined };
+  }
+
+  operationSnapshots(projectId?: string, limit = 100): OperationSnapshot[] {
+    if (!this.database || !this.tableExists(this.database, "operation_snapshots")) return [];
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const rows = (projectId
+      ? this.database.prepare(`
+          SELECT * FROM operation_snapshots WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?
+        `).all(projectId, safeLimit)
+      : this.database.prepare(`
+          SELECT * FROM operation_snapshots ORDER BY updated_at DESC LIMIT ?
+        `).all(safeLimit)) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id), projectId: row.project_id ? String(row.project_id) : undefined,
+      kind: row.kind as OperationSnapshot["kind"], state: row.state as OperationSnapshot["state"],
+      title: String(row.title), message: row.message ? String(row.message) : undefined,
+      failureCode: row.failure_code ? String(row.failure_code) : undefined,
+      recoveryAction: row.recovery_action ? String(row.recovery_action) : undefined,
+      progress: row.progress === null ? undefined : Number(row.progress),
+      cancellable: Number(row.cancellable) === 1, retryable: Number(row.retryable) === 1,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+      completedAt: row.completed_at ? String(row.completed_at) : undefined
+    }));
+  }
+
+  deleteOperationSnapshot(id: string): void {
+    this.withWrite((database) => database.prepare("DELETE FROM operation_snapshots WHERE id = ?").run(id));
+  }
+
+  upsertProjectStatusSnapshot(snapshot: ProjectStatusSnapshot): ProjectStatusSnapshot {
+    this.requireWritableDatabase();
+    this.require(snapshot.projectId);
+    const normalized: ProjectStatusSnapshot = { ...snapshot, issues: [...new Set(snapshot.issues)] };
+    this.withWriteTransaction((database) => {
+      database.prepare(`
+        INSERT INTO project_status_snapshots
+          (project_id, path_available, storage_bytes, file_count, main_pdf_path, main_pdf_size,
+           research_count, sync_state, sync_message, health, issues, captured_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+          path_available=excluded.path_available, storage_bytes=excluded.storage_bytes,
+          file_count=excluded.file_count, main_pdf_path=excluded.main_pdf_path,
+          main_pdf_size=excluded.main_pdf_size, research_count=excluded.research_count,
+          sync_state=excluded.sync_state, sync_message=excluded.sync_message,
+          health=excluded.health, issues=excluded.issues, captured_at=excluded.captured_at
+      `).run(normalized.projectId, normalized.pathAvailable ? 1 : 0, normalized.storageBytes ?? null,
+        normalized.fileCount ?? null, normalized.mainPdfPath ?? null, normalized.mainPdfSize ?? null,
+        normalized.researchCount ?? null, normalized.syncState ?? null, normalized.syncMessage ?? null,
+        normalized.health, JSON.stringify(normalized.issues), normalized.capturedAt);
+      database.prepare("UPDATE projects SET path_available = ?, updated_at = updated_at WHERE id = ?")
+        .run(normalized.pathAvailable ? 1 : 0, normalized.projectId);
+    });
+    return { ...normalized, issues: [...normalized.issues] };
+  }
+
+  projectStatusSnapshot(projectId: string): ProjectStatusSnapshot | undefined {
+    if (!this.database || !this.tableExists(this.database, "project_status_snapshots")) return undefined;
+    const row = this.database.prepare("SELECT * FROM project_status_snapshots WHERE project_id = ?")
+      .get(projectId) as Record<string, unknown> | undefined;
+    return row ? this.mapProjectStatusSnapshot(row) : undefined;
+  }
+
+  projectStatusSnapshots(): ProjectStatusSnapshot[] {
+    if (!this.database || !this.tableExists(this.database, "project_status_snapshots")) return [];
+    const rows = this.database.prepare("SELECT * FROM project_status_snapshots ORDER BY captured_at DESC").all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapProjectStatusSnapshot(row));
+  }
+
+  researchItems(projectId?: string): CatalogProjectResearchItem[] {
+    if (!this.database || !this.tableExists(this.database, "project_research_items")) return [];
+    const statement = projectId ? this.database.prepare(`
+      SELECT project_id, work_id, item, local_attachment_paths, created_at, updated_at
+        FROM project_research_items WHERE project_id = ? ORDER BY updated_at DESC
+    `) : this.database.prepare(`
+      SELECT project_id, work_id, item, local_attachment_paths, created_at, updated_at
+        FROM project_research_items ORDER BY updated_at DESC
+    `);
+    const rows = (projectId ? statement.all(projectId) : statement.all()) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      projectId: String(row.project_id), workId: String(row.work_id),
+      item: JSON.parse(String(row.item)) as ProjectResearchItem,
+      localAttachmentPaths: JSON.parse(String(row.local_attachment_paths)) as Record<string, string>,
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+    }));
+  }
+
+  replaceResearchItems(projectId: string, entries: CatalogProjectResearchItem[]): CatalogProjectResearchItem[] {
+    this.requireWritableDatabase();
+    this.require(projectId);
+    this.withWriteTransaction((database) => {
+      database.prepare("DELETE FROM project_research_items WHERE project_id = ?").run(projectId);
+      const insert = database.prepare(`
+        INSERT INTO project_research_items
+          (id, project_id, work_id, item, local_attachment_paths, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const entry of entries) {
+        insert.run(entry.item.id, projectId, entry.workId, JSON.stringify(entry.item),
+          JSON.stringify(entry.localAttachmentPaths), entry.createdAt, entry.updatedAt);
+      }
+    });
+    return this.researchItems(projectId);
+  }
+
+  replaceSearchDocuments(projectId: string, hits: ResearchSearchHit[], sourceHashes: Record<string, string> = {}): void {
+    this.requireWritableDatabase();
+    this.require(projectId);
+    this.withWriteTransaction((database) => {
+      database.prepare("DELETE FROM search_documents WHERE project_id = ?").run(projectId);
+      const insert = database.prepare(`
+        INSERT INTO search_documents
+          (id, project_id, kind, title, detail, relative_path, line, search_text, source_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const now = new Date().toISOString();
+      for (const hit of hits) {
+        insert.run(hit.id, projectId, hit.kind, hit.title, hit.detail ?? null, hit.relativePath ?? null, hit.line ?? null,
+          `${hit.title}\n${hit.detail ?? ""}`.toLocaleLowerCase(), hit.relativePath ? (sourceHashes[hit.relativePath] ?? null) : null, now);
+      }
+    });
+  }
+
+  searchSourceState(projectId: string): Record<string, { size: number; modifiedMs: number; hash: string }> {
+    if (!this.database || !this.tableExists(this.database, "search_sources")) return {};
+    const rows = this.database.prepare(`
+      SELECT relative_path, size, modified_ms, source_hash FROM search_sources WHERE project_id = ?
+    `).all(projectId) as Array<Record<string, unknown>>;
+    return Object.fromEntries(rows.map((row) => [String(row.relative_path), {
+      size: Number(row.size), modifiedMs: Number(row.modified_ms), hash: String(row.source_hash)
+    }]));
+  }
+
+  updateSearchDocuments(
+    projectId: string,
+    changed: Array<{ path: string; size: number; modifiedMs: number; hash: string; hits: ResearchSearchHit[] }>,
+    removedPaths: string[],
+    projectHit: ResearchSearchHit
+  ): void {
+    this.requireWritableDatabase();
+    this.require(projectId);
+    this.withWriteTransaction((database) => {
+      const deleteDocuments = database.prepare("DELETE FROM search_documents WHERE project_id = ? AND relative_path = ?");
+      const deleteSource = database.prepare("DELETE FROM search_sources WHERE project_id = ? AND relative_path = ?");
+      for (const path of removedPaths) { deleteDocuments.run(projectId, path); deleteSource.run(projectId, path); }
+      const insertDocument = database.prepare(`
+        INSERT INTO search_documents
+          (id, project_id, kind, title, detail, relative_path, line, search_text, source_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const upsertSource = database.prepare(`
+        INSERT INTO search_sources (project_id, relative_path, size, modified_ms, source_hash, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, relative_path) DO UPDATE SET size=excluded.size, modified_ms=excluded.modified_ms,
+          source_hash=excluded.source_hash, indexed_at=excluded.indexed_at
+      `);
+      const now = new Date().toISOString();
+      for (const source of changed) {
+        deleteDocuments.run(projectId, source.path);
+        for (const hit of source.hits) insertDocument.run(hit.id, projectId, hit.kind, hit.title, hit.detail ?? null,
+          hit.relativePath ?? null, hit.line ?? null, `${hit.title}\n${hit.detail ?? ""}`.toLocaleLowerCase(), source.hash, now);
+        upsertSource.run(projectId, source.path, source.size, source.modifiedMs, source.hash, now);
+      }
+      database.prepare("DELETE FROM search_documents WHERE project_id = ? AND relative_path IS NULL").run(projectId);
+      insertDocument.run(projectHit.id, projectId, projectHit.kind, projectHit.title, projectHit.detail ?? null,
+        null, null, `${projectHit.title}\n${projectHit.detail ?? ""}`.toLocaleLowerCase(), null, now);
+      for (const entry of this.researchItems(projectId)) {
+        const item = entry.item;
+        const title = item.title || item.attachments[0]?.name || item.id;
+        const detail = [item.authors.join(", "), item.year, item.doi, item.arxivId, item.isbn,
+          ...item.attachments.map((attachment) => attachment.name)].filter(Boolean).join(" · ");
+        insertDocument.run(`research:${projectId}:${item.id}`, projectId, "research", title, detail || null,
+          null, null, `${title}\n${detail}`.toLocaleLowerCase(), null, now);
+      }
+    });
+  }
+
+  search(query: string, projectIds?: string[], limit = 100): ResearchSearchHit[] {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized || !this.database || !this.tableExists(this.database, "search_documents")) return [];
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const placeholders = projectIds?.length ? ` AND project_id IN (${projectIds.map(() => "?").join(",")})` : "";
+    const rows = this.database.prepare(`
+      SELECT id, project_id, kind, title, detail, relative_path, line,
+             CASE WHEN lower(title) = ? THEN 100 WHEN lower(title) LIKE ? THEN 70 ELSE 40 END AS score
+        FROM search_documents
+       WHERE search_text LIKE ?${placeholders}
+       ORDER BY score DESC, title COLLATE NOCASE LIMIT ?
+    `).all(normalized, `${normalized}%`, `%${normalized}%`, ...(projectIds ?? []), safeLimit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id), projectId: String(row.project_id), kind: row.kind as ResearchSearchHit["kind"],
+      title: String(row.title), detail: row.detail ? String(row.detail) : undefined,
+      relativePath: row.relative_path ? String(row.relative_path) : undefined,
+      line: row.line === null ? undefined : Number(row.line), score: Number(row.score)
+    }));
+  }
+
   close(): void {
     this.database?.close();
     this.database = null;
+    this.writableState = false;
+  }
+
+  private withWrite<T>(operation: (database: DatabaseSync) => T): T {
+    const database = this.requireWritableDatabase();
+    try {
+      return operation(database);
+    } catch (error) {
+      this.latchFatalWriteFailure(error);
+      throw error;
+    }
+  }
+
+  private withWriteTransaction<T>(operation: (database: DatabaseSync) => T): T {
+    return this.withWrite((database) => {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        // Identity replacement updates parent and child keys in one unit.
+        database.exec("PRAGMA defer_foreign_keys = ON");
+        const result = operation(database);
+        database.exec("COMMIT");
+        return result;
+      } catch (error) {
+        try { database.exec("ROLLBACK"); } catch { /* transaction may already have been aborted */ }
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * SQLite reports a persistent storage problem only when a write is
+   * attempted. Once that happens, fail closed for the remainder of this
+   * process instead of allowing later UI actions to appear saved.
+   */
+  private latchFatalWriteFailure(error: unknown): void {
+    const code = typeof error === "object" && error && "code" in error
+      ? String((error as { code?: unknown }).code ?? "")
+      : "";
+    const message = error instanceof Error ? error.message : String(error);
+    const fatalCode = /^(SQLITE_(?:FULL|READONLY|IOERR|CORRUPT|NOTADB|CANTOPEN))(?:_|$)/i.test(code);
+    const fatalMessage = /database or disk is full|readonly database|disk i\/o error|database disk image is malformed|file is not a database/i.test(message);
+    if (!fatalCode && !fatalMessage) return;
+    this.writableState = false;
+    this.readOnlyReason = `Persistent catalog write failed${code ? ` (${code})` : ""}: ${message}`;
+    const warning = "Persistent catalog writes were disabled after a storage failure; restart only after resolving the disk or database problem.";
+    if (!this.migrationWarnings.includes(warning)) this.migrationWarnings.push(warning);
+  }
+
+  private requireWritableDatabase(): DatabaseSync {
+    if (!this.database) {
+      throw new CatalogWriteUnavailableError(this.fallbackReason ?? "persistent storage is unavailable");
+    }
+    if (!this.writableState) {
+      throw new CatalogWriteUnavailableError(this.readOnlyReason ?? "catalog is read-only");
+    }
+    return this.database;
   }
 
   private require(projectId: string): ProjectSummary {
     const project = this.get(projectId);
     if (!project) throw new Error(`项目索引中不存在 ID: ${projectId}`);
     return project;
+  }
+
+  private tableExists(database: DatabaseSync, table: string): boolean {
+    try {
+      return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+    } catch {
+      return false;
+    }
+  }
+
+  private tableHasColumn(database: DatabaseSync, table: string, column: string): boolean {
+    if (!this.tableExists(database, table)) return false;
+    try {
+      return (database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>)
+        .some((entry) => entry.name === column);
+    } catch {
+      return false;
+    }
+  }
+
+  private remapProjectIdentity(database: DatabaseSync, fromProjectId: string, toProjectId: string): void {
+    if (fromProjectId === toProjectId) return;
+    const source = database.prepare("SELECT 1 FROM projects WHERE id = ?").get(fromProjectId);
+    if (!source) return;
+    if (database.prepare("SELECT 1 FROM projects WHERE id = ?").get(toProjectId)) {
+      throw new Error(`Cannot remap project ${fromProjectId} to existing identity ${toProjectId}.`);
+    }
+    database.prepare("UPDATE projects SET id = ? WHERE id = ?").run(toProjectId, fromProjectId);
+    for (const table of [
+      "sync_events", "collection_projects", "file_operation_history", "project_research_items",
+      "search_documents", "search_sources", "operation_snapshots", "project_status_snapshots"
+    ]) {
+      if (this.tableExists(database, table)) {
+        database.prepare(`UPDATE ${table} SET project_id = ? WHERE project_id = ?`).run(toProjectId, fromProjectId);
+      }
+    }
+  }
+
+  private importMigrationSource(database: DatabaseSync, source: CatalogMigrationSourceData): void {
+    const rows = (table: string): Array<Record<string, unknown>> => source.tables[table] ?? [];
+    const projectId = (value: unknown): string | undefined => source.projectIds[String(value ?? "")];
+    const now = new Date().toISOString();
+    const value = (row: Record<string, unknown>, key: string, fallback: unknown = null): any => row[key] ?? fallback;
+
+    const insertWork = database.prepare(`INSERT OR IGNORE INTO research_works
+      (id, title, authors, year, doi, arxiv_id, isbn, language, canonical_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("research_works")) insertWork.run(value(row, "id"), value(row, "title"), value(row, "authors", "[]"),
+      value(row, "year"), value(row, "doi"), value(row, "arxiv_id"), value(row, "isbn"), value(row, "language"),
+      value(row, "canonical_url"), value(row, "created_at", now), value(row, "updated_at", now));
+
+    const insertCollection = database.prepare(`INSERT OR IGNORE INTO collections
+      (id, name, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`);
+    for (const row of rows("collections")) insertCollection.run(value(row, "id"), value(row, "name"), value(row, "color"),
+      value(row, "created_at", now), value(row, "updated_at", now));
+    const insertCollectionProject = database.prepare(`INSERT OR IGNORE INTO collection_projects
+      (collection_id, project_id, position) VALUES (?, ?, ?)`);
+    for (const row of rows("collection_projects")) {
+      const mapped = projectId(row.project_id); if (mapped) insertCollectionProject.run(value(row, "collection_id"), mapped, value(row, "position", 0));
+    }
+
+    const insertSmartView = database.prepare(`INSERT OR IGNORE INTO smart_views
+      (id, name, filter, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`);
+    for (const row of rows("smart_views")) insertSmartView.run(value(row, "id"), value(row, "name"), value(row, "filter", "{}"),
+      value(row, "created_at", now), value(row, "updated_at", now));
+
+    for (const row of rows("app_settings")) {
+      const key = String(value(row, "key", "")); if (!key) continue;
+      const existing = database.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value?: string } | undefined;
+      let settingValue = String(value(row, "value", ""));
+      if (key === "runtime" && existing?.value) {
+        try { settingValue = JSON.stringify({ ...JSON.parse(settingValue), ...JSON.parse(existing.value) }); } catch { continue; }
+        database.prepare("UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?")
+          .run(settingValue, value(row, "updated_at", now), key);
+      } else if (!existing) {
+        database.prepare("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)")
+          .run(key, settingValue, value(row, "updated_at", now));
+      }
+    }
+
+    const insertSync = database.prepare(`INSERT OR IGNORE INTO sync_events
+      (id, project_id, occurred_at, state, level, message) VALUES (?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("sync_events")) { const mapped = projectId(row.project_id); if (mapped) insertSync.run(value(row, "id"), mapped,
+      value(row, "occurred_at", now), value(row, "state", "idle"), value(row, "level", "info"), value(row, "message", "")); }
+
+    const insertHistory = database.prepare(`INSERT OR IGNORE INTO file_operation_history
+      (id, project_id, operation, source_path, destination_path, created_at, undo_expires_at, result)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("file_operation_history")) { const mapped = projectId(row.project_id); if (mapped) insertHistory.run(value(row, "id"), mapped,
+      value(row, "operation"), value(row, "source_path"), value(row, "destination_path"), value(row, "created_at", now),
+      value(row, "undo_expires_at"), value(row, "result", "success")); }
+
+    const insertResearchItem = database.prepare(`INSERT OR IGNORE INTO project_research_items
+      (id, project_id, work_id, item, local_attachment_paths, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("project_research_items")) { const mapped = projectId(row.project_id); if (mapped) insertResearchItem.run(value(row, "id"), mapped,
+      value(row, "work_id"), value(row, "item", "{}"), value(row, "local_attachment_paths", "{}"),
+      value(row, "created_at", now), value(row, "updated_at", now)); }
+
+    const insertSearchDocument = database.prepare(`INSERT OR IGNORE INTO search_documents
+      (id, project_id, kind, title, detail, relative_path, line, search_text, source_hash, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("search_documents")) { const mapped = projectId(row.project_id); if (mapped) insertSearchDocument.run(value(row, "id"), mapped,
+      value(row, "kind"), value(row, "title"), value(row, "detail"), value(row, "relative_path"), value(row, "line"),
+      value(row, "search_text", ""), value(row, "source_hash"), value(row, "updated_at", now)); }
+    const insertSearchSource = database.prepare(`INSERT OR IGNORE INTO search_sources
+      (project_id, relative_path, size, modified_ms, source_hash, indexed_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("search_sources")) { const mapped = projectId(row.project_id); if (mapped) insertSearchSource.run(mapped,
+      value(row, "relative_path"), value(row, "size", 0), value(row, "modified_ms", 0), value(row, "source_hash", ""), value(row, "indexed_at", now)); }
+
+    const insertOperation = database.prepare(`INSERT OR IGNORE INTO operation_snapshots
+      (id, project_id, kind, state, title, message, failure_code, recovery_action, progress, cancellable, retryable, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("operation_snapshots")) { const mapped = row.project_id === null ? null : projectId(row.project_id); if (row.project_id !== null && !mapped) continue;
+      insertOperation.run(value(row, "id"), mapped ?? null, value(row, "kind"), value(row, "state"), value(row, "title"), value(row, "message"),
+        value(row, "failure_code"), value(row, "recovery_action"), value(row, "progress"), value(row, "cancellable", 0), value(row, "retryable", 0),
+        value(row, "created_at", now), value(row, "updated_at", now), value(row, "completed_at")); }
+
+    const insertStatus = database.prepare(`INSERT OR IGNORE INTO project_status_snapshots
+      (project_id, path_available, storage_bytes, file_count, main_pdf_path, main_pdf_size, research_count,
+       sync_state, sync_message, health, issues, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const row of rows("project_status_snapshots")) { const mapped = projectId(row.project_id); if (mapped) insertStatus.run(mapped,
+      value(row, "path_available", 1), value(row, "storage_bytes"), value(row, "file_count"), value(row, "main_pdf_path"),
+      value(row, "main_pdf_size"), value(row, "research_count"), value(row, "sync_state"), value(row, "sync_message"),
+      value(row, "health", "healthy"), value(row, "issues", "[]"), value(row, "captured_at", now)); }
+  }
+
+  private mapProjectStatusSnapshot(row: Record<string, unknown>): ProjectStatusSnapshot {
+    return {
+      projectId: String(row.project_id), pathAvailable: Number(row.path_available) === 1,
+      storageBytes: row.storage_bytes === null ? undefined : Number(row.storage_bytes),
+      fileCount: row.file_count === null ? undefined : Number(row.file_count),
+      mainPdfPath: row.main_pdf_path ? String(row.main_pdf_path) : undefined,
+      mainPdfSize: row.main_pdf_size === null ? undefined : Number(row.main_pdf_size),
+      researchCount: row.research_count === null ? undefined : Number(row.research_count),
+      syncState: row.sync_state ? row.sync_state as ProjectStatusSnapshot["syncState"] : undefined,
+      syncMessage: row.sync_message ? String(row.sync_message) : undefined,
+      health: row.health as ProjectStatusSnapshot["health"], issues: parseStringArray(String(row.issues ?? "[]")),
+      capturedAt: String(row.captured_at)
+    };
+  }
+
+  private assertValidBackup(path: string): void {
+    if (!existsSync(path) || !statSync(path).isFile()) throw new Error("The selected catalog backup does not exist or is not a regular file.");
+    const candidate = new DatabaseSync(path, { readOnly: true });
+    try {
+      const integrity = candidate.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: string }>;
+      if (!integrity.length || integrity.some((row) => row.integrity_check !== "ok")) {
+        throw new Error("The selected catalog backup failed SQLite integrity validation.");
+      }
+      const version = Number((candidate.prepare("PRAGMA user_version").get() as { user_version?: number })?.user_version ?? 0);
+      if (version < 1 || version > CATALOG_SCHEMA_VERSION) throw new Error(`Unsupported catalog backup schema version: ${version}`);
+    } finally {
+      candidate.close();
+    }
   }
 }
 

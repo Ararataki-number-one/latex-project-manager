@@ -2,9 +2,19 @@ name: Build Windows client
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Build the formal-identity RC/stable app or the parallel-install Beta app
+        required: true
+        default: rc
+        type: choice
+        options:
+          - beta
+          - rc
+          - stable
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -12,7 +22,21 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+
+      - id: release_channel
+        name: Select release channel
+        shell: pwsh
+        run: |
+          $channel = '${{ inputs.channel }}'
+          if ($channel -notin @('stable', 'rc', 'beta')) { throw 'Unknown release channel.' }
+          $metadata = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          if ($channel -eq 'rc' -and $metadata.version -notmatch '^\d+\.\d+\.\d+-rc\.\d+$') { throw 'package.json must contain an RC version.' }
+          if ($channel -eq 'stable' -and $metadata.version -notmatch '^\d+\.\d+\.\d+$') { throw 'package.json must contain a stable version.' }
+          "BUILD_CHANNEL=$channel" >> $env:GITHUB_ENV
+          "channel=$channel" >> $env:GITHUB_OUTPUT
 
       - name: Use canonical runner temp directory
         shell: pwsh
@@ -21,12 +45,12 @@ jobs:
           "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
         with:
           version: 11.9.0
 
       - name: Set up Node.js 24
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: pnpm
@@ -34,19 +58,56 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify immutable release configuration
+        run: pnpm run release:validate
+
       - name: Verify source
         run: |
           pnpm run typecheck
           pnpm test
+          pnpm test:e2e
 
       - name: Build Windows installer and portable client
+        shell: pwsh
         run: |
           pnpm build
-          pnpm exec electron-builder --win nsis portable --publish never
+          if ($env:BUILD_CHANNEL -eq 'beta') {
+            pnpm exec electron-builder --config electron-builder.beta.cjs --win nsis portable --publish never
+          } elseif ($env:BUILD_CHANNEL -eq 'rc') {
+            pnpm exec electron-builder --config electron-builder.rc.cjs --win nsis portable --publish never
+          } else {
+            pnpm exec electron-builder --win nsis portable --publish never
+          }
+
+      - name: Smoke-test packaged Electron application
+        shell: pwsh
+        run: |
+          $source = if ($env:BUILD_CHANNEL -eq 'beta') { 'dist-beta' } elseif ($env:BUILD_CHANNEL -eq 'rc') { 'dist-rc' } else { 'dist' }
+          $unpacked = Get-ChildItem -LiteralPath "$source/win-unpacked" -Filter '*.exe' | Where-Object { $_.Name -notmatch 'uninstall|elevate' } | Select-Object -First 1
+          if (-not $unpacked) { throw 'Packaged Electron executable was not produced.' }
+          $env:ELECTRON_SMOKE_EXECUTABLE = $unpacked.FullName
+          node tests/electron-smoke.mjs
+
+      - name: Stage channel-specific assets
+        shell: pwsh
+        run: |
+          $source = if ($env:BUILD_CHANNEL -eq 'beta') { 'dist-beta' } elseif ($env:BUILD_CHANNEL -eq 'rc') { 'dist-rc' } else { 'dist' }
+          $version = if ($env:BUILD_CHANNEL -eq 'beta') {
+            (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).config.betaVersion
+          } else {
+            (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          }
+          $destination = "dist-channel/$env:BUILD_CHANNEL"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Get-ChildItem -LiteralPath $source -Filter '*.exe' | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $destination
+          }
+          if (-not (Get-ChildItem -LiteralPath $destination -Filter '*.exe')) { throw 'Windows assets were not produced.' }
+          Set-Content -LiteralPath "$destination/version.txt" -Value $version -NoNewline -Encoding ascii
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: LaTeX-Project-Manager-Windows
-          path: dist/*.exe
+          name: LaTeX-Project-Manager-Windows-${{ steps.release_channel.outputs.channel }}
+          path: dist-channel/${{ steps.release_channel.outputs.channel }}/*
           if-no-files-found: error

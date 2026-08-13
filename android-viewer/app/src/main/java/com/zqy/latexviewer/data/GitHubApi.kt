@@ -1,12 +1,12 @@
 package com.zqy.latexviewer.data
 
+import com.zqy.latexviewer.BuildConfig
 import com.zqy.latexviewer.model.AndroidReleaseAsset
 import com.zqy.latexviewer.model.GitHubContent
 import com.zqy.latexviewer.model.GitHubContentKind
 import com.zqy.latexviewer.model.GitHubCommitSnapshot
 import com.zqy.latexviewer.model.GitHubRepository
 import com.zqy.latexviewer.model.RepositoryRefreshFailureKind
-import com.zqy.latexviewer.model.MobilePdfOutput
 import com.zqy.latexviewer.model.MobileProjectIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,7 +26,9 @@ import java.util.Base64
 
 class GitHubApi(
     private val apiRoot: String = DEFAULT_API_ROOT,
-    private val githubRoot: String = DEFAULT_GITHUB_ROOT
+    private val githubRoot: String = DEFAULT_GITHUB_ROOT,
+    private val releaseChannel: String = BuildConfig.RELEASE_CHANNEL,
+    private val allowLocalHttpDownloadsForTests: Boolean = false
 ) {
     suspend fun listRepositories(token: String): List<GitHubRepository> = withContext(Dispatchers.IO) {
         require(token.isNotBlank()) { "查看私有仓库需要只读令牌" }
@@ -155,7 +157,17 @@ class GitHubApi(
         enrichContentIntegrity(repository, parsed, token)
     }
 
-    private fun getContentAtCommit(
+    suspend fun getContentAtCommit(
+        repository: GitHubRepository,
+        path: String,
+        commitSha: String,
+        token: String?
+    ): GitHubContent = withContext(Dispatchers.IO) {
+        val parsed = getContentMetadataAtCommit(repository, path, commitSha, token)
+        enrichContentIntegrity(repository, parsed, token)
+    }
+
+    private fun getContentMetadataAtCommit(
         repository: GitHubRepository,
         path: String,
         commitSha: String,
@@ -203,7 +215,7 @@ class GitHubApi(
     ): MobileIndexFetchResult = withContext(Dispatchers.IO) {
         val commit = resolveCommit(repository, token, forceRefresh = true)
         val metadata = try {
-            getContentAtCommit(repository, MOBILE_INDEX_PATH, commit.commitSha, token)
+            getContentMetadataAtCommit(repository, MOBILE_INDEX_PATH, commit.commitSha, token)
         } catch (failure: GitHubRequestException) {
             if (failure.kind == RepositoryRefreshFailureKind.NOT_FOUND) return@withContext MobileIndexFetchResult.Missing
             throw failure
@@ -249,6 +261,7 @@ class GitHubApi(
             expectedSize = item.size.takeIf { it > 0 },
             expectedGitBlobSha = item.gitObjectSha.takeIf { GIT_OBJECT_SHA.matches(it) && item.lfsOidSha256 == null },
             expectedLfsSha256 = item.lfsOidSha256,
+            expectedContentSha256 = item.contentSha256,
             onProgress = onProgress
         )
     }
@@ -273,18 +286,39 @@ class GitHubApi(
             expectedSize = null,
             expectedGitBlobSha = null,
             expectedLfsSha256 = null,
+            expectedContentSha256 = null,
             onProgress = onProgress
         )
     }
 
     suspend fun latestAndroidRelease(): AndroidReleaseAsset = withContext(Dispatchers.IO) {
+        val beta = releaseChannel == "beta"
         val payload = request(
-            "$apiRoot/repos/$UPDATE_REPOSITORY/releases/latest",
+            if (beta) "$apiRoot/repos/$UPDATE_REPOSITORY/releases?per_page=30"
+            else "$apiRoot/repos/$UPDATE_REPOSITORY/releases/latest",
             null,
             JSON_ACCEPT,
             MAX_JSON_BYTES
         )
-        val release = JSONObject(payload)
+        val release = if (beta) {
+            val releases = JSONArray(payload)
+            (0 until releases.length())
+                .map { releases.getJSONObject(it) }
+                .filter {
+                    it.optBoolean("prerelease") && !it.optBoolean("draft") &&
+                        BETA_RELEASE_TAG.matches(it.optString("tag_name"))
+                }
+                .maxWithOrNull(Comparator { left, right ->
+                    compareBetaReleaseTags(left.optString("tag_name"), right.optString("tag_name"))
+                })
+                ?: throw GitHubApiException("尚未找到可用的 Beta Release")
+        } else {
+            JSONObject(payload).also {
+                require(!it.optBoolean("prerelease") && !it.optBoolean("draft")) {
+                    "最新正式 Release 信息无效"
+                }
+            }
+        }
         val assets = release.optJSONArray("assets") ?: JSONArray()
         val releaseTag = release.optString("tag_name")
         require(releaseTag.isNotBlank()) { "最新 Release 缺少版本标签" }
@@ -308,7 +342,11 @@ class GitHubApi(
         AndroidReleaseAsset(
             version = verified.version,
             releaseTag = releaseTag,
-            releaseUrl = release.optString("html_url", "https://github.com/$UPDATE_REPOSITORY/releases/latest"),
+            releaseUrl = release.optString(
+                "html_url",
+                if (beta) "https://github.com/$UPDATE_REPOSITORY/releases/tag/$releaseTag"
+                else "https://github.com/$UPDATE_REPOSITORY/releases/latest"
+            ),
             name = verified.name,
             apiUrl = asset.getString("url"),
             downloadUrl = asset.getString("browser_download_url"),
@@ -328,13 +366,14 @@ class GitHubApi(
             candidates = listOf(
                 DownloadCandidate(asset.downloadUrl, BINARY_ACCEPT),
                 DownloadCandidate(asset.apiUrl, BINARY_ACCEPT)
-            ).filter { it.url.startsWith("https://") },
+            ).filter { isAllowedDownloadUrl(it.url) },
             token = null,
             destination = destination,
             expectPdf = false,
             expectedSize = asset.size.takeIf { it > 0 },
             expectedGitBlobSha = null,
             expectedLfsSha256 = asset.sha256?.removePrefix("sha256:"),
+            expectedContentSha256 = null,
             onProgress = onProgress
         )
     }
@@ -346,48 +385,11 @@ class GitHubApi(
         return extension in TEXT_EXTENSIONS
     }
 
-    internal fun parseMobileProjectIndex(raw: String, commitSha: String? = null): MobileProjectIndex? = runCatching {
-        val value = JSONObject(raw)
-        val schemaVersion = value.optInt("schemaVersion", 1)
-        if (schemaVersion !in 1..2) return@runCatching null
-        val projectId = value.optString("projectId", value.optString("id")).trim()
-        val displayName = value.optString("name", value.optString("displayName")).trim()
-        val updatedAt = value.optString("updatedAt").trim()
-        val defaultOutputId = value.optString("defaultOutputId", value.optString("defaultPdfId")).trim()
-        if (projectId.isEmpty() || displayName.isEmpty() || defaultOutputId.isEmpty()) {
-            return@runCatching null
-        }
-        val rawOutputs = value.optJSONArray("outputs") ?: value.optJSONArray("pdfOutputs")
-            ?: return@runCatching null
-        val outputs = buildList {
-            for (index in 0 until rawOutputs.length()) {
-                val output = rawOutputs.getJSONObject(index)
-                val parsed = MobilePdfOutput(
-                    id = output.optString("id").trim().ifBlank { "output-$index" },
-                    targetId = output.optString("targetId", output.optString("target")).trim().ifBlank { "default" },
-                    name = output.optString("name").trim().ifBlank {
-                        output.optString("pdfPath", output.optString("path")).substringAfterLast('/')
-                    },
-                    entry = output.optString("entry").trim(),
-                    profileId = output.optString("profileId").trim().takeIf { it.isNotEmpty() && it != "null" },
-                    pdfPath = output.optString("pdfPath", output.optString("path")).trim()
-                )
-                if (parsed.id.isEmpty() || parsed.targetId.isEmpty() || parsed.name.isEmpty()
-                    || !isSafePdfPath(parsed.pdfPath)
-                ) return@runCatching null
-                add(parsed)
-            }
-        }
-        if (outputs.isEmpty() || outputs.map(MobilePdfOutput::id).distinct().size != outputs.size
-            || outputs.none { it.id == defaultOutputId }
-        ) return@runCatching null
-        MobileProjectIndex(schemaVersion, projectId, displayName, updatedAt, defaultOutputId, outputs, commitSha)
-    }.getOrNull()
+    internal fun parseMobileProjectIndex(raw: String, commitSha: String? = null): MobileProjectIndex? =
+        MobileIndexCodec.decode(raw, commitSha)
 
     internal fun isSafePdfPath(path: String): Boolean {
-        if (path.isBlank() || path.startsWith('/') || path.startsWith('\\') || WINDOWS_DRIVE.matches(path)) return false
-        val parts = path.replace('\\', '/').split('/')
-        return parts.none { it.isBlank() || it == "." || it == ".." } && path.endsWith(".pdf", ignoreCase = true)
+        return MobileIndexCodec.isSafePdfPath(path)
     }
 
     internal fun preferredDownloadUrl(value: String?): String? {
@@ -553,13 +555,21 @@ class GitHubApi(
         expectedSize: Long?,
         expectedGitBlobSha: String?,
         expectedLfsSha256: String?,
+        expectedContentSha256: String?,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
         require(candidates.isNotEmpty()) { "没有可用的安全下载地址" }
         destination.parentFile?.mkdirs()
+        val resumeIdentity = when {
+            expectedLfsSha256?.matches(SHA256) == true -> "sha256:${expectedLfsSha256.lowercase()}"
+            expectedContentSha256?.matches(SHA256) == true -> "sha256:${expectedContentSha256.lowercase()}"
+            expectedGitBlobSha?.matches(GIT_OBJECT_SHA) == true -> "git:${expectedGitBlobSha.lowercase()}"
+            else -> null
+        }
         if (expectPdf && destination.isFile) {
             runCatching { validatePdfPrefix(destination, complete = false) }.onFailure {
                 destination.delete()
+                resumeMetadataFile(destination).delete()
             }
         }
 
@@ -572,6 +582,7 @@ class GitHubApi(
                     destination = destination,
                     expectPdf = expectPdf,
                     failFastOnSlowStart = index < candidates.lastIndex,
+                    resumeIdentity = resumeIdentity,
                     onProgress = onProgress
                 )
                 if (expectPdf) validatePdfPrefix(destination, complete = true)
@@ -579,7 +590,8 @@ class GitHubApi(
                     destination,
                     expectedSize,
                     expectedGitBlobSha,
-                    expectedLfsSha256
+                    expectedLfsSha256,
+                    expectedContentSha256
                 )
                 resumeMetadataFile(destination).delete()
                 return
@@ -601,12 +613,16 @@ class GitHubApi(
         destination: File,
         expectPdf: Boolean,
         failFastOnSlowStart: Boolean,
+        resumeIdentity: String?,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ) {
         var mayRestart = true
         while (true) {
             val storedResume = readResumeMetadata(destination)
-            if (destination.isFile && destination.length() > 0 && storedResume?.url != candidate.url) {
+            val sameImmutableObject = resumeIdentity != null && storedResume?.identity == resumeIdentity
+            if (destination.isFile && destination.length() > 0 &&
+                storedResume?.url != candidate.url && !sameImmutableObject
+            ) {
                 destination.delete()
                 resumeMetadataFile(destination).delete()
             }
@@ -625,7 +641,10 @@ class GitHubApi(
                 setRequestProperty("Connection", "keep-alive")
                 if (existing > 0) {
                     setRequestProperty("Range", "bytes=$existing-")
-                    storedResume?.validator?.takeIf(String::isNotBlank)?.let {
+                    storedResume?.validator
+                        ?.takeIf { storedResume.url == candidate.url }
+                        ?.takeIf(String::isNotBlank)
+                        ?.let {
                         setRequestProperty("If-Range", it)
                     }
                 }
@@ -665,7 +684,7 @@ class GitHubApi(
                 if (!appending && existing > 0) destination.delete()
                 val validator = connection.getHeaderField("ETag")
                     ?: connection.getHeaderField("Last-Modified")
-                writeResumeMetadata(destination, ResumeMetadata(candidate.url, validator))
+                writeResumeMetadata(destination, ResumeMetadata(candidate.url, validator, resumeIdentity))
                 val responseBytes = connection.contentLengthLong.coerceAtLeast(-1L)
                 val total = parseContentRangeTotal(connection.getHeaderField("Content-Range"))
                     ?: responseBytes.takeIf { it >= 0 }?.let { it + downloadedBeforeRequest }
@@ -735,7 +754,8 @@ class GitHubApi(
         file: File,
         expectedSize: Long?,
         expectedGitBlobSha: String?,
-        expectedLfsSha256: String?
+        expectedLfsSha256: String?,
+        expectedContentSha256: String?
     ) {
         if (expectedSize != null && expectedSize > 0 && file.length() != expectedSize) {
             throw DownloadIntegrityException("下载大小校验失败：预期 $expectedSize 字节，实际 ${file.length()} 字节")
@@ -746,6 +766,12 @@ class GitHubApi(
                 throw DownloadIntegrityException("Git LFS SHA-256 校验失败，已保留旧的可用文件")
             }
             return
+        }
+        expectedContentSha256?.takeIf { SHA256.matches(it) }?.let { expected ->
+            val actual = digestFile(file, "SHA-256")
+            if (!actual.equals(expected, ignoreCase = true)) {
+                throw DownloadIntegrityException("资料 SHA-256 校验失败，已保留旧的可用文件")
+            }
         }
         expectedGitBlobSha?.takeIf { GIT_OBJECT_SHA.matches(it) }?.let { expected ->
             val digest = MessageDigest.getInstance("SHA-1")
@@ -782,14 +808,22 @@ class GitHubApi(
 
     private fun readResumeMetadata(destination: File): ResumeMetadata? = runCatching {
         val value = JSONObject(resumeMetadataFile(destination).readText(Charsets.UTF_8))
-        ResumeMetadata(value.getString("url"), value.optString("validator").takeIf(String::isNotBlank))
+        ResumeMetadata(
+            value.getString("url"),
+            value.optString("validator").takeIf(String::isNotBlank),
+            value.optString("identity").takeIf(String::isNotBlank)
+        )
     }.getOrNull()
 
     private fun writeResumeMetadata(destination: File, metadata: ResumeMetadata) {
         val target = resumeMetadataFile(destination)
         val temporary = File(target.parentFile, "${target.name}.tmp")
         temporary.writeText(
-            JSONObject().put("url", metadata.url).put("validator", metadata.validator).toString(),
+            JSONObject()
+                .put("url", metadata.url)
+                .put("validator", metadata.validator)
+                .put("identity", metadata.identity)
+                .toString(),
             Charsets.UTF_8
         )
         if (target.exists()) target.delete()
@@ -802,6 +836,14 @@ class GitHubApi(
         ?.toLongOrNull()
 
     private fun parseUnsatisfiedTotal(value: String?): Long? = parseContentRangeTotal(value)
+
+    private fun isAllowedDownloadUrl(value: String): Boolean = runCatching {
+        val parsed = URL(value)
+        parsed.protocol.equals("https", ignoreCase = true) ||
+            (allowLocalHttpDownloadsForTests &&
+                parsed.protocol.equals("http", ignoreCase = true) &&
+                parsed.host in setOf("localhost", "127.0.0.1", "::1"))
+    }.getOrDefault(false)
 
     private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
         val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
@@ -885,6 +927,16 @@ class GitHubApi(
         .filter { it.isNotEmpty() }
         .joinToString("/") { encode(it) }
 
+    private fun compareBetaReleaseTags(left: String, right: String): Int {
+        val leftMatch = requireNotNull(BETA_RELEASE_TAG.matchEntire(left))
+        val rightMatch = requireNotNull(BETA_RELEASE_TAG.matchEntire(right))
+        for (index in 1..4) {
+            val comparison = leftMatch.groupValues[index].toInt().compareTo(rightMatch.groupValues[index].toInt())
+            if (comparison != 0) return comparison
+        }
+        return 0
+    }
+
     private companion object {
         const val DEFAULT_API_ROOT = "https://api.github.com"
         const val DEFAULT_GITHUB_ROOT = "https://github.com"
@@ -913,6 +965,7 @@ class GitHubApi(
         const val MAX_DOWNLOAD_BYTES = 4L * 1024 * 1024 * 1024
         const val MOBILE_INDEX_PATH = ".latex-project.json"
         const val UPDATE_REPOSITORY = "Ararataki-number-one/latex-project-manager"
+        val BETA_RELEASE_TAG = Regex("v([0-9]+)\\.([0-9]+)\\.([0-9]+)-beta\\.([0-9]+)")
         val REPOSITORY_PART = Regex("[A-Za-z0-9_.-]+")
         val COMMIT_SHA = Regex("(?i)[0-9a-f]{40,64}")
         val GIT_OBJECT_SHA = Regex("(?i)[0-9a-f]{40}")
@@ -972,7 +1025,7 @@ sealed interface MobileIndexFetchResult {
 
 private data class DownloadCandidate(val url: String, val accept: String)
 
-private data class ResumeMetadata(val url: String, val validator: String?)
+private data class ResumeMetadata(val url: String, val validator: String?, val identity: String?)
 
 private class InvalidDownloadContentException(message: String) : Exception(message)
 

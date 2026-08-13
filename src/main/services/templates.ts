@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { z } from "zod";
 import { MANIFEST_DIRECTORY, MANIFEST_FILE } from "../../shared/constants";
 import { assetPinSchema, parseProjectManifest } from "../../shared/schema";
-import type { AssetPin, TemplateInfo } from "../../shared/types";
+import type { AssetPin, TemplateCreateOptions, TemplateInfo } from "../../shared/types";
 import { hashFile, sha256Bytes } from "./files";
 import { createProjectId } from "./project-id";
 
@@ -16,7 +16,6 @@ const FONT_EXTENSIONS = new Set([".otf", ".ttf", ".ttc", ".woff", ".woff2"]);
 
 interface StoredTemplate extends TemplateInfo {
   formatVersion: 1;
-  createdAt: string;
 }
 
 const storedTemplateSchema = z.object({
@@ -26,9 +25,54 @@ const storedTemplateSchema = z.object({
   name: z.string().min(1).max(160),
   description: z.string().max(1_000),
   rootPath: z.string().min(1),
+  source: z.enum(["builtin", "user"]).optional(),
+  category: z.enum(["article", "book", "presentation", "other"]).optional(),
+  fileCount: z.number().int().nonnegative().optional(),
+  totalBytes: z.number().int().nonnegative().optional(),
   className: z.string().min(1).max(160).optional(),
   assetPins: z.array(assetPinSchema)
 }).strict();
+
+const BUILTIN_TEMPLATES: ReadonlyArray<{
+  id: string;
+  name: string;
+  description: string;
+  category: TemplateInfo["category"];
+  className: string;
+  files: Readonly<Record<string, string>>;
+}> = [
+  {
+    id: "builtin-article",
+    name: "简洁论文",
+    description: "适合课程论文、短篇笔记和一般学术文章的 UTF-8 起点。",
+    category: "article",
+    className: "article",
+    files: {
+      "main.tex": "\\documentclass[11pt,a4paper]{article}\n\\usepackage[UTF8]{ctex}\n\\usepackage{amsmath,amssymb}\n\\usepackage{graphicx}\n\\title{论文标题}\n\\author{作者}\n\\date{\\today}\n\\begin{document}\n\\maketitle\n\\begin{abstract}\n在这里填写摘要。\n\\end{abstract}\n\\section{引言}\n开始写作。\n\\end{document}\n"
+    }
+  },
+  {
+    id: "builtin-book",
+    name: "分章书稿",
+    description: "包含独立章节目录与参考文献入口，适合长期维护的讲义和书籍。",
+    category: "book",
+    className: "book",
+    files: {
+      "main.tex": "\\documentclass[openany]{book}\n\\usepackage[UTF8]{ctex}\n\\usepackage{amsmath,amssymb}\n\\usepackage{graphicx}\n\\begin{document}\n\\frontmatter\n\\tableofcontents\n\\mainmatter\n\\input{chapters/introduction}\n\\end{document}\n",
+      "chapters/introduction.tex": "\\chapter{引言}\n开始写作。\n"
+    }
+  },
+  {
+    id: "builtin-beamer",
+    name: "学术演示",
+    description: "结构清晰的 Beamer 学术报告模板，适合组会和论文答辩。",
+    category: "presentation",
+    className: "beamer",
+    files: {
+      "main.tex": "\\documentclass{beamer}\n\\usepackage[UTF8]{ctex}\n\\usetheme{default}\n\\title{报告标题}\n\\author{作者}\n\\date{\\today}\n\\begin{document}\n\\begin{frame}\n  \\titlepage\n\\end{frame}\n\\begin{frame}{研究问题}\n  在这里填写内容。\n\\end{frame}\n\\end{document}\n"
+    }
+  }
+];
 
 function slug(value: string): string {
   return value
@@ -46,9 +90,9 @@ function portablePath(value: string): string {
 function shouldIgnore(relativePath: string, name: string): boolean {
   const portable = portablePath(relativePath);
   if (portable === METADATA_FILE) return true;
+  if (portable === ".latex-project.json") return true;
   if (portable === ".git" || portable.startsWith(".git/")) return true;
-  if (portable === ".latex-workbench/build" || portable.startsWith(".latex-workbench/build/")) return true;
-  if (portable === ".latex-workbench/snapshots" || portable.startsWith(".latex-workbench/snapshots/")) return true;
+  if (portable.startsWith(".latex-workbench/") && portable !== ".latex-workbench/project.json") return true;
   if (name.endsWith(".synctex.gz")) return true;
   return GENERATED_EXTENSIONS.has(extname(name).toLowerCase());
 }
@@ -105,6 +149,12 @@ async function allFiles(root: string, current = ""): Promise<string[]> {
     else if (entry.isFile()) result.push(relativePath);
   }
   return result.sort((left, right) => left.localeCompare(right));
+}
+
+async function templateSize(root: string, files: string[]): Promise<number> {
+  let total = 0;
+  for (const file of files) total += (await lstat(join(root, file))).size;
+  return total;
 }
 
 export async function pinTemplateAssets(root: string): Promise<AssetPin[]> {
@@ -179,30 +229,110 @@ export class TemplateService {
     this.rootPath = resolve(rootPath);
   }
 
+  private async ensureBuiltIns(): Promise<void> {
+    const builtInRoot = join(this.rootPath, ".builtins");
+    await mkdir(builtInRoot, { recursive: true });
+    for (const definition of BUILTIN_TEMPLATES) {
+      const destination = join(builtInRoot, definition.id);
+      try {
+        const existing = await lstat(destination);
+        if (existing.isDirectory()) continue;
+        throw new Error(`Built-in template path is not a directory: ${destination}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const staging = join(builtInRoot, `.staging-${definition.id}-${randomBytes(5).toString("hex")}`);
+      let stagingExists = false;
+      try {
+        await mkdir(staging, { recursive: false });
+        stagingExists = true;
+        for (const [relativePath, contents] of Object.entries(definition.files)) {
+          const destinationFile = join(staging, ...relativePath.split("/"));
+          await mkdir(dirname(destinationFile), { recursive: true });
+          await writeFile(destinationFile, contents, "utf8");
+        }
+        const files = await allFiles(staging);
+        const template: StoredTemplate = {
+          formatVersion: 1,
+          id: definition.id,
+          name: definition.name,
+          description: definition.description,
+          rootPath: destination,
+          source: "builtin",
+          category: definition.category,
+          createdAt: "2026-08-12T00:00:00.000Z",
+          fileCount: files.length,
+          totalBytes: await templateSize(staging, files),
+          className: definition.className,
+          assetPins: await pinTemplateAssets(staging)
+        };
+        await writeFile(join(staging, METADATA_FILE), `${JSON.stringify(template, null, 2)}\n`, "utf8");
+        try {
+          await rename(staging, destination);
+          stagingExists = false;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+      } finally {
+        if (stagingExists) await rm(staging, { recursive: true, force: true });
+      }
+    }
+  }
+
+  private async readTemplateDirectory(directory: string, expectedId: string): Promise<TemplateInfo | null> {
+    try {
+      const parsed = storedTemplateSchema.safeParse(JSON.parse(await readFile(join(directory, METADATA_FILE), "utf8")));
+      if (!parsed.success || parsed.data.id !== expectedId) return null;
+      const files = await allFiles(directory);
+      return {
+        id: parsed.data.id,
+        name: parsed.data.name,
+        description: parsed.data.description,
+        rootPath: directory,
+        source: parsed.data.source ?? "user",
+        category: parsed.data.category ?? "other",
+        createdAt: parsed.data.createdAt,
+        fileCount: parsed.data.fileCount ?? files.length,
+        totalBytes: parsed.data.totalBytes ?? await templateSize(directory, files),
+        className: parsed.data.className,
+        assetPins: parsed.data.assetPins
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async list(): Promise<TemplateInfo[]> {
     await mkdir(this.rootPath, { recursive: true });
+    await this.ensureBuiltIns();
     const templates: TemplateInfo[] = [];
     for (const entry of await readdir(this.rootPath, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith(".staging-")) continue;
-      const templateRoot = join(this.rootPath, entry.name);
-      try {
-        const parsed = storedTemplateSchema.safeParse(JSON.parse(await readFile(join(templateRoot, METADATA_FILE), "utf8")));
-        if (!parsed.success || parsed.data.id !== entry.name) continue;
-        const stored = parsed.data as StoredTemplate;
-        templates.push({ ...stored, rootPath: templateRoot });
-      } catch {
-        // An incomplete directory is not a usable template.
+      if (entry.name === ".builtins") {
+        for (const builtInEntry of await readdir(join(this.rootPath, entry.name), { withFileTypes: true })) {
+          if (!builtInEntry.isDirectory() || builtInEntry.name.startsWith(".staging-")) continue;
+          const template = await this.readTemplateDirectory(join(this.rootPath, entry.name, builtInEntry.name), builtInEntry.name);
+          if (template?.source === "builtin") templates.push(template);
+        }
+        continue;
       }
+      if (entry.name.startsWith(".")) continue;
+      const template = await this.readTemplateDirectory(join(this.rootPath, entry.name), entry.name);
+      if (template) templates.push({ ...template, source: "user" });
     }
-    return templates.sort((left, right) => left.name.localeCompare(right.name));
+    return templates.sort((left, right) => left.source.localeCompare(right.source) || left.name.localeCompare(right.name, "zh-CN"));
   }
 
-  async create(sourceRoot: string, name: string): Promise<TemplateInfo> {
+  async create(sourceRoot: string, name: string, options: Omit<TemplateCreateOptions, "name"> = {}): Promise<TemplateInfo> {
     const source = resolve(sourceRoot);
     const sourceMetadata = await lstat(source);
     if (!sourceMetadata.isDirectory()) throw new Error(`Template source is not a directory: ${source}`);
     const cleanName = name.trim();
     if (!cleanName) throw new Error("Template name cannot be empty.");
+    if (cleanName.length > 160) throw new Error("Template name must contain at most 160 characters.");
+    if (options.category && !new Set<TemplateInfo["category"]>(["article", "book", "presentation", "other"]).has(options.category)) {
+      throw new Error("Unknown template category.");
+    }
 
     await mkdir(this.rootPath, { recursive: true });
     const storeRelation = relative(source, this.rootPath);
@@ -218,6 +348,7 @@ export class TemplateService {
       await mkdir(staging, { recursive: false });
       stagingExists = true;
       await copyTemplateTree(source, staging);
+      const files = await allFiles(staging);
       const assetPins = await pinTemplateAssets(staging);
       const classPin = assetPins.find((pin) => pin.kind === "class");
       const template: StoredTemplate = {
@@ -225,8 +356,12 @@ export class TemplateService {
         createdAt: new Date().toISOString(),
         id,
         name: cleanName,
-        description: `Local template created from ${basename(source)}`,
+        description: options.description?.trim().slice(0, 1_000) || `由项目“${basename(source)}”保存的本机模板。`,
         rootPath: destination,
+        source: "user",
+        category: options.category ?? "other",
+        fileCount: files.length,
+        totalBytes: await templateSize(staging, files),
         className: classPin ? basename(classPin.path, extname(classPin.path)) : undefined,
         assetPins
       };
@@ -237,6 +372,21 @@ export class TemplateService {
     } finally {
       if (stagingExists) await rm(staging, { recursive: true, force: true });
     }
+  }
+
+  async delete(templateId: string): Promise<void> {
+    if (typeof templateId !== "string" || !templateId || templateId.includes("/") || templateId.includes("\\")) {
+      throw new Error("Invalid template ID.");
+    }
+    const template = (await this.list()).find((item) => item.id === templateId);
+    if (!template) throw new Error("The selected template no longer exists.");
+    if (template.source !== "user") throw new Error("Built-in templates cannot be deleted.");
+    const store = await realpath(this.rootPath);
+    const target = await realpath(template.rootPath);
+    if (dirname(target) !== store || !isInside(store, target) || target === store) {
+      throw new Error("The template path is outside the user template store.");
+    }
+    await rm(target, { recursive: true, force: false });
   }
 
   async instantiate(templateId: string, parentRoot: string, name: string): Promise<string> {

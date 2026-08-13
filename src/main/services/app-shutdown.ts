@@ -9,6 +9,8 @@ interface AppShutdownOptions {
   exit(exitCode: number): void;
   onBegin?(): void;
   onError?(error: unknown): void;
+  timeoutMs?: number;
+  onTimeout?(timeoutMs: number): void;
 }
 
 export interface AppShutdownController {
@@ -24,6 +26,25 @@ export interface AppShutdownController {
 export function createAppShutdownController(options: AppShutdownOptions): AppShutdownController {
   let currentPhase: AppShutdownPhase = "running";
 
+  const drainWithinDeadline = async (): Promise<void> => {
+    const timeoutMs = Math.max(100, options.timeoutMs ?? 8_000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        options.shutdown(),
+        new Promise<void>((resolveTimeout) => {
+          timer = setTimeout(() => {
+            options.onTimeout?.(timeoutMs);
+            resolveTimeout();
+          }, timeoutMs);
+          timer.unref();
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
   const handleBeforeQuit = (event: BeforeQuitEventLike): void => {
     options.onBegin?.();
     if (currentPhase === "exiting") return;
@@ -34,7 +55,7 @@ export function createAppShutdownController(options: AppShutdownOptions): AppShu
 
     void (async () => {
       try {
-        await options.shutdown();
+        await drainWithinDeadline();
       } catch (error) {
         options.onError?.(error);
       } finally {

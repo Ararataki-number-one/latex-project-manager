@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,11 +122,12 @@ describe("GitHub synchronization", () => {
     expect(await readdir(join(configDirectory, "git-hooks"))).toHaveLength(1);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/build/");
     expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/undo/");
+    expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/local-research-recovered/");
     expect(await readFile(join(root, ".gitignore"), "utf8")).not.toContain("references/");
     await service.dispose();
   });
 
-  it("blocks an undo snapshot that was already tracked without reading or committing it", async () => {
+  it("blocks managed private snapshots and recovered research that were already tracked", async () => {
     const base = await mkdtemp(join(tmpdir(), "latex-workbench-github-undo-"));
     temporaryDirectories.push(base);
     const root = join(base, "project");
@@ -143,9 +145,15 @@ describe("GitHub synchronization", () => {
       if (command[0] === "add") return result();
       if (command[0] === "write-tree") return result(0, `${treeId}\n`);
       if (command[0] === "ls-files" && command[1] === "--stage") {
-        return result(0, `100644 ${blobId} 0\t.latex-workbench/undo/private/journal.json\0`);
+        return result(0, [
+          `100644 ${blobId} 0\t.latex-workbench/undo/private/journal.json`,
+          `100644 ${blobId} 0\t.latex-workbench/local-research-recovered/paper/source.pdf`
+        ].join("\0") + "\0");
       }
-      if (command[0] === "status") return result(0, "M  .latex-workbench/undo/private/journal.json\0");
+      if (command[0] === "status") return result(0, [
+        "M  .latex-workbench/undo/private/journal.json",
+        "A  .latex-workbench/local-research-recovered/paper/source.pdf"
+      ].join("\0") + "\0");
       throw new Error(`Unexpected Git command: ${command.join(" ")}`);
     };
     const service = new GitHubSyncService(configDirectory, {
@@ -161,8 +169,87 @@ describe("GitHub synchronization", () => {
       kind: "sensitiveFile",
       severity: "block"
     }));
+    expect(findings).toContainEqual(expect.objectContaining({
+      path: ".latex-workbench/local-research-recovered/paper/source.pdf",
+      kind: "sensitiveFile",
+      severity: "block"
+    }));
     expect(commands.some((command) => command[0] === "cat-file")).toBe(false);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/undo/");
+    expect(await readFile(join(root, ".gitignore"), "utf8")).toContain(".latex-workbench/local-research-recovered/");
+    await service.dispose();
+  });
+
+  it("blocks private-to-public conversion when managed research exists anywhere in Git history", async () => {
+    const base = await mkdtemp(join(tmpdir(), "latex-workbench-github-history-"));
+    temporaryDirectories.push(base);
+    const root = join(base, "project");
+    const configDirectory = join(base, "config");
+    await (await import("node:fs/promises")).mkdir(root, { recursive: true });
+    await (await import("node:fs/promises")).mkdir(configDirectory, { recursive: true });
+    const projectId = "project-history";
+    const configName = `${createHash("sha256").update(projectId).digest("hex")}.json`;
+    await writeFile(join(configDirectory, configName), `${JSON.stringify({
+      schemaVersion: 1,
+      projectId,
+      remoteUrl: "https://github.com/example/private-notes.git",
+      autoSync: false,
+      useLfsForDocuments: false,
+      repositoryFullName: "example/private-notes",
+      visibility: "private"
+    })}\n`, "utf8");
+    const treeId = "1".repeat(40);
+    const indexBlob = "2".repeat(40);
+    const currentIndex = JSON.stringify({ schemaVersion: 3, researchItems: [] });
+    const historicalIndex = JSON.stringify({
+      schemaVersion: 3,
+      researchItems: [{ attachments: [{
+        id: "publisher-copy", name: "publisher.pdf", availability: "repository", relativePath: "references/publisher.pdf"
+      }] }]
+    });
+    const commit = "3".repeat(40);
+    let repositoryEdited = false;
+    const result = (code = 0, stdout = "", stderr = ""): GitCommandResult => ({ code, stdout, stderr });
+    const runner: GitCommandRunner = async (executable, cwd, args) => {
+      expect(cwd).toBe(root);
+      const command = args[0] === "-c" ? args.slice(2) : args;
+      if (executable === "gh.exe") {
+        if (command[0] === "auth") return result();
+        if (command[0] === "api" && command[1] === "user") return result(0, JSON.stringify({ login: "reader", id: 1 }));
+        if (command[0] === "repo" && command[1] === "edit") { repositoryEdited = true; return result(); }
+      }
+      if (command[0] === "rev-parse" && command[1] === "--show-toplevel") return result(0, `${root}\n`);
+      if (command[0] === "add") return result();
+      if (command[0] === "write-tree") return result(0, `${treeId}\n`);
+      if (command[0] === "ls-files") return result(0, `100644 ${indexBlob} 0\t.latex-project.json\0`);
+      if (command[0] === "cat-file" && command[1] === "-s") return result(0, `${Buffer.byteLength(currentIndex)}\n`);
+      if (command[0] === "cat-file" && command[1] === "blob") return result(0, currentIndex);
+      if (command[0] === "check-attr") return result();
+      if (command[0] === "fetch") return result();
+      if (command[0] === "log") return result(0, `${commit}\n`);
+      if (command[0] === "show") return result(0, historicalIndex);
+      if (command[0] === "ls-tree") return result(0, "references/publisher.pdf\0");
+      throw new Error(`Unexpected command: ${executable} ${command.join(" ")}`);
+    };
+    const service = new GitHubSyncService(configDirectory, {
+      platform: "win32",
+      gitExecutable: "git.exe",
+      githubCliExecutable: "gh.exe",
+      runner,
+      watcherFactory: () => ({ close: () => undefined })
+    });
+
+    let blocked: unknown;
+    try { await service.setVisibility(projectId, root, "public"); } catch (error) { blocked = error; }
+    expect(blocked).toMatchObject({
+      findings: [expect.objectContaining({
+        path: "references/publisher.pdf",
+        kind: "researchCopyright",
+        recoveryActions: ["keepPrivate", "createCleanPublicRepository"],
+        relatedPaths: ["references/publisher.pdf"]
+      })]
+    });
+    expect(repositoryEdited).toBe(false);
     await service.dispose();
   });
 });

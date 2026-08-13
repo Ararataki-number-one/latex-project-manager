@@ -58,4 +58,22 @@ describe("application shutdown controller", () => {
     expect(onError).toHaveBeenCalledExactlyOnceWith(failure);
     expect(controller.phase()).toBe("exiting");
   });
+
+  it("bounds shutdown cleanup and reports a deadline before exiting", async () => {
+    const never = new Promise<void>(() => undefined);
+    const exit = vi.fn();
+    const onTimeout = vi.fn();
+    const controller = createAppShutdownController({
+      shutdown: () => never,
+      exit,
+      timeoutMs: 100,
+      onTimeout
+    });
+
+    controller.handleBeforeQuit({ preventDefault: vi.fn() });
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledExactlyOnceWith(0), { timeout: 1_000 });
+    expect(onTimeout).toHaveBeenCalledExactlyOnceWith(100);
+    expect(controller.phase()).toBe("exiting");
+  });
 });

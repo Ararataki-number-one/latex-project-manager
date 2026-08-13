@@ -4,13 +4,25 @@ import { _electron as electron } from "@playwright/test";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 const sourceBuild = process.env.ELECTRON_SMOKE_SOURCE === "1";
-const executablePath = sourceBuild
-  ? join(projectRoot, "node_modules", "electron", "dist", "electron.exe")
-  : join(projectRoot, "dist", "win-unpacked", "LaTeX 项目管理器.exe");
-const userData = await mkdtemp(join(projectRoot, "test-results", "electron-smoke-"));
+const executablePath = process.env.ELECTRON_SMOKE_EXECUTABLE
+  ? resolve(process.env.ELECTRON_SMOKE_EXECUTABLE)
+  : sourceBuild
+    ? join(projectRoot, "node_modules", "electron", "dist", "electron.exe")
+    : join(projectRoot, "dist", "win-unpacked", "LaTeX 项目管理器.exe");
+const userData = process.env.ELECTRON_SMOKE_USER_DATA
+  ? resolve(process.env.ELECTRON_SMOKE_USER_DATA)
+  : await mkdtemp(join(projectRoot, "test-results", "electron-smoke-"));
+const executable = await stat(executablePath);
+const electronEnvironment = { ...process.env };
+// Node-oriented CI wrappers can leak these variables into Electron and make it
+// exit before Playwright can attach to the main process.
+delete electronEnvironment.ELECTRON_RUN_AS_NODE;
+delete electronEnvironment.NODE_OPTIONS;
+console.log(JSON.stringify({ sourceBuild, executablePath, executableBytes: executable.size, userData }));
 const application = await electron.launch({
   executablePath,
-  args: [...(sourceBuild ? [projectRoot] : []), `--user-data-dir=${userData}`]
+  args: [...(sourceBuild ? [projectRoot] : []), ...(process.env.CI ? ["--disable-gpu"] : []), `--user-data-dir=${userData}`],
+  env: electronEnvironment
 });
 
 try {

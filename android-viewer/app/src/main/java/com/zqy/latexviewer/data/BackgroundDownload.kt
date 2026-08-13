@@ -3,6 +3,7 @@ package com.zqy.latexviewer.data
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -59,6 +60,7 @@ data class BackgroundDownloadTask(
     val sha: String? = null,
     val commitSha: String? = null,
     val lfsOidSha256: String? = null,
+    val contentSha256: String? = null,
     val size: Long = -1,
     val downloadUrl: String? = null,
     val cacheKey: String? = null,
@@ -95,6 +97,7 @@ data class BackgroundDownloadTask(
                         sha = value.optionalString("sha"),
                         commitSha = value.optionalString("commitSha"),
                         lfsOidSha256 = value.optionalString("lfsOidSha256"),
+                        contentSha256 = value.optionalString("contentSha256"),
                         size = value.optLong("size", -1),
                         downloadUrl = value.optionalString("downloadUrl"),
                         cacheKey = value.optionalString("cacheKey"),
@@ -136,20 +139,15 @@ class BackgroundDownloadManager(context: Context) {
         }
         .onEach { values ->
             values.forEach { snapshot ->
-                val persistentState = when (snapshot.state) {
-                    WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> PersistentDownloadState.WAITING_FOR_NETWORK
-                    WorkInfo.State.RUNNING -> PersistentDownloadState.RUNNING
-                    WorkInfo.State.SUCCEEDED -> PersistentDownloadState.SUCCEEDED
-                    WorkInfo.State.FAILED -> PersistentDownloadState.FAILED
-                    WorkInfo.State.CANCELLED -> PersistentDownloadState.CANCELLED
-                }
+                val previous = preferences.downloadTask(snapshot.workId.toString())?.first
+                val persistentState = persistentStateFor(snapshot.state, previous?.state)
                 preferences.saveDownloadTask(
                     snapshot.task.toPersistent(
                         snapshot.workId.toString(),
                         persistentState,
-                        snapshot.downloaded,
-                        snapshot.total,
-                        snapshot.error
+                        mergeDownloadedBytes(previous?.downloaded ?: 0L, snapshot.downloaded),
+                        mergeDownloadTotal(previous?.total ?: -1L, snapshot.total),
+                        snapshot.error ?: previous?.error
                     ),
                     snapshot.task.toJson().toString()
                 )
@@ -179,6 +177,7 @@ class BackgroundDownloadManager(context: Context) {
             sha = item.sha,
             commitSha = item.commitSha ?: repository.commitSha,
             lfsOidSha256 = item.lfsOidSha256,
+            contentSha256 = item.contentSha256,
             size = item.size,
             downloadUrl = item.downloadUrl
         )
@@ -217,6 +216,7 @@ class BackgroundDownloadManager(context: Context) {
             sha = item.sha,
             commitSha = item.commitSha ?: repository.commitSha,
             lfsOidSha256 = item.lfsOidSha256,
+            contentSha256 = item.contentSha256,
             size = item.size,
             downloadUrl = item.downloadUrl,
             cacheKey = "${repository.owner}-${repository.name}-${item.sha}.pdf",
@@ -243,17 +243,32 @@ class BackgroundDownloadManager(context: Context) {
     )
 
     fun cancel(workId: UUID) {
-        // An explicit user cancellation should release its partial file. Worker
-        // cancellation is handled separately because WorkManager also uses it for
-        // temporary constraint/process stops that must remain resumable.
+        // Persist explicit user intent before WorkManager stops the coroutine.
+        // Constraint/process stops must not be mistaken for a user cancellation.
+        val stored = preferences.downloadTask(workId.toString())
+        stored?.first?.let { current ->
+            preferences.updateDownloadTask(
+                current.copy(
+                    state = PersistentDownloadState.CANCELLED,
+                    error = "已取消",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
         val store = DownloadStore(appContext)
-        store.discardStaging(store.stagingFile(workId.toString()))
+        val task = BackgroundDownloadTask.fromJson(stored?.second)
+        if (task != null) {
+            store.discardResumableStaging(task.uniqueIdentity(), workId.toString())
+        } else {
+            store.discardStaging(store.stagingFile(workId.toString()))
+        }
         workManager.cancelWorkById(workId)
     }
 
     fun retry(workId: String): UUID? {
         val (_, payload) = preferences.downloadTask(workId) ?: return null
         val task = BackgroundDownloadTask.fromJson(payload) ?: return null
+        DownloadStore(appContext).resumableStagingFile(task.uniqueIdentity(), workId)
         return enqueue(task.copy(createdAt = System.currentTimeMillis()))
     }
 
@@ -271,8 +286,18 @@ class BackgroundDownloadManager(context: Context) {
             .addTag(DOWNLOAD_TAG)
             .addTag(metadataTag(payload))
             .build()
+        val resumedBytes = DownloadStore(appContext)
+            .resumableStagingFile(uniqueKey)
+            .takeIf { it.isFile }
+            ?.length()
+            ?: 0L
         preferences.saveDownloadTask(
-            task.toPersistent(request.id.toString(), PersistentDownloadState.QUEUED),
+            task.toPersistent(
+                request.id.toString(),
+                PersistentDownloadState.QUEUED,
+                downloaded = resumedBytes,
+                total = task.size
+            ),
             payload
         )
         workManager.enqueueUniqueWork(
@@ -291,12 +316,19 @@ class BackgroundDownloadManager(context: Context) {
             String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
         }.getOrNull() ?: return null
         val task = BackgroundDownloadTask.fromJson(payload) ?: return null
+        val persisted = preferences.downloadTask(info.id.toString())?.first
         return BackgroundDownloadSnapshot(
             workId = info.id,
             task = task,
             state = info.state,
-            downloaded = info.progress.getLong(KEY_DOWNLOADED, 0L),
-            total = info.progress.getLong(KEY_TOTAL, task.size),
+            downloaded = mergeDownloadedBytes(
+                persisted?.downloaded ?: 0L,
+                info.progress.getLong(KEY_DOWNLOADED, 0L)
+            ),
+            total = mergeDownloadTotal(
+                persisted?.total ?: -1L,
+                info.progress.getLong(KEY_TOTAL, task.size)
+            ),
             output = info.outputData,
             error = info.outputData.getString(KEY_ERROR)
         )
@@ -331,19 +363,25 @@ class DownloadWorker(
             ?: return Result.failure(workDataOf(BackgroundDownloadManager.KEY_ERROR to "下载任务信息已损坏"))
         val expectedTotal = task.size.takeIf { it > 0 } ?: -1L
         val preferences = AppPreferences(applicationContext)
+        val store = DownloadStore(applicationContext)
+        val staging = store.resumableStagingFile(task.uniqueIdentity(), id.toString())
+        val resumedBytes = staging.takeIf { it.isFile }?.length() ?: 0L
         preferences.saveDownloadTask(
-            task.toPersistent(id.toString(), PersistentDownloadState.RUNNING, total = expectedTotal),
+            task.toPersistent(
+                id.toString(),
+                PersistentDownloadState.RUNNING,
+                downloaded = resumedBytes,
+                total = expectedTotal
+            ),
             task.toJson().toString()
         )
         createNotificationChannel()
-        setForeground(foregroundInfo(task, 0, expectedTotal))
-        publishProgress(task, 0, expectedTotal, force = true)
+        setForeground(foregroundInfo(task, resumedBytes, expectedTotal))
+        publishProgress(task, resumedBytes, expectedTotal, force = true)
 
         return try {
             val api = GitHubApi()
             val token = SecureTokenStore(applicationContext).read()
-            val store = DownloadStore(applicationContext)
-            val staging = store.stagingFile(id.toString())
             var lastPublishAt = 0L
             val onProgress: (Long, Long) -> Unit = { downloaded, total ->
                 val now = System.currentTimeMillis()
@@ -419,8 +457,18 @@ class DownloadWorker(
             // this coroutine when network constraints change or the worker is
             // stopped for rescheduling; the next attempt can safely resume it via
             // Range/If-Range. Explicit UI cancellation cleans it in cancel().
+            val previous = preferences.downloadTask(id.toString())?.first
+            val explicitlyCancelled = previous?.state == PersistentDownloadState.CANCELLED
+            val durableBytes = staging.takeIf { it.isFile }?.length() ?: 0L
             preferences.saveDownloadTask(
-                task.toPersistent(id.toString(), PersistentDownloadState.CANCELLED, error = "已取消"),
+                task.toPersistent(
+                    id.toString(),
+                    if (explicitlyCancelled) PersistentDownloadState.CANCELLED
+                    else PersistentDownloadState.WAITING_FOR_NETWORK,
+                    downloaded = if (explicitlyCancelled) previous.downloaded else durableBytes,
+                    total = mergeDownloadTotal(previous?.total ?: -1L, expectedTotal),
+                    error = if (explicitlyCancelled) "已取消" else "下载已暂停，等待系统恢复"
+                ),
                 task.toJson().toString()
             )
             throw cancelled
@@ -430,18 +478,26 @@ class DownloadWorker(
                     task.toPersistent(
                         id.toString(),
                         PersistentDownloadState.WAITING_FOR_NETWORK,
+                        downloaded = staging.takeIf { it.isFile }?.length() ?: 0L,
+                        total = expectedTotal,
                         error = failure.message
                     ),
                     task.toJson().toString()
                 )
                 Result.retry()
             } else {
-                val store = DownloadStore(applicationContext)
-                store.discardStaging(store.stagingFile(id.toString()))
+                // Keep transient network/server partials for a user retry.
+                // Integrity and security failures are never reused.
+                if (!failure.isRetryableDownloadFailure()) {
+                    store.discardResumableStaging(task.uniqueIdentity(), id.toString())
+                }
+                val durableBytes = staging.takeIf { it.isFile }?.length() ?: 0L
                 preferences.saveDownloadTask(
                     task.toPersistent(
                         id.toString(),
                         PersistentDownloadState.FAILED,
+                        downloaded = durableBytes,
+                        total = expectedTotal,
                         error = failure.message ?: "下载失败，请稍后重试"
                     ),
                     task.toJson().toString()
@@ -517,7 +573,7 @@ class DownloadWorker(
             builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "取消",
-                WorkManager.getInstance(applicationContext).createCancelPendingIntent(id)
+                explicitCancelPendingIntent()
             )
         }
         return builder.build()
@@ -551,10 +607,35 @@ class DownloadWorker(
     private val notificationId: Int
         get() = (id.hashCode() and 0x0fffffff).coerceAtLeast(1000)
 
-    private companion object {
+    private fun explicitCancelPendingIntent(): PendingIntent {
+        val intent = Intent(applicationContext, DownloadCancelReceiver::class.java)
+            .setAction(ACTION_CANCEL_DOWNLOAD)
+            .putExtra(EXTRA_WORK_ID, id.toString())
+        return PendingIntent.getBroadcast(
+            applicationContext,
+            notificationId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    companion object {
         const val NOTIFICATION_CHANNEL = "latex_downloads"
         const val PROGRESS_INTERVAL_MS = 1_000L
         const val MAX_RETRY_ATTEMPTS = 3
+        const val ACTION_CANCEL_DOWNLOAD = "com.zqy.latexviewer.action.CANCEL_DOWNLOAD"
+        const val EXTRA_WORK_ID = "work_id"
+    }
+}
+
+/** Routes notification cancellation through the durable user-cancel path. */
+class DownloadCancelReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != DownloadWorker.ACTION_CANCEL_DOWNLOAD) return
+        val workId = intent.getStringExtra(DownloadWorker.EXTRA_WORK_ID)
+            ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            ?: return
+        BackgroundDownloadManager(context.applicationContext).cancel(workId)
     }
 }
 
@@ -581,7 +662,8 @@ private fun BackgroundDownloadTask.contentModel(): GitHubContent = GitHubContent
     downloadUrl = downloadUrl,
     commitSha = commitSha,
     gitObjectSha = sha.orEmpty(),
-    lfsOidSha256 = lfsOidSha256
+    lfsOidSha256 = lfsOidSha256,
+    contentSha256 = contentSha256
 )
 
 private fun BackgroundDownloadTask.releaseAsset(): AndroidReleaseAsset = AndroidReleaseAsset(
@@ -611,6 +693,7 @@ private fun BackgroundDownloadTask.toJson(): JSONObject = JSONObject()
     .put("sha", sha)
     .put("commitSha", commitSha)
     .put("lfsOidSha256", lfsOidSha256)
+    .put("contentSha256", contentSha256)
     .put("size", size)
     .put("downloadUrl", downloadUrl)
     .put("cacheKey", cacheKey)
@@ -686,7 +769,40 @@ private fun JSONObject.optionalString(key: String): String? = optString(key)
 private fun Throwable.isRetryableDownloadFailure(): Boolean {
     if (this is IllegalArgumentException || this is SecurityException) return false
     val detail = message.orEmpty()
-    return listOf("令牌无效", "没有读取", "没有找到", "超过 4 GB", "不是有效的 PDF").none {
+    return listOf(
+        "令牌无效",
+        "没有读取",
+        "没有找到",
+        "超过 4 GB",
+        "不是有效的 PDF",
+        "Android 安装包签名",
+        "Android 安装包证书",
+        "无法读取 Android 安装包签名"
+    ).none {
         detail.contains(it)
+    }
+}
+
+internal fun mergeDownloadedBytes(persisted: Long, reported: Long): Long =
+    maxOf(persisted.coerceAtLeast(0L), reported.coerceAtLeast(0L))
+
+internal fun mergeDownloadTotal(persisted: Long, reported: Long): Long = when {
+    persisted > 0L && reported > 0L -> maxOf(persisted, reported)
+    reported > 0L -> reported
+    else -> persisted
+}
+
+internal fun persistentStateFor(
+    workState: WorkInfo.State,
+    previous: PersistentDownloadState?
+): PersistentDownloadState = when (workState) {
+    WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> PersistentDownloadState.WAITING_FOR_NETWORK
+    WorkInfo.State.RUNNING -> PersistentDownloadState.RUNNING
+    WorkInfo.State.SUCCEEDED -> PersistentDownloadState.SUCCEEDED
+    WorkInfo.State.FAILED -> if (previous == PersistentDownloadState.SUCCEEDED) previous else PersistentDownloadState.FAILED
+    WorkInfo.State.CANCELLED -> when (previous) {
+        PersistentDownloadState.CANCELLED,
+        PersistentDownloadState.SUCCEEDED -> previous
+        else -> PersistentDownloadState.WAITING_FOR_NETWORK
     }
 }

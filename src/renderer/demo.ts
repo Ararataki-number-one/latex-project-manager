@@ -2,13 +2,16 @@ import type { WorkbenchApi } from "@/shared/ipc";
 import type {
   AppUpdateStatus,
   AppRuntimeSettings,
+  CatalogProjectResearchItem,
   GitHubSyncEvent,
   GitHubSyncStatus,
   MigrationPreview,
   MobileProjectIndex,
   ProjectManifest,
+  ProjectStatusRecord,
   ProjectSummary,
   ReferenceDocumentInfo,
+  ResearchSearchHit,
   ScanCandidate,
   TemplateInfo
 } from "@/shared/types";
@@ -348,8 +351,9 @@ const candidates: ScanCandidate[] = [
 ];
 
 const templates: TemplateInfo[] = [
-  { id: "elegant-book", name: "ElegantBook 讲义", description: "含章节目录、参考文献与索引的中文书稿", rootPath: "templates/elegant-book", className: "elegantbook", assetPins: demoManifest.assets },
-  { id: "article", name: "简洁论文", description: "适合单文件或小型多文件论文", rootPath: "templates/article", className: "article", assetPins: [] }
+  { id: "builtin-book", name: "分章书稿", description: "含独立章节目录的中文书稿", rootPath: "templates/book", source: "builtin", category: "book", createdAt: "2026-08-12T00:00:00.000Z", fileCount: 2, totalBytes: 2048, className: "book", assetPins: demoManifest.assets },
+  { id: "builtin-article", name: "简洁论文", description: "适合单文件或小型多文件论文", rootPath: "templates/article", source: "builtin", category: "article", createdAt: "2026-08-12T00:00:00.000Z", fileCount: 1, totalBytes: 760, className: "article", assetPins: [] },
+  { id: "user-probability-notes", name: "我的概率论笔记", description: "从已有项目保存的个人模板", rootPath: "templates/probability", source: "user", category: "book", createdAt: "2026-08-11T08:30:00.000Z", fileCount: 12, totalBytes: 48_300, className: "elegantbook", assetPins: demoManifest.assets }
 ];
 
 export interface DemoWorkbench {
@@ -362,10 +366,55 @@ function joinDemoPath(root: string, path: string) {
   return `${root.replace(/[\\/]$/, "")}\\${path.replaceAll("/", "\\")}`;
 }
 
+function createDemoProjectLibrary(): ProjectSummary[] {
+  const requestedCount = Number.parseInt(new URLSearchParams(window.location.search).get("projectCount") ?? "", 10);
+  const count = Number.isFinite(requestedCount) ? Math.min(1_000, Math.max(demoProjects.length, requestedCount)) : demoProjects.length;
+  const projects = structuredClone(demoProjects);
+  for (let index = projects.length; index < count; index += 1) {
+    const suffix = String(index).padStart(4, "0");
+    projects.push({
+      id: `performance-project-${index}`,
+      name: `性能项目 ${suffix}`,
+      rootPath: `D:\\LaTeX资料库\\性能项目-${suffix}`,
+      targetCount: 1,
+      classNames: ["article"],
+      lastOpenedAt: `2020-01-${String(index % 28 + 1).padStart(2, "0")}T00:00:00.000Z`,
+      favorite: false,
+      archived: false,
+      trashed: false,
+      tags: ["性能门禁"],
+      pathAvailable: true
+    });
+  }
+  return projects;
+}
+
 export function createWorkbench(): DemoWorkbench {
   if (window.workbench) return { api: window.workbench, isDemo: false };
 
-  let projects = structuredClone(demoProjects);
+  let projects = createDemoProjectLibrary();
+  const projectStatusRecord = (project: ProjectSummary): ProjectStatusRecord => {
+    const index = Math.max(0, projects.findIndex((item) => item.id === project.id));
+    const pathAvailable = project.pathAvailable !== false;
+    const issues = pathAvailable ? [] : ["项目路径不可访问"];
+    return {
+      freshness: "cached",
+      snapshot: {
+        projectId: project.id,
+        pathAvailable,
+        storageBytes: (index + 1) * 18_742_930,
+        fileCount: 42 + index * 17,
+        mainPdfPath: pathAvailable ? "main.pdf" : undefined,
+        mainPdfSize: pathAvailable ? 2_400_000 + index * 300_000 : undefined,
+        researchCount: project.id === "probability-method" ? 2 : 0,
+        syncState: project.id === "probability-method" ? "changes" : "notConfigured",
+        syncMessage: project.id === "probability-method" ? "2 个文件等待自动同步。" : "尚未连接 GitHub",
+        health: pathAvailable ? "healthy" : "error",
+        issues,
+        capturedAt: "2026-08-12T08:00:00.000Z"
+      }
+    };
+  };
   const readonlyError = () => Promise.reject(new Error("浏览器演示模式不会写入本地文件"));
   let githubStatus: GitHubSyncStatus = {
     available: true,
@@ -420,22 +469,95 @@ export function createWorkbench(): DemoWorkbench {
     { name: "Alon-Spencer-The-Probabilistic-Method.pdf", relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf", size: 18_724_811, modifiedAt: "2026-08-02T08:20:00.000Z", kind: "pdf", lfsRecommended: false },
     { name: "随机图中文讲义.pdf", relativePath: "references/随机图中文讲义.pdf", size: 62_104_322, modifiedAt: "2026-07-28T13:15:00.000Z", kind: "pdf", lfsRecommended: true }
   ];
+  let demoResearchItems: CatalogProjectResearchItem[] = [
+    {
+      projectId: "probability-method",
+      workId: "work-probabilistic-method",
+      item: {
+        id: "research-probabilistic-method",
+        title: "The Probabilistic Method",
+        authors: ["Noga Alon", "Joel H. Spencer"],
+        year: 2016,
+        language: "en",
+        isbn: "9781119061953",
+        attachments: [{
+          id: "attachment-probabilistic-method",
+          name: "Alon-Spencer-The-Probabilistic-Method.pdf",
+          relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf",
+          mediaType: "application/pdf",
+          size: 18_724_811,
+          sha256: "a".repeat(64),
+          availability: "repository"
+        }],
+        links: [{ targetId: null, role: "primarySource", preferredAttachmentId: "attachment-probabilistic-method" }]
+      },
+      createdAt: "2026-08-02T08:20:00.000Z",
+      updatedAt: "2026-08-02T08:20:00.000Z",
+      localAttachmentPaths: {}
+    },
+    {
+      projectId: "ramsey",
+      workId: "work-probabilistic-method",
+      item: {
+        id: "research-probabilistic-method-ramsey",
+        title: "The Probabilistic Method",
+        authors: ["Noga Alon", "Joel H. Spencer"],
+        year: 2016,
+        language: "en",
+        isbn: "9781119061953",
+        attachments: [{
+          id: "attachment-probabilistic-method-ramsey",
+          name: "Alon-Spencer-The-Probabilistic-Method.pdf",
+          relativePath: "references/Alon-Spencer-The-Probabilistic-Method.pdf",
+          mediaType: "application/pdf",
+          size: 18_724_811,
+          sha256: "a".repeat(64),
+          availability: "repository"
+        }],
+        links: [{ targetId: null, role: "reference" }]
+      },
+      createdAt: "2026-08-03T09:00:00.000Z",
+      updatedAt: "2026-08-03T09:00:00.000Z",
+      localAttachmentPaths: {}
+    },
+    {
+      projectId: "probability-method",
+      workId: "work-random-graphs-notes",
+      item: {
+        id: "research-random-graphs-notes",
+        title: "随机图中文讲义",
+        authors: [],
+        language: "zh-CN",
+        attachments: [{
+          id: "attachment-random-graphs-notes",
+          name: "随机图中文讲义.pdf",
+          mediaType: "application/pdf",
+          size: 62_104_322,
+          availability: "localOnly"
+        }],
+        links: []
+      },
+      createdAt: "2026-07-28T13:15:00.000Z",
+      updatedAt: "2026-07-28T13:15:00.000Z",
+      localAttachmentPaths: { "attachment-random-graphs-notes": `${DEMO_ROOT}\\references\\随机图中文讲义.pdf` }
+    }
+  ];
   let updateStatus: AppUpdateStatus = {
-    currentVersion: "0.11.0",
-    latestVersion: "0.11.0",
+    currentVersion: "1.0.0-rc.1",
+    latestVersion: "1.0.0-rc.1",
     autoCheck: true,
     autoDownload: true,
     state: "upToDate",
     githubCliAvailable: true,
     releaseUrl: "https://github.com/Ararataki-number-one/latex-project-manager/releases",
     checkedAt: new Date().toISOString(),
-    message: "当前已是最新版本 0.11.0。"
+    message: "当前已是最新版本 1.0.0-rc.1。"
   };
 
   const api: WorkbenchApi = {
     library: {
       list: async () => structuredClone(projects),
-      catalogStatus: async () => ({ schemaVersion: 3, persistent: true, databasePath: "演示索引", warnings: [] }),
+      catalogStatus: async () => ({ schemaVersion: 4, persistent: true, databasePath: "演示索引", warnings: [] }),
       scan: async () => structuredClone(candidates),
       import: async (candidate) => {
         const imported: ProjectSummary = {
@@ -562,6 +684,51 @@ export function createWorkbench(): DemoWorkbench {
       update: async (id, patch) => ({ id, name: patch.name ?? "演示集合", color: patch.color, projectIds: patch.projectIds ?? [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
       delete: async () => undefined
     },
+    projectStatus: {
+      list: async () => projects.map(projectStatusRecord),
+      get: async (projectId) => {
+        const project = projects.find((item) => item.id === projectId);
+        return project ? projectStatusRecord(project) : null;
+      },
+      refresh: async (projectId) => {
+        const project = projects.find((item) => item.id === projectId);
+        if (!project) throw new Error("演示项目不存在");
+        return { ...projectStatusRecord(project), freshness: "fresh" };
+      },
+      onEvent: () => () => undefined
+    },
+    operations: {
+      list: async () => [],
+      cancel: async () => readonlyError(),
+      retry: async () => readonlyError(),
+      onEvent: () => () => undefined
+    },
+    desktopMigration: {
+      preview: async () => null,
+      apply: async () => readonlyError()
+    },
+    catalogBackups: {
+      list: async () => [],
+      create: async () => null,
+      stageRestore: async () => ({
+        backup: {
+          path: "D:\\LaTeX资料库\\backups\\catalog-demo.db",
+          createdAt: new Date().toISOString(),
+          size: 1024,
+          kind: "manual" as const
+        },
+        restartRequired: true as const
+      })
+    },
+    projectBackups: {
+      preview: async (projectId) => ({ projectId, fileCount: 42, totalBytes: 12_000_000, localOnlyAttachmentCount: 0, excludedPaths: [".git", ".latex-workbench/build"] }),
+      create: async (projectId) => ({ id: "demo-snapshot", projectId, projectName: projects.find((item) => item.id === projectId)?.name ?? "演示项目", path: "D:\\LaTeX备份\\demo-snapshot", createdAt: new Date().toISOString(), size: 12_000_000, fileCount: 42, kind: "manual", verified: true }),
+      list: async () => [],
+      verify: async (_projectId, snapshotId) => ({ snapshotId, valid: true, checkedFiles: 42, errors: [] }),
+      restore: async (_projectId, snapshotId) => ({ snapshotId, destinationPath: "D:\\LaTeX恢复\\演示项目", restoredFiles: 42 }),
+      settings: async (projectId) => ({ projectId, frequency: "off", retainCount: 7, updatedAt: new Date(0).toISOString() }),
+      setSettings: async (projectId, settings) => ({ projectId, ...settings, updatedAt: new Date().toISOString() })
+    },
     smartViews: {
       list: async () => [],
       create: async (input) => ({ id: `view-${Date.now()}`, ...input, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
@@ -649,8 +816,13 @@ export function createWorkbench(): DemoWorkbench {
         updateStatus = { ...updateStatus, state: "downloaded", downloadedPath: "D:\\Downloads\\LaTeX-Project-Manager-Setup.exe", message: "演示模式：更新已下载。" };
         return structuredClone(updateStatus);
       },
+      cancel: async () => {
+        updateStatus = { ...updateStatus, state: "cancelled", phase: "cancelled", canRetry: true, message: "演示模式：更新下载已取消。" };
+        return structuredClone(updateStatus);
+      },
       install: async () => undefined,
-      openRelease: async () => undefined
+      openRelease: async () => undefined,
+      onEvent: () => () => undefined
     },
     references: {
       list: async () => structuredClone(referenceDocuments),
@@ -665,6 +837,61 @@ export function createWorkbench(): DemoWorkbench {
       remove: async (_projectId, relativePath) => {
         referenceDocuments = referenceDocuments.filter((item) => item.relativePath !== relativePath);
         return structuredClone(referenceDocuments);
+      }
+    },
+    research: {
+      list: async (projectId) => structuredClone(demoResearchItems.filter((entry) => entry.projectId === projectId)),
+      listGlobal: async () => structuredClone(demoResearchItems),
+      discoverLegacy: async () => [],
+      save: async (projectId, request) => {
+        const now = new Date().toISOString();
+        const previous = demoResearchItems.filter((entry) => entry.projectId === projectId);
+        const next = request.items.map((item) => {
+          const existing = previous.find((entry) => entry.item.id === item.id);
+          const matchingWork = demoResearchItems.find((entry) => item.attachments.some((attachment) => attachment.sha256 && entry.item.attachments.some((candidate) => candidate.sha256 === attachment.sha256)));
+          return {
+            projectId,
+            workId: existing?.workId ?? matchingWork?.workId ?? `work-${item.id}`,
+            item: structuredClone(item),
+            createdAt: existing?.createdAt ?? now,
+            updatedAt: now,
+            localAttachmentPaths: Object.fromEntries(Object.entries(request.localAttachmentPaths ?? {}).filter(([id]) => item.attachments.some((attachment) => attachment.id === id)))
+          } satisfies CatalogProjectResearchItem;
+        });
+        demoResearchItems = [...demoResearchItems.filter((entry) => entry.projectId !== projectId), ...next];
+        return structuredClone(next);
+      },
+      openAttachment: async () => undefined
+    },
+    researchSearch: {
+      index: async (projectId) => ({
+        projectId,
+        indexedFiles: 0,
+        skippedFiles: 0,
+        removedFiles: 0,
+        indexedAt: new Date().toISOString()
+      }),
+      indexAll: async () => [],
+      query: async (query, projectIds, limit = 40) => {
+        const normalized = query.trim().toLocaleLowerCase();
+        const allowed = projectIds ? new Set(projectIds) : null;
+        const hits: ResearchSearchHit[] = [];
+        for (const project of demoProjects) {
+          if (allowed && !allowed.has(project.id)) continue;
+          if (`${project.name} ${project.rootPath} ${project.tags.join(" ")}`.toLocaleLowerCase().includes(normalized)) {
+            hits.push({ id: `project:${project.id}`, projectId: project.id, kind: "project", title: project.name, detail: project.tags.join(" · "), score: 100 });
+          }
+        }
+        for (const entry of demoResearchItems) {
+          if (allowed && !allowed.has(entry.projectId)) continue;
+          const item = entry.item;
+          const text = `${item.title ?? ""} ${item.authors.join(" ")} ${item.doi ?? ""} ${item.arxivId ?? ""} ${item.attachments.map((attachment) => attachment.name).join(" ")}`.toLocaleLowerCase();
+          if (text.includes(normalized)) hits.push({ id: `research:${entry.projectId}:${item.id}`, projectId: entry.projectId, kind: "research", title: item.title || item.attachments[0]?.name || item.id, detail: item.authors.join("、"), score: 90 });
+        }
+        if (`概率方法 main.tex documentclass`.toLocaleLowerCase().includes(normalized) && (!allowed || allowed.has("probability-method"))) {
+          hits.push({ id: "file:probability-method:main.tex", projectId: "probability-method", kind: "file", title: "main.tex", detail: "主文档入口", relativePath: "main.tex", line: 1, score: 80 });
+        }
+        return structuredClone(hits.slice(0, limit));
       }
     },
     manifest: {
@@ -686,6 +913,7 @@ export function createWorkbench(): DemoWorkbench {
       plan: async () => readonlyError(),
       apply: async () => readonlyError(),
       undo: async () => readonlyError(),
+      history: async () => [],
       open: async () => undefined,
       reveal: async () => undefined,
       rename: async () => readonlyError(),
@@ -696,6 +924,8 @@ export function createWorkbench(): DemoWorkbench {
     templates: {
       list: async () => structuredClone(templates),
       create: async () => readonlyError(),
+      createFromProject: async () => readonlyError(),
+      delete: async () => readonlyError(),
       instantiate: async () => readonlyError()
     },
     toolchains: {
@@ -718,6 +948,29 @@ export function createWorkbench(): DemoWorkbench {
       openFile: async () => null
     },
     editor: {
+      status: async () => ({
+        available: true,
+        editor: "code",
+        executablePath: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+        source: "common",
+        latexWorkshop: { state: "installed", version: "10.10.0" }
+      }),
+      selectExecutable: async () => ({
+        available: true,
+        editor: "code",
+        executablePath: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+        source: "configured",
+        latexWorkshop: { state: "installed", version: "10.10.0" }
+      }),
+      resetExecutable: async () => ({
+        available: true,
+        editor: "code",
+        executablePath: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+        source: "common",
+        latexWorkshop: { state: "installed", version: "10.10.0" }
+      }),
+      openProject: async () => undefined,
+      openFile: async () => undefined,
       openExternal: async () => undefined
     }
   };
