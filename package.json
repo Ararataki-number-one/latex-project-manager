@@ -1,7 +1,8 @@
 {
   "name": "latex-workbench",
-  "version": "0.11.1",
+  "version": "1.0.0-rc.1",
   "private": true,
+  "author": "Ararataki-number-one",
   "description": "Windows-first local LaTeX project manager",
   "main": "out/main/index.js",
   "type": "module",
@@ -20,9 +21,11 @@
     "typecheck": "tsc --noEmit",
     "package:portable": "pnpm build && electron-builder --win portable --publish never",
     "package:windows": "pnpm build && electron-builder --win nsis portable --publish never",
+    "package:windows:rc": "pnpm build && electron-builder --config electron-builder.rc.cjs --win nsis portable --publish never",
     "package:windows:beta": "pnpm build && electron-builder --config electron-builder.beta.cjs --win nsis portable --publish never",
     "release:keygen": "node scripts/generate-release-signing-key.mjs",
-    "release:manifest": "node scripts/sign-release-manifest.mjs"
+    "release:manifest": "node scripts/sign-release-manifest.mjs",
+    "release:validate": "node scripts/validate-release-config.mjs"
   },
   "dependencies": {
     "chokidar": "5.0.0",
@@ -51,7 +54,8 @@
     "vitest": "4.1.10"
   },
   "config": {
-    "betaVersion": "1.0.0-beta.5"
+    "betaVersion": "1.0.0-beta.5",
+    "releaseChannel": "rc"
   },
   "build": {
     "appId": "local.latex.workbench",
@@ -71,11 +75,15 @@
       ]
     },
     "nsis": {
+      "artifactName": "LaTeX-Project-Manager-Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "LaTeX-Project-Manager-Portable-${version}-${arch}.${ext}"
     }
   },
   "packageManager": "pnpm@11.9.0"

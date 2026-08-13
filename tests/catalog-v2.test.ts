@@ -37,7 +37,8 @@ describe("catalog v2 settings and sync history", () => {
       syncPaused: true,
       theme: "dark",
       density: "compact",
-      glassMode: "off"
+      glassMode: "off",
+      editorExecutablePath: "C:\\Tools\\Code.exe"
     });
     for (let index = 0; index < 105; index += 1) {
       catalog.appendSyncEvent({
@@ -62,7 +63,8 @@ describe("catalog v2 settings and sync history", () => {
       syncPaused: true,
       theme: "dark",
       density: "compact",
-      glassMode: "off"
+      glassMode: "off",
+      editorExecutablePath: "C:\\Tools\\Code.exe"
     });
     expect(catalog.syncHistory("project-one", 200)).toHaveLength(100);
     expect(catalog.get("project-one")).toMatchObject({ lifecycle: "paused", protectionState: "localBackup" });

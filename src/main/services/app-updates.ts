@@ -45,6 +45,15 @@ export type UpdateAssetDownloader = (
   }
 ) => Promise<void>;
 
+export type WindowsUpdateInstallMode = "installed" | "portable";
+
+export interface UpdateInstallerLaunch {
+  path: string;
+  mode: WindowsUpdateInstallMode;
+}
+
+export type UpdateInstallerLauncher = (path: string, mode: WindowsUpdateInstallMode) => Promise<void>;
+
 interface GitHubReleaseAsset {
   name: string;
   size: number;
@@ -106,6 +115,8 @@ export interface AppUpdateServiceOptions {
   publicKeyPem?: string | Buffer;
   publisherVerifier?: (path: string, expectedCertificateSha256: string) => Promise<boolean>;
   downloader?: UpdateAssetDownloader;
+  installerLauncher?: UpdateInstallerLauncher;
+  installMode?: WindowsUpdateInstallMode;
   onStatus?: (status: AppUpdateStatus) => void;
 }
 
@@ -333,14 +344,67 @@ function defaultRunner(executable: string, cwd: string, args: string[], timeoutM
 
 interface ParsedVersion {
   core: number[];
-  beta: number | null;
+  prerelease: "beta" | "rc" | null;
+  prereleaseNumber: number | null;
+}
+
+export function detectWindowsUpdateInstallMode(env: NodeJS.ProcessEnv = process.env): WindowsUpdateInstallMode {
+  return env.PORTABLE_EXECUTABLE_FILE || env.PORTABLE_EXECUTABLE_DIR || env.PORTABLE_EXECUTABLE_APP_FILENAME
+    ? "portable"
+    : "installed";
+}
+
+/**
+ * Starts the verified installer without a shell and resolves only after the OS
+ * has acknowledged the process. An immediate non-zero exit is treated as a
+ * launch failure, so callers must not quit the application in that case.
+ */
+export function launchUpdateInstallerProcess(path: string): Promise<void> {
+  return new Promise((resolveLaunch, rejectLaunch) => {
+    const child = spawn(path, [], {
+      detached: true,
+      shell: false,
+      windowsHide: false,
+      stdio: "ignore"
+    });
+    let spawned = false;
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) rejectLaunch(error);
+      else resolveLaunch();
+    };
+    const timer = setTimeout(() => {
+      if (!spawned) {
+        finish(new Error("Windows 未确认更新安装器已经启动。"));
+        return;
+      }
+      child.unref();
+      finish();
+    }, 1_200);
+    timer.unref();
+    child.once("spawn", () => { spawned = true; });
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      const reason = error.code === "ENOENT" ? "安装器文件不存在"
+        : error.code === "EACCES" || error.code === "EPERM" ? "Windows 拒绝执行安装器"
+          : error.message;
+      finish(new Error(`无法启动更新安装器：${reason}`));
+    });
+    child.once("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(`更新安装器启动后立即失败（退出代码 ${code ?? "未知"}）。`));
+    });
+  });
 }
 
 function parseVersion(value: string): ParsedVersion | null {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(value.trim());
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-(beta|rc)\.(\d+))?$/.exec(value.trim());
   return match ? {
     core: match.slice(1, 4).map((part) => Number.parseInt(part, 10)),
-    beta: match[4] === undefined ? null : Number.parseInt(match[4], 10)
+    prerelease: match[4] === undefined ? null : match[4] as "beta" | "rc",
+    prereleaseNumber: match[5] === undefined ? null : Number.parseInt(match[5], 10)
   } : null;
 }
 
@@ -351,9 +415,15 @@ export function compareVersions(left: string, right: string): number {
   for (let index = 0; index < 3; index += 1) {
     if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
   }
-  if (a.beta === null && b.beta !== null) return 1;
-  if (a.beta !== null && b.beta === null) return -1;
-  if (a.beta !== b.beta) return (a.beta ?? 0) > (b.beta ?? 0) ? 1 : -1;
+  if (a.prerelease === null && b.prerelease !== null) return 1;
+  if (a.prerelease !== null && b.prerelease === null) return -1;
+  if (a.prerelease !== b.prerelease) {
+    const rank = (value: ParsedVersion["prerelease"]) => value === "rc" ? 2 : value === "beta" ? 1 : 3;
+    return rank(a.prerelease) > rank(b.prerelease) ? 1 : -1;
+  }
+  if (a.prereleaseNumber !== b.prereleaseNumber) {
+    return (a.prereleaseNumber ?? 0) > (b.prereleaseNumber ?? 0) ? 1 : -1;
+  }
   return 0;
 }
 
@@ -474,6 +544,8 @@ export class AppUpdateService {
   private readonly publicKeyPem: string | Buffer;
   private readonly publisherVerifier: (path: string, expectedCertificateSha256: string) => Promise<boolean>;
   private readonly downloader: UpdateAssetDownloader;
+  private readonly installerLauncher: UpdateInstallerLauncher;
+  private readonly installMode: WindowsUpdateInstallMode;
   private ghExecutable: string | null | undefined;
   private release: GitHubRelease | null = null;
   private manifest: SignedReleaseManifest | null = null;
@@ -493,6 +565,8 @@ export class AppUpdateService {
     this.publicKeyPem = options.publicKeyPem ?? RELEASE_MANIFEST_PUBLIC_KEY_PEM;
     this.publisherVerifier = options.publisherVerifier ?? defaultPublisherVerifier;
     this.downloader = options.downloader ?? defaultDownloader;
+    this.installerLauncher = options.installerLauncher ?? ((path) => launchUpdateInstallerProcess(path));
+    this.installMode = options.installMode ?? detectWindowsUpdateInstallMode(this.env);
     if (options.ghExecutable) this.ghExecutable = options.ghExecutable;
   }
 
@@ -588,7 +662,59 @@ export class AppUpdateService {
       || (await sha256(canonicalPath)).toLocaleLowerCase("en-US") !== this.asset.sha256.toLocaleLowerCase("en-US")) {
       throw new Error("更新安装包完整性已经变化，请重新下载。");
     }
+    if (this.asset.certificateSha256 && !await this.publisherVerifier(canonicalPath, this.asset.certificateSha256)) {
+      throw new Error("更新安装包发布者证书已经变化，请重新下载。");
+    }
+    this.setLive({
+      state: "downloaded",
+      phase: "ready",
+      downloadedPath: canonicalPath,
+      downloadedBytes: this.asset.size,
+      totalBytes: this.asset.size,
+      progressPercent: 100,
+      canCancel: false,
+      canRetry: false,
+      message: `版本 ${this.live.latestVersion ?? this.asset.name} 已验证，可以安装。`
+    }, true);
     return canonicalPath;
+  }
+
+  updateInstallMode(): WindowsUpdateInstallMode {
+    return this.installMode;
+  }
+
+  async launchDownloadedInstaller(): Promise<UpdateInstallerLaunch> {
+    const path = await this.downloadedInstaller();
+    await this.installerLauncher(path, this.installMode);
+    this.setLive({
+      state: "downloaded",
+      phase: "ready",
+      canCancel: false,
+      canRetry: false,
+      message: this.installMode === "portable"
+        ? "更新安装器已启动；当前便携版将在安装版接管后退出。"
+        : "更新安装器已启动；客户端可以安全退出。"
+    }, true);
+    await this.persistQueue;
+    return { path, mode: this.installMode };
+  }
+
+  async dispose(timeoutMs = 3_000): Promise<{ timedOut: boolean }> {
+    this.abortController?.abort();
+    let timedOut = false;
+    if (this.job) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        this.job.catch(() => undefined),
+        new Promise<void>((resolveTimeout) => {
+          timer = setTimeout(() => { timedOut = true; resolveTimeout(); }, Math.max(1, timeoutMs));
+          timer.unref();
+        })
+      ]);
+      if (timer) clearTimeout(timer);
+    }
+    if (!timedOut) await this.persistQueue;
+    return { timedOut };
   }
 
   private async performCheck(downloadIfAvailable: boolean): Promise<AppUpdateStatus> {

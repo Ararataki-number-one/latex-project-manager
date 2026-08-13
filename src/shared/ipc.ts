@@ -10,6 +10,9 @@ import type {
   CatalogProjectResearchItem,
   CatalogRestoreResult,
   DesktopEnvironmentStatus,
+  DesktopMigrationApplyOptions,
+  DesktopMigrationPreview,
+  DesktopMigrationResult,
   ExportResult,
   GitIdentity,
   GitHubAccountStatus,
@@ -21,6 +24,7 @@ import type {
   MigrationPreview,
   MobilePdfCandidate,
   MobileProjectIndex,
+  OperationSnapshot,
   ProjectManifest,
   ProjectCollection,
   ProjectBackupPreview,
@@ -36,6 +40,8 @@ import type {
   ProjectStorageInfo,
   ProjectSearchIndexStatus,
   ProjectSummary,
+  ProjectStatusChangedEvent,
+  ProjectStatusRecord,
   ReferenceDocumentInfo,
   LegacyResearchCandidate,
   ResearchSaveRequest,
@@ -70,6 +76,16 @@ export const IPC = {
   libraryCleanupPreview: "library:cleanup-preview",
   libraryCleanupApply: "library:cleanup-apply",
   libraryStorageInfo: "library:storage-info",
+  projectStatusList: "project-status:list",
+  projectStatusGet: "project-status:get",
+  projectStatusRefresh: "project-status:refresh",
+  projectStatusEvent: "project-status:event",
+  operationsList: "operations:list",
+  operationsCancel: "operations:cancel",
+  operationsRetry: "operations:retry",
+  operationsEvent: "operations:event",
+  desktopMigrationPreview: "desktop-migration:preview",
+  desktopMigrationApply: "desktop-migration:apply",
   catalogBackupsList: "catalog-backups:list",
   catalogBackupsCreate: "catalog-backups:create",
   catalogBackupsStageRestore: "catalog-backups:stage-restore",
@@ -171,6 +187,11 @@ export const IPC = {
   vscodeOpenProject: "vscode:open-project",
   vscodeOpenFile: "vscode:open-file",
   vscodeOpenProfile: "vscode:open-profile",
+  editorStatus: "editor:status",
+  editorSelectExecutable: "editor:select-executable",
+  editorResetExecutable: "editor:reset-executable",
+  editorOpenProject: "editor:open-project",
+  editorOpenFile: "editor:open-file",
   dialogOpenDirectory: "dialog:open-directory",
   dialogOpenFile: "dialog:open-file",
   editorOpenExternal: "editor:open-external"
@@ -201,6 +222,22 @@ export interface WorkbenchApi {
     create(input: Pick<ProjectCollection, "name" | "color" | "projectIds">): Promise<ProjectCollection>;
     update(id: string, patch: Partial<Pick<ProjectCollection, "name" | "color" | "projectIds">>): Promise<ProjectCollection>;
     delete(id: string): Promise<void>;
+  };
+  projectStatus: {
+    list(): Promise<ProjectStatusRecord[]>;
+    get(projectId: string): Promise<ProjectStatusRecord | null>;
+    refresh(projectId: string): Promise<ProjectStatusRecord>;
+    onEvent(listener: (event: ProjectStatusChangedEvent) => void): () => void;
+  };
+  operations: {
+    list(projectId?: string, limit?: number): Promise<OperationSnapshot[]>;
+    cancel(operationId: string): Promise<OperationSnapshot>;
+    retry(operationId: string): Promise<OperationSnapshot>;
+    onEvent(listener: (snapshot: OperationSnapshot) => void): () => void;
+  };
+  desktopMigration: {
+    preview(): Promise<DesktopMigrationPreview | null>;
+    apply(previewId: string, options: DesktopMigrationApplyOptions): Promise<DesktopMigrationResult>;
   };
   catalogBackups: {
     list(): Promise<CatalogBackupInfo[]>;
@@ -321,12 +358,17 @@ export interface WorkbenchApi {
     openFile(projectRoot: string, relativePath: string, line?: number): Promise<void>;
     openProfile(projectRoot: string, targetId: string, profileId: string): Promise<string>;
   };
+  editor: {
+    status(): Promise<VsCodeStatus>;
+    selectExecutable(): Promise<VsCodeStatus | null>;
+    resetExecutable(): Promise<VsCodeStatus>;
+    openProject(projectId: string): Promise<void>;
+    openFile(projectId: string, relativePath: string, line?: number, column?: number): Promise<void>;
+    openExternal(path: string, line?: number): Promise<void>;
+  };
   dialogs: {
     openDirectory(): Promise<string | null>;
     openFile(filters?: Array<{ name: string; extensions: string[] }>): Promise<string | null>;
-  };
-  editor: {
-    openExternal(path: string, line?: number): Promise<void>;
   };
 }
 

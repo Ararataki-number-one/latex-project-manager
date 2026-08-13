@@ -1,7 +1,9 @@
 node_modules/
 out/
+output/
 dist/
 dist-beta/
+dist-rc/
 dist-web/
 playwright-report/
 test-results/

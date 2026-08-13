@@ -11,8 +11,8 @@ import {
   Files,
   FolderKanban,
   FolderOpen,
-  GitFork,
   LoaderCircle,
+  ShieldCheck,
 } from "lucide-react";
 import type { WorkbenchApi } from "@/shared/ipc";
 import type {
@@ -142,7 +142,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       return;
     }
     try {
-      await vscode.openProject(project.rootPath);
+      await vscode.openProject(project.id);
       onNotify(isDemo ? "演示模式：已模拟打开 VS Code 项目" : vsCodeStatus?.latexWorkshop.state === "notFound"
         ? "已在 VS Code 中打开项目；未检测到 LaTeX Workshop，编译功能可能不可用"
         : "已在 VS Code 中打开项目");
@@ -174,7 +174,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       return;
     }
     try {
-      await vscode.openFile(project.rootPath, relativePath, line);
+      await vscode.openFile(project.id, relativePath, line);
       onNotify(isDemo ? "演示模式：已模拟打开 VS Code 文件" : `已在 VS Code 中打开 ${relativePath}${line ? `:${line}` : ""}`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "无法在 VS Code 中打开文件");
@@ -191,13 +191,13 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
         { id: "overview", label: "项目介绍", icon: BookOpen },
         { id: "files", label: "文件", icon: FolderOpen },
         { id: "references", label: "研究资料", icon: Files },
-        { id: "github", label: "同步", icon: GitFork }
+        { id: "github", label: "保护", icon: ShieldCheck }
       ]
     : [
         { id: "overview", label: "项目介绍", icon: BookOpen },
         { id: "files", label: "文件", icon: FolderOpen },
         { id: "references", label: "研究资料", icon: Files },
-        { id: "github", label: "同步", icon: GitFork }
+        { id: "github", label: "保护", icon: ShieldCheck }
       ];
 
   return (
@@ -217,7 +217,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       <nav className="project-tabs" aria-label="项目页面" role="tablist">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          return <button role="tab" aria-label={tab.id === "references" ? "原始文稿 · 研究资料" : tab.label} aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
+          return <button role="tab" aria-label={tab.label} title={tab.id === "github" ? "保护 · 同步与本地快照" : undefined} aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}><Icon size={17} /><span>{tab.label}</span></button>;
         })}
       </nav>
 
@@ -243,7 +243,7 @@ export function ProjectView({ api, project, isDemo, initialTab = "overview", onB
       )}
       {activeTab === "files" && <ProjectFiles api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
       {activeTab === "references" && <ReferencesTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
-      {activeTab === "github" && <GitHubSyncTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />}
+      {activeTab === "github" && <ProjectProtectionTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} onProjectChange={onProjectChange} />}
     </section>
   );
 }
@@ -351,9 +351,39 @@ function ProjectIntroductionTab({
         </section>
       </div>
       <MobilePdfCard api={api} project={project} manifest={manifest} isDemo={isDemo} onNotify={onNotify} />
-      <ProjectBackupCard api={api} project={project} onNotify={onNotify} onProjectChange={onProjectChange} />
     </main>
   );
+}
+
+function ProjectProtectionTab({
+  api,
+  project,
+  isDemo,
+  onNotify,
+  onProjectChange
+}: {
+  api: WorkbenchApi;
+  project: ProjectSummary;
+  isDemo: boolean;
+  onNotify: (message: string) => void;
+  onProjectChange?: (project: ProjectSummary) => void;
+}) {
+  const protectedLocally = project.protectionState === "localBackup" || project.protectionState === "both";
+  const protectedRemotely = project.protectionState === "github" || project.protectionState === "both";
+  return <main className="desktop-v1-protection-page" aria-label="项目保护">
+    <header className="desktop-v1-protection-heading">
+      <span><ShieldCheck size={23} /></span>
+      <div><p className="eyebrow">Protection</p><h2>项目保护</h2><p>本地快照负责恢复，GitHub 负责异地同步；两种方式彼此独立。</p></div>
+      <div className={`desktop-v1-protection-summary protection-${project.protectionState ?? "unprotected"}`}>
+        <strong>{project.protectionState === "both" ? "双重保护" : project.protectionState === "github" ? "GitHub 已连接" : project.protectionState === "localBackup" ? "已有本地快照" : "尚未保护"}</strong>
+        <span>{protectedLocally ? "本地快照可用" : "未建立本地快照"} · {protectedRemotely ? "GitHub 已连接" : "未连接 GitHub"}</span>
+      </div>
+    </header>
+    <section className="desktop-v1-protection-stack">
+      <ProjectBackupCard api={api} project={project} onNotify={onNotify} onProjectChange={onProjectChange} />
+      <GitHubSyncTab api={api} project={project} isDemo={isDemo} onNotify={onNotify} />
+    </section>
+  </main>;
 }
 
 function ProjectBackupCard({

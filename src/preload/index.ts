@@ -22,6 +22,30 @@ const api: WorkbenchApi = {
     applyTemporaryCleanup: (projectId, planId) => ipcRenderer.invoke(IPC.libraryCleanupApply, projectId, planId),
     storageInfo: (projectId) => ipcRenderer.invoke(IPC.libraryStorageInfo, projectId)
   },
+  projectStatus: {
+    list: () => ipcRenderer.invoke(IPC.projectStatusList),
+    get: (projectId) => ipcRenderer.invoke(IPC.projectStatusGet, projectId),
+    refresh: (projectId) => ipcRenderer.invoke(IPC.projectStatusRefresh, projectId),
+    onEvent: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value);
+      ipcRenderer.on(IPC.projectStatusEvent, handler);
+      return () => ipcRenderer.removeListener(IPC.projectStatusEvent, handler);
+    }
+  },
+  operations: {
+    list: (projectId, limit) => ipcRenderer.invoke(IPC.operationsList, projectId, limit),
+    cancel: (operationId) => ipcRenderer.invoke(IPC.operationsCancel, operationId),
+    retry: (operationId) => ipcRenderer.invoke(IPC.operationsRetry, operationId),
+    onEvent: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value);
+      ipcRenderer.on(IPC.operationsEvent, handler);
+      return () => ipcRenderer.removeListener(IPC.operationsEvent, handler);
+    }
+  },
+  desktopMigration: {
+    preview: () => ipcRenderer.invoke(IPC.desktopMigrationPreview),
+    apply: (previewId, options) => ipcRenderer.invoke(IPC.desktopMigrationApply, previewId, options)
+  },
   collections: {
     list: () => ipcRenderer.invoke(IPC.collectionsList),
     create: (input) => ipcRenderer.invoke(IPC.collectionsCreate, input),
@@ -162,6 +186,12 @@ const api: WorkbenchApi = {
     openFile: (filters) => ipcRenderer.invoke(IPC.dialogOpenFile, filters)
   },
   editor: {
+    status: () => ipcRenderer.invoke(IPC.editorStatus),
+    selectExecutable: () => ipcRenderer.invoke(IPC.editorSelectExecutable),
+    resetExecutable: () => ipcRenderer.invoke(IPC.editorResetExecutable),
+    openProject: (projectId) => ipcRenderer.invoke(IPC.editorOpenProject, projectId),
+    openFile: (projectId, relativePath, line, column) =>
+      ipcRenderer.invoke(IPC.editorOpenFile, projectId, relativePath, line, column),
     openExternal: (path, line) => ipcRenderer.invoke(IPC.editorOpenExternal, path, line)
   }
 };

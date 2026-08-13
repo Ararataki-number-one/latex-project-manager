@@ -4,10 +4,14 @@ import { _electron as electron } from "@playwright/test";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 const sourceBuild = process.env.ELECTRON_SMOKE_SOURCE === "1";
-const executablePath = sourceBuild
-  ? join(projectRoot, "node_modules", "electron", "dist", "electron.exe")
-  : join(projectRoot, "dist", "win-unpacked", "LaTeX 项目管理器.exe");
-const userData = await mkdtemp(join(projectRoot, "test-results", "electron-smoke-"));
+const executablePath = process.env.ELECTRON_SMOKE_EXECUTABLE
+  ? resolve(process.env.ELECTRON_SMOKE_EXECUTABLE)
+  : sourceBuild
+    ? join(projectRoot, "node_modules", "electron", "dist", "electron.exe")
+    : join(projectRoot, "dist", "win-unpacked", "LaTeX 项目管理器.exe");
+const userData = process.env.ELECTRON_SMOKE_USER_DATA
+  ? resolve(process.env.ELECTRON_SMOKE_USER_DATA)
+  : await mkdtemp(join(projectRoot, "test-results", "electron-smoke-"));
 const application = await electron.launch({
   executablePath,
   args: [...(sourceBuild ? [projectRoot] : []), `--user-data-dir=${userData}`]

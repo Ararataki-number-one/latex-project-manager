@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowLeft,
   BookCopy,
   BookOpenText,
   ChevronRight,
@@ -63,6 +64,7 @@ export function TemplateLibraryView({
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<CategoryFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -102,6 +104,19 @@ export function TemplateLibraryView({
   }
 
   useEffect(() => { void refresh(); }, [api]);
+
+  useEffect(() => {
+    setDetailOpen(false);
+  }, [category, query]);
+
+  useEffect(() => {
+    if (!detailOpen) return;
+    const closeDetailOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !createOpen && !saveOpen && !deleteTarget) setDetailOpen(false);
+    };
+    window.addEventListener("keydown", closeDetailOnEscape);
+    return () => window.removeEventListener("keydown", closeDetailOnEscape);
+  }, [createOpen, deleteTarget, detailOpen, saveOpen]);
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -220,7 +235,7 @@ export function TemplateLibraryView({
         {items.map((template) => {
           const Icon = CATEGORY_ICONS[template.category];
           const active = selected?.id === template.id;
-          return <button key={template.id} type="button" role="option" aria-selected={active} className={`template-library-row ${active ? "selected" : ""}`} onClick={() => setSelectedId(template.id)} onDoubleClick={() => openCreate(template)}>
+          return <button key={template.id} type="button" role="option" aria-selected={active} className={`template-library-row ${active ? "selected" : ""}`} onClick={() => { setSelectedId(template.id); setDetailOpen(true); }} onDoubleClick={() => openCreate(template)}>
             <span className="template-library-row-icon"><Icon size={20} /></span>
             <span className="template-library-row-copy"><strong>{template.name}</strong><small>{CATEGORY_LABELS[template.category]} · {template.className ?? "通用文档类"}</small></span>
             <ChevronRight size={16} />
@@ -241,12 +256,13 @@ export function TemplateLibraryView({
         {(["all", "article", "book", "presentation", "other"] as CategoryFilter[]).map((item) => <button key={item} type="button" className={category === item ? "active" : ""} aria-pressed={category === item} onClick={() => setCategory(item)}>{item === "all" ? "全部" : CATEGORY_LABELS[item]}</button>)}
       </div>
     </div>
-    <div className="template-library-layout">
+    <div className={`template-library-layout ${detailOpen ? "detail-open" : ""}`}>
       <div className="template-library-catalog">
         {loading ? <div className="template-library-empty"><RefreshCw size={24} className="spin" /><p>正在准备模板库…</p></div> : filtered.length === 0 ? <div className="template-library-empty"><Search size={25} /><h2>没有符合条件的模板</h2><p>尝试清除搜索或选择“全部”。</p></div> : <>{renderGroup("内置模板", "随客户端提供的安全起点", builtIns)}{renderGroup("我的模板", "从本机项目保存，不会修改原项目", userTemplates)}</>}
       </div>
-      <aside className="template-library-inspector" aria-label="模板详情">
+      <aside className={`template-library-inspector ${detailOpen ? "is-open" : ""}`} aria-label="模板详情">
         {selected ? <>
+          <button type="button" className="template-library-inspector-back" onClick={() => setDetailOpen(false)}><ArrowLeft size={17} />返回模板列表</button>
           <span className="template-library-source">{selected.source === "builtin" ? <><Sparkles size={14} />内置模板</> : <><BookCopy size={14} />我的模板</>}</span>
           <div className="template-library-preview"><span>{(() => { const Icon = CATEGORY_ICONS[selected.category]; return <Icon size={34} />; })()}</span></div>
           <h2>{selected.name}</h2>

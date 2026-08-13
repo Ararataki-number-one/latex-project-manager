@@ -115,4 +115,72 @@ describe("project backups", () => {
     await service.create(project, []);
     expect(await service.list(project.id)).toHaveLength(1);
   });
+
+  it("rejects a snapshot when a source changes during the copy and preserves known-good backups", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "latex-project-backup-race-"));
+    temporaryDirectories.push(temporary);
+    const root = join(temporary, "project");
+    const backupRoot = join(temporary, "backups");
+    await mkdir(root, { recursive: true });
+    const source = join(root, "main.tex");
+    await writeFile(source, "A".repeat(64 * 1024 * 1024));
+    const project: ProjectSummary = {
+      id: "project-race", name: "Project Race", rootPath: root, targetCount: 1, classNames: [],
+      favorite: false, archived: false, trashed: false, tags: [], pathAvailable: true
+    };
+    const service = new ProjectBackupService(backupRoot);
+    const knownGood = await service.create(project, []);
+    const create = service.create(project, []);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await writeFile(source, "changed externally");
+
+    await expect(create).rejects.toThrow(/外部修改|发生变化/);
+    expect(await service.list(project.id)).toEqual([expect.objectContaining({ id: knownGood.id, verified: true })]);
+  }, 30_000);
+
+  it("removes abandoned temporary snapshot directories without touching verified snapshots", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "latex-project-backup-temp-"));
+    temporaryDirectories.push(temporary);
+    const root = join(temporary, "project");
+    const backupRoot = join(temporary, "backups");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "main.tex"), "test");
+    const project: ProjectSummary = {
+      id: "project-temp", name: "Project Temp", rootPath: root, targetCount: 1, classNames: [],
+      favorite: false, archived: false, trashed: false, tags: [], pathAvailable: true
+    };
+    const service = new ProjectBackupService(backupRoot);
+    const snapshot = await service.create(project, []);
+    const abandoned = join(backupRoot, project.id, "abandoned.tmp");
+    await mkdir(abandoned, { recursive: true });
+    await writeFile(join(abandoned, "partial"), "partial");
+
+    expect(await service.cleanupTemporaryArtifacts(project.id)).toBe(1);
+    expect(await service.list(project.id)).toEqual([expect.objectContaining({ id: snapshot.id, verified: true })]);
+    expect(await service.dispose()).toMatchObject({ timedOut: false });
+    await expect(service.create(project, [])).rejects.toThrow(/正在关闭/);
+  });
+
+  it("tracks and aborts restore work without publishing a partial destination", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "latex-project-backup-restore-cancel-"));
+    temporaryDirectories.push(temporary);
+    const root = join(temporary, "project");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "main.tex"), "test");
+    const project: ProjectSummary = {
+      id: "project-restore-cancel", name: "Restore Cancel", rootPath: root, targetCount: 1, classNames: [],
+      favorite: false, archived: false, trashed: false, tags: [], pathAvailable: true
+    };
+    const service = new ProjectBackupService(join(temporary, "backups"));
+    const snapshot = await service.create(project, []);
+    const destination = join(temporary, "cancelled-restore");
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(service.restore(project.id, snapshot.id, destination, controller.signal)).rejects.toMatchObject({
+      name: "AbortError"
+    });
+    await expect(readFile(join(destination, "main.tex"), "utf8")).rejects.toThrow();
+    expect(await service.dispose()).toMatchObject({ timedOut: false });
+  });
 });

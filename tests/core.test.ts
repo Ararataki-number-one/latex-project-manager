@@ -154,12 +154,13 @@ describe("scanner", () => {
 });
 
 describe("catalog fallback", () => {
-  it("continues with an in-memory index when SQLite cannot be opened", async () => {
+  it("exposes reads but blocks every persistent write when SQLite cannot be opened", async () => {
     const root = await temporaryDirectory();
     const blocker = join(root, "blocker");
     await writeFile(blocker, "not a directory");
     const catalog = new ProjectCatalog(join(blocker, "catalog.db"));
     expect(catalog.persistent).toBe(false);
+    expect(catalog.status()).toMatchObject({ mode: "unavailable", writable: false });
     const summary: ProjectSummary = {
       id: "project-test",
       name: "Test",
@@ -172,9 +173,12 @@ describe("catalog fallback", () => {
       tags: ["notes"],
       pathAvailable: true
     };
-    catalog.upsert(summary);
-    expect(catalog.list()).toMatchObject([{ id: "project-test", pathAvailable: true }]);
-    expect(catalog.update("project-test", { favorite: true }).favorite).toBe(true);
+    expect(() => catalog.upsert(summary)).toThrow(/not writable/i);
+    expect(catalog.list()).toEqual([]);
+    expect(() => catalog.setRuntimeSettings({
+      closeToTray: true, onboardingCompleted: false, syncPaused: false,
+      theme: "system", density: "comfortable", glassMode: "auto"
+    })).toThrow(/not writable/i);
   });
 });
 

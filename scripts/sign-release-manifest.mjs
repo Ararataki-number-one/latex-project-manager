@@ -26,8 +26,8 @@ const tag = argument("--tag") ?? (version ? `v${version}` : undefined);
 const privateKeyPath = argument("--private-key");
 const output = resolve(argument("--output") ?? "dist/release-manifest.json");
 const assetArguments = argument("--asset", true);
-if (!version || !/^\d+\.\d+\.\d+(?:-beta\.\d+)?$/.test(version) || tag !== `v${version}` || !privateKeyPath || !assetArguments.length) {
-  throw new Error("Usage: --version X.Y.Z[-beta.N] --tag vX.Y.Z[-beta.N] --private-key path --output path --asset kind=path");
+if (!version || !/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/.test(version) || tag !== `v${version}` || !privateKeyPath || !assetArguments.length) {
+  throw new Error("Usage: --version X.Y.Z[-beta.N|-rc.N] --tag vX.Y.Z[-beta.N|-rc.N] --private-key path --output path --asset kind=path");
 }
 
 const allowedKinds = new Set(["windows-setup", "windows-portable", "android-apk"]);

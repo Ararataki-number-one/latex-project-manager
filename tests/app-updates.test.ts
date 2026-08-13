@@ -5,7 +5,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AppUpdateService, compareVersions, type UpdateCommandRunner } from "../src/main/services/app-updates";
+import {
+  AppUpdateService,
+  compareVersions,
+  detectWindowsUpdateInstallMode,
+  type UpdateCommandRunner
+} from "../src/main/services/app-updates";
 
 const temporaryDirectories: string[] = [];
 
@@ -20,6 +25,15 @@ describe("application updates", () => {
     expect(compareVersions("2.0.0", "10.0.0")).toBe(-1);
     expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBe(1);
     expect(compareVersions("1.0.0-beta.9", "1.0.0")).toBe(-1);
+    expect(compareVersions("1.0.0-rc.1", "1.0.0-beta.9")).toBe(1);
+    expect(compareVersions("1.0.0-rc.2", "1.0.0-rc.1")).toBe(1);
+    expect(compareVersions("1.0.0", "1.0.0-rc.2")).toBe(1);
+  });
+
+  it("recognizes electron-builder portable and installed update modes", () => {
+    expect(detectWindowsUpdateInstallMode({})).toBe("installed");
+    expect(detectWindowsUpdateInstallMode({ PORTABLE_EXECUTABLE_FILE: "D:\\Apps\\LaTeX.exe" })).toBe("portable");
+    expect(detectWindowsUpdateInstallMode({ PORTABLE_EXECUTABLE_DIR: "D:\\Apps" })).toBe("portable");
   });
 
   it("selects the newest beta prerelease without changing the stable channel", async () => {
@@ -130,11 +144,18 @@ describe("application updates", () => {
       }
       throw new Error(`Unexpected gh command: ${args.join(" ")}`);
     };
+    const installerLaunches: Array<{ path: string; mode: string }> = [];
+    let failInstallerLaunch = false;
     const service = new AppUpdateService(directory, {
       currentVersion: "0.3.0",
       ghExecutable: "gh.exe",
       runner,
-      publicKeyPem: publicKey
+      publicKeyPem: publicKey,
+      installMode: "portable",
+      installerLauncher: async (path, mode) => {
+        installerLaunches.push({ path, mode });
+        if (failInstallerLaunch) throw new Error("installer was blocked");
+      }
     });
 
     const available = await service.check(false);
@@ -145,6 +166,11 @@ describe("application updates", () => {
     expect(downloaded.state).toBe("downloaded");
     expect(downloaded.downloadedPath).toContain(assetName);
     expect(await readFile(await service.downloadedInstaller())).toEqual(bytes);
+    await expect(service.launchDownloadedInstaller()).resolves.toMatchObject({ mode: "portable", path: expect.stringContaining(assetName) });
+    expect(installerLaunches).toEqual([{ path: expect.stringContaining(assetName), mode: "portable" }]);
+    failInstallerLaunch = true;
+    await expect(service.launchDownloadedInstaller()).rejects.toThrow("installer was blocked");
+    expect((await service.status()).state).toBe("downloaded");
     expect(commands.some((command) => command.includes("--clobber"))).toBe(true);
     await service.download();
     expect(commands.filter((command) => command[0] === "release" && command[1] === "download" && command.includes(assetName))).toHaveLength(1);

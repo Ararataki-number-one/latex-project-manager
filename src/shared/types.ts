@@ -128,6 +128,143 @@ export interface CatalogStatus {
   databasePath: string;
   backupPath?: string;
   warnings: string[];
+  /** readOnly is used when a newer catalog is opened by an older client. */
+  mode?: "readWrite" | "readOnly" | "unavailable";
+  writable?: boolean;
+  databaseSchemaVersion?: number;
+  readOnlyReason?: string;
+}
+
+export type OperationSnapshotKind =
+  | "import"
+  | "sync"
+  | "backup"
+  | "restore"
+  | "file"
+  | "cleanup"
+  | "export"
+  | "update"
+  | "index"
+  | "migration";
+
+export type OperationSnapshotState =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "succeeded"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "blocked";
+
+export interface OperationSnapshot {
+  id: string;
+  projectId?: string;
+  kind: OperationSnapshotKind;
+  state: OperationSnapshotState;
+  title: string;
+  message?: string;
+  failureCode?: string;
+  recoveryAction?: string;
+  progress?: number;
+  cancellable?: boolean;
+  retryable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export type ProjectHealthState = "healthy" | "attention" | "error";
+
+export interface ProjectStatusSnapshot {
+  projectId: string;
+  pathAvailable: boolean;
+  storageBytes?: number;
+  fileCount?: number;
+  mainPdfPath?: string;
+  mainPdfSize?: number;
+  researchCount?: number;
+  syncState?: GitHubSyncState;
+  syncMessage?: string;
+  health: ProjectHealthState;
+  issues: string[];
+  capturedAt: string;
+}
+
+export type ProjectStatusFreshness = "cached" | "fresh" | "stale";
+
+export interface ProjectStatusRecord {
+  snapshot: ProjectStatusSnapshot;
+  freshness: ProjectStatusFreshness;
+  refreshError?: string;
+}
+
+export interface ProjectStatusChangedEvent {
+  type: "changed";
+  projectId: string;
+  record: ProjectStatusRecord;
+}
+
+export type DesktopMigrationSourceKind = "stable0111" | "beta";
+
+export interface DesktopMigrationSource {
+  kind: DesktopMigrationSourceKind;
+  databasePath: string;
+  label?: string;
+}
+
+export type DesktopMigrationCandidateAction = "import" | "merge" | "conflict";
+
+export interface DesktopMigrationProjectCandidate {
+  id: string;
+  sourceKind: DesktopMigrationSourceKind;
+  sourceDatabasePath: string;
+  sourceProject: ProjectSummary;
+  canonicalRoot: string;
+  action: DesktopMigrationCandidateAction;
+  destinationProjectId?: string;
+  conflictId?: string;
+}
+
+export type DesktopMigrationConflictKind = "sameRootDifferentProject" | "sameProjectDifferentRoot";
+export type DesktopMigrationConflictResolution = "keepTarget" | "useSource";
+
+export interface DesktopMigrationConflict {
+  id: string;
+  kind: DesktopMigrationConflictKind;
+  canonicalRoot: string;
+  sourceProject: ProjectSummary;
+  destinationProject: ProjectSummary;
+  sourceKind: DesktopMigrationSourceKind;
+  resolutionOptions: DesktopMigrationConflictResolution[];
+}
+
+export interface DesktopMigrationPreview {
+  id: string;
+  createdAt: string;
+  targetDatabasePath: string;
+  sources: Array<DesktopMigrationSource & { schemaVersion: number; fingerprint: string }>;
+  projects: DesktopMigrationProjectCandidate[];
+  conflicts: DesktopMigrationConflict[];
+  warnings: string[];
+}
+
+export interface DesktopMigrationApplyOptions {
+  resolutions: Record<string, DesktopMigrationConflictResolution>;
+}
+
+export interface DesktopMigrationResult {
+  backupPath: string;
+  imported: number;
+  merged: number;
+  skipped: number;
+  appliedAt: string;
+  localResources: {
+    copied: number;
+    conflicts: string[];
+    failures: string[];
+  };
+  warnings: string[];
 }
 
 export interface ProjectCollection {
@@ -339,6 +476,10 @@ export interface AppRuntimeSettings {
   theme: "system" | "light" | "dark";
   density: "comfortable" | "compact";
   glassMode: "auto" | "full" | "off";
+  /** Optional user-selected VS Code-compatible executable. */
+  editorExecutablePath?: string;
+  /** Set only after the user successfully applies or explicitly finishes the one-time desktop catalog migration. */
+  desktopMigrationCompletedAt?: string;
 }
 
 export interface DesktopEnvironmentStatus {

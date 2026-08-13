@@ -8,6 +8,7 @@ import type {
   MigrationPreview,
   MobileProjectIndex,
   ProjectManifest,
+  ProjectStatusRecord,
   ProjectSummary,
   ReferenceDocumentInfo,
   ResearchSearchHit,
@@ -365,10 +366,55 @@ function joinDemoPath(root: string, path: string) {
   return `${root.replace(/[\\/]$/, "")}\\${path.replaceAll("/", "\\")}`;
 }
 
+function createDemoProjectLibrary(): ProjectSummary[] {
+  const requestedCount = Number.parseInt(new URLSearchParams(window.location.search).get("projectCount") ?? "", 10);
+  const count = Number.isFinite(requestedCount) ? Math.min(1_000, Math.max(demoProjects.length, requestedCount)) : demoProjects.length;
+  const projects = structuredClone(demoProjects);
+  for (let index = projects.length; index < count; index += 1) {
+    const suffix = String(index).padStart(4, "0");
+    projects.push({
+      id: `performance-project-${index}`,
+      name: `性能项目 ${suffix}`,
+      rootPath: `D:\\LaTeX资料库\\性能项目-${suffix}`,
+      targetCount: 1,
+      classNames: ["article"],
+      lastOpenedAt: `2020-01-${String(index % 28 + 1).padStart(2, "0")}T00:00:00.000Z`,
+      favorite: false,
+      archived: false,
+      trashed: false,
+      tags: ["性能门禁"],
+      pathAvailable: true
+    });
+  }
+  return projects;
+}
+
 export function createWorkbench(): DemoWorkbench {
   if (window.workbench) return { api: window.workbench, isDemo: false };
 
-  let projects = structuredClone(demoProjects);
+  let projects = createDemoProjectLibrary();
+  const projectStatusRecord = (project: ProjectSummary): ProjectStatusRecord => {
+    const index = Math.max(0, projects.findIndex((item) => item.id === project.id));
+    const pathAvailable = project.pathAvailable !== false;
+    const issues = pathAvailable ? [] : ["项目路径不可访问"];
+    return {
+      freshness: "cached",
+      snapshot: {
+        projectId: project.id,
+        pathAvailable,
+        storageBytes: (index + 1) * 18_742_930,
+        fileCount: 42 + index * 17,
+        mainPdfPath: pathAvailable ? "main.pdf" : undefined,
+        mainPdfSize: pathAvailable ? 2_400_000 + index * 300_000 : undefined,
+        researchCount: project.id === "probability-method" ? 2 : 0,
+        syncState: project.id === "probability-method" ? "changes" : "notConfigured",
+        syncMessage: project.id === "probability-method" ? "2 个文件等待自动同步。" : "尚未连接 GitHub",
+        health: pathAvailable ? "healthy" : "error",
+        issues,
+        capturedAt: "2026-08-12T08:00:00.000Z"
+      }
+    };
+  };
   const readonlyError = () => Promise.reject(new Error("浏览器演示模式不会写入本地文件"));
   let githubStatus: GitHubSyncStatus = {
     available: true,
@@ -497,15 +543,15 @@ export function createWorkbench(): DemoWorkbench {
     }
   ];
   let updateStatus: AppUpdateStatus = {
-    currentVersion: "0.11.0",
-    latestVersion: "0.11.0",
+    currentVersion: "1.0.0-rc.1",
+    latestVersion: "1.0.0-rc.1",
     autoCheck: true,
     autoDownload: true,
     state: "upToDate",
     githubCliAvailable: true,
     releaseUrl: "https://github.com/Ararataki-number-one/latex-project-manager/releases",
     checkedAt: new Date().toISOString(),
-    message: "当前已是最新版本 0.11.0。"
+    message: "当前已是最新版本 1.0.0-rc.1。"
   };
 
   const api: WorkbenchApi = {
@@ -637,6 +683,29 @@ export function createWorkbench(): DemoWorkbench {
       create: async (input) => ({ id: `collection-${Date.now()}`, ...input, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
       update: async (id, patch) => ({ id, name: patch.name ?? "演示集合", color: patch.color, projectIds: patch.projectIds ?? [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }),
       delete: async () => undefined
+    },
+    projectStatus: {
+      list: async () => projects.map(projectStatusRecord),
+      get: async (projectId) => {
+        const project = projects.find((item) => item.id === projectId);
+        return project ? projectStatusRecord(project) : null;
+      },
+      refresh: async (projectId) => {
+        const project = projects.find((item) => item.id === projectId);
+        if (!project) throw new Error("演示项目不存在");
+        return { ...projectStatusRecord(project), freshness: "fresh" };
+      },
+      onEvent: () => () => undefined
+    },
+    operations: {
+      list: async () => [],
+      cancel: async () => readonlyError(),
+      retry: async () => readonlyError(),
+      onEvent: () => () => undefined
+    },
+    desktopMigration: {
+      preview: async () => null,
+      apply: async () => readonlyError()
     },
     catalogBackups: {
       list: async () => [],
@@ -879,6 +948,29 @@ export function createWorkbench(): DemoWorkbench {
       openFile: async () => null
     },
     editor: {
+      status: async () => ({
+        available: true,
+        editor: "code",
+        executablePath: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+        source: "common",
+        latexWorkshop: { state: "installed", version: "10.10.0" }
+      }),
+      selectExecutable: async () => ({
+        available: true,
+        editor: "code",
+        executablePath: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+        source: "configured",
+        latexWorkshop: { state: "installed", version: "10.10.0" }
+      }),
+      resetExecutable: async () => ({
+        available: true,
+        editor: "code",
+        executablePath: "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+        source: "common",
+        latexWorkshop: { state: "installed", version: "10.10.0" }
+      }),
+      openProject: async () => undefined,
+      openFile: async () => undefined,
       openExternal: async () => undefined
     }
   };

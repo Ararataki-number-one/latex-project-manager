@@ -50,6 +50,13 @@ interface SnapshotVerificationRecord {
   verifiedAt: string;
 }
 
+interface BackupSourceFile {
+  sourcePath: string;
+  relativePath: string;
+  size: number;
+  mtimeMs: number;
+}
+
 const MANIFEST_NAME = ".latex-backup.json";
 const VERIFICATION_NAME = ".latex-backup-verified.json";
 const SETTINGS_NAME = "settings.json";
@@ -122,9 +129,41 @@ async function copyFileSynced(source: string, destination: string): Promise<void
   }
 }
 
-async function collectProjectFiles(root: string): Promise<{ files: Array<{ sourcePath: string; relativePath: string; size: number }>; excluded: string[] }> {
+function backupCancelled(): Error {
+  const error = new Error("项目备份已取消");
+  error.name = "AbortError";
+  return error;
+}
+
+function assertNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw backupCancelled();
+}
+
+async function copyStableSource(source: BackupSourceFile, destination: string, signal?: AbortSignal): Promise<string> {
+  assertNotCancelled(signal);
+  const before = await stat(source.sourcePath);
+  if (!before.isFile() || before.size !== source.size || before.mtimeMs !== source.mtimeMs) {
+    throw new Error(`备份源文件已被外部修改，请重新创建快照：${source.relativePath}`);
+  }
+  const beforeHash = await hashFile(source.sourcePath);
+  assertNotCancelled(signal);
+  await copyFileSynced(source.sourcePath, destination);
+  assertNotCancelled(signal);
+  const [after, afterHash, copiedHash] = await Promise.all([
+    stat(source.sourcePath),
+    hashFile(source.sourcePath),
+    hashFile(destination)
+  ]);
+  if (!after.isFile() || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+    || afterHash !== beforeHash || copiedHash !== beforeHash) {
+    throw new Error(`备份期间源文件发生变化，未生成不一致的快照：${source.relativePath}`);
+  }
+  return copiedHash;
+}
+
+async function collectProjectFiles(root: string): Promise<{ files: BackupSourceFile[]; excluded: string[] }> {
   const canonicalRoot = await realpath(root);
-  const files: Array<{ sourcePath: string; relativePath: string; size: number }> = [];
+  const files: BackupSourceFile[] = [];
   const excluded: string[] = [];
   const visit = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -144,7 +183,7 @@ async function collectProjectFiles(root: string): Promise<{ files: Array<{ sourc
         if (!isInside(canonicalRoot, canonical)) throw new Error(`Backup path escapes the project: ${relativePath}`);
         await visit(canonical);
       } else if (details.isFile()) {
-        files.push({ sourcePath: absolute, relativePath, size: details.size });
+        files.push({ sourcePath: absolute, relativePath, size: details.size, mtimeMs: details.mtimeMs });
       }
     }
   };
@@ -181,6 +220,11 @@ function hashText(value: string): string {
 }
 
 export class ProjectBackupService {
+  private readonly activeTasks = new Set<Promise<unknown>>();
+  private readonly activeControllers = new Set<AbortController>();
+  private readonly activeProjects = new Set<string>();
+  private disposed = false;
+
   constructor(private readonly baseDirectory: string) {}
 
   async preview(project: ProjectSummary, research: CatalogProjectResearchItem[]): Promise<ProjectBackupPreview> {
@@ -207,8 +251,37 @@ export class ProjectBackupService {
   async create(
     project: ProjectSummary,
     research: CatalogProjectResearchItem[],
-    kind: BackupSnapshot["kind"] = "manual"
+    kind: BackupSnapshot["kind"] = "manual",
+    signal?: AbortSignal
   ): Promise<BackupSnapshot> {
+    if (this.disposed) throw new Error("备份服务正在关闭，不能开始新的快照");
+    if (this.activeProjects.has(project.id)) throw new Error("该项目已有备份任务正在运行");
+    const controller = new AbortController();
+    const abortFromCaller = (): void => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener("abort", abortFromCaller, { once: true });
+    this.activeProjects.add(project.id);
+    this.activeControllers.add(controller);
+    const task = this.performCreate(project, research, kind, controller.signal);
+    this.activeTasks.add(task);
+    try {
+      return await task;
+    } finally {
+      this.activeTasks.delete(task);
+      this.activeControllers.delete(controller);
+      this.activeProjects.delete(project.id);
+      signal?.removeEventListener("abort", abortFromCaller);
+    }
+  }
+
+  private async performCreate(
+    project: ProjectSummary,
+    research: CatalogProjectResearchItem[],
+    kind: BackupSnapshot["kind"],
+    signal: AbortSignal
+  ): Promise<BackupSnapshot> {
+    await this.cleanupTemporaryArtifacts(project.id);
+    assertNotCancelled(signal);
     const id = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
     const projectDirectory = join(this.baseDirectory, safeSegment(project.id));
     const destination = join(projectDirectory, id);
@@ -228,15 +301,17 @@ export class ProjectBackupService {
     try {
       const collected = await collectProjectFiles(project.rootPath);
       for (const source of collected.files) {
+        assertNotCancelled(signal);
         const outputPath = portablePath(join("project", source.relativePath));
         const output = join(temporary, ...outputPath.split("/"));
         await mkdir(dirname(output), { recursive: true });
-        await copyFileSynced(source.sourcePath, output);
-        manifest.files.push({ path: outputPath, size: source.size, sha256: await hashFile(output), source: "project" });
+        const copiedHash = await copyStableSource(source, output, signal);
+        manifest.files.push({ path: outputPath, size: source.size, sha256: copiedHash, source: "project" });
       }
       const seenLocalPaths = new Set<string>();
       for (const entry of research) {
         for (const [attachmentId, sourcePath] of Object.entries(entry.localAttachmentPaths)) {
+          assertNotCancelled(signal);
           const canonical = await realpath(sourcePath).catch(() => null);
           if (!canonical || seenLocalPaths.has(canonical)) continue;
           const details = await stat(canonical).catch(() => null);
@@ -245,11 +320,18 @@ export class ProjectBackupService {
           const outputPath = portablePath(join("local-research", safeSegment(attachmentId), basename(canonical)));
           const output = join(temporary, ...outputPath.split("/"));
           await mkdir(dirname(output), { recursive: true });
-          await copyFileSynced(canonical, output);
-          manifest.files.push({ path: outputPath, size: details.size, sha256: await hashFile(output), source: "localResearch", attachmentId });
+          const copiedHash = await copyStableSource({
+            sourcePath: canonical,
+            relativePath: `仅本机资料/${basename(canonical)}`,
+            size: details.size,
+            mtimeMs: details.mtimeMs
+          }, output, signal);
+          manifest.files.push({ path: outputPath, size: details.size, sha256: copiedHash, source: "localResearch", attachmentId });
         }
       }
+      assertNotCancelled(signal);
       await writeJsonAtomic(join(temporary, MANIFEST_NAME), manifest);
+      assertNotCancelled(signal);
       await rename(temporary, destination);
       const verification = await this.verify(project.id, id);
       if (!verification.valid) throw new Error(`备份校验失败：${verification.errors.join("；")}`);
@@ -263,6 +345,7 @@ export class ProjectBackupService {
   }
 
   async list(projectId: string): Promise<BackupSnapshot[]> {
+    if (!this.activeProjects.has(projectId)) await this.cleanupTemporaryArtifacts(projectId);
     const directory = join(this.baseDirectory, safeSegment(projectId));
     if (!existsSync(directory)) return [];
     const snapshots: BackupSnapshot[] = [];
@@ -292,13 +375,43 @@ export class ProjectBackupService {
     return result;
   }
 
-  async restore(projectId: string, snapshotId: string, destinationPath: string): Promise<BackupRestoreResult> {
+  async restore(
+    projectId: string,
+    snapshotId: string,
+    destinationPath: string,
+    signal?: AbortSignal
+  ): Promise<BackupRestoreResult> {
+    if (this.disposed) throw new Error("备份服务正在关闭，不能开始新的恢复任务。");
+    const controller = new AbortController();
+    const abortFromCaller = (): void => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener("abort", abortFromCaller, { once: true });
+    this.activeControllers.add(controller);
+    const task = this.performRestore(projectId, snapshotId, destinationPath, controller.signal);
+    this.activeTasks.add(task);
+    try {
+      return await task;
+    } finally {
+      this.activeTasks.delete(task);
+      this.activeControllers.delete(controller);
+      signal?.removeEventListener("abort", abortFromCaller);
+    }
+  }
+
+  private async performRestore(
+    projectId: string,
+    snapshotId: string,
+    destinationPath: string,
+    signal: AbortSignal
+  ): Promise<BackupRestoreResult> {
+    assertNotCancelled(signal);
     const destination = resolve(destinationPath);
     if (existsSync(destination)) throw new Error("恢复目标必须是尚不存在的新目录");
     const source = this.snapshotDirectory(projectId, snapshotId);
     // Freeze one exact manifest for the entire restore. A later mutation of the
     // snapshot can no longer swap in a different list after validation.
     const frozen = await this.readFrozenManifest(source);
+    assertNotCancelled(signal);
     const manifest = frozen.manifest;
     const verification = await this.verifyFrozenManifest(source, manifest, projectId, snapshotId);
     if (!verification.valid) throw new Error(`备份校验失败：${verification.errors.join("；")}`);
@@ -308,6 +421,7 @@ export class ProjectBackupService {
       const projectFiles = manifest.files.filter((entry) => entry.source === "project");
       const localResearchFiles = manifest.files.filter((entry) => entry.source === "localResearch");
       for (const file of projectFiles) {
+        assertNotCancelled(signal);
         const relativePath = file.path.replace(/^project\//, "");
         const input = join(source, ...file.path.split("/"));
         const output = join(temporary, ...relativePath.split("/"));
@@ -318,6 +432,7 @@ export class ProjectBackupService {
       const recoveredResearchDirectory = join(temporary, ".latex-workbench", "local-research-recovered");
       const recoveredResearch: Array<{ attachmentId: string; relativePath: string; sha256: string; size: number }> = [];
       for (const file of localResearchFiles) {
+        assertNotCancelled(signal);
         const attachmentId = safeSegment(file.attachmentId ?? "attachment");
         const input = join(source, ...file.path.split("/"));
         const relativePath = portablePath(join(".latex-workbench", "local-research-recovered", attachmentId, basename(file.path)));
@@ -340,14 +455,17 @@ export class ProjectBackupService {
       // directory rename. A changed snapshot or partial copy can never be
       // reported as a successful recovery.
       for (const file of projectFiles) {
+        assertNotCancelled(signal);
         const relativePath = file.path.replace(/^project\//, "");
         await this.assertRestoredFile(join(temporary, ...relativePath.split("/")), file);
       }
       for (const file of localResearchFiles) {
+        assertNotCancelled(signal);
         const attachmentId = safeSegment(file.attachmentId ?? "attachment");
         const relativePath = portablePath(join(".latex-workbench", "local-research-recovered", attachmentId, basename(file.path)));
         await this.assertRestoredFile(join(temporary, ...relativePath.split("/")), file);
       }
+      assertNotCancelled(signal);
       await rename(temporary, destination);
       return {
         snapshotId,
@@ -387,13 +505,60 @@ export class ProjectBackupService {
     return settings;
   }
 
-  async runDue(project: ProjectSummary, research: CatalogProjectResearchItem[]): Promise<BackupSnapshot | null> {
+  async runDue(
+    project: ProjectSummary,
+    research: CatalogProjectResearchItem[],
+    signal?: AbortSignal
+  ): Promise<BackupSnapshot | null> {
+    assertNotCancelled(signal);
     const settings = await this.settings(project.id);
     if (settings.frequency === "off") return null;
     const latest = (await this.list(project.id))[0];
     const interval = settings.frequency === "daily" ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
     if (latest && Date.now() - Date.parse(latest.createdAt) < interval) return null;
-    return this.create(project, research, "scheduled");
+    return this.create(project, research, "scheduled", signal);
+  }
+
+  async cleanupTemporaryArtifacts(projectId?: string): Promise<number> {
+    if (!existsSync(this.baseDirectory)) return 0;
+    const projectDirectories = projectId
+      ? [join(this.baseDirectory, safeSegment(projectId))]
+      : (await readdir(this.baseDirectory, { withFileTypes: true }))
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => join(this.baseDirectory, entry.name));
+    let removed = 0;
+    for (const directory of projectDirectories) {
+      if (!existsSync(directory)) continue;
+      const active = projectId
+        ? this.activeProjects.has(projectId)
+        : [...this.activeProjects].some((id) => safeSegment(id) === basename(directory));
+      if (active) continue;
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.endsWith(".tmp")) continue;
+        await rm(join(directory, entry.name), { recursive: true, force: true });
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  async dispose(timeoutMs = 5_000): Promise<{ timedOut: boolean; removedTemporaryDirectories: number }> {
+    this.disposed = true;
+    for (const controller of this.activeControllers) controller.abort();
+    let timedOut = false;
+    if (this.activeTasks.size > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([...this.activeTasks]),
+        new Promise<void>((resolveTimeout) => {
+          timer = setTimeout(() => { timedOut = true; resolveTimeout(); }, Math.max(1, timeoutMs));
+          timer.unref();
+        })
+      ]);
+      if (timer) clearTimeout(timer);
+    }
+    const removedTemporaryDirectories = timedOut ? 0 : await this.cleanupTemporaryArtifacts();
+    return { timedOut, removedTemporaryDirectories };
   }
 
   private snapshotDirectory(projectId: string, snapshotId: string): string {

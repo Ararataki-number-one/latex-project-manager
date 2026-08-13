@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import {
   app,
   dialog,
@@ -17,6 +17,7 @@ import type {
   AppRuntimeSettings,
   BuildEvent,
   BuildRequest,
+  DesktopMigrationApplyOptions,
   ExportResult,
   FileWriteRequest,
   GitHubCreateRepositoryOptions,
@@ -47,6 +48,7 @@ import { ProjectAccessController, ProjectAccessError } from "./services/access-c
 import { ProjectFileService } from "./services/files";
 import { GitHubSyncService } from "./services/github-sync";
 import { MobileIndexService } from "./services/mobile-index";
+import { OperationCenter } from "./services/operation-center";
 import { AppUpdateService } from "./services/app-updates";
 import {
   getManifestPath,
@@ -58,10 +60,16 @@ import { applyMigration, previewMigration, rollbackMigration } from "./services/
 import { createProjectId } from "./services/project-id";
 import { ProjectOperationsService } from "./services/project-operations";
 import { ProjectStorageService } from "./services/project-storage";
+import { ProjectStatusStore } from "./services/project-status-store";
 import { ReferenceService } from "./services/references";
 import { ResearchService } from "./services/research";
 import { ProjectSearchIndexService } from "./services/search-index";
 import { ProjectBackupService } from "./services/project-backups";
+import {
+  applyPortableResourceMigration,
+  previewPortableResourceMigration,
+  type PortableResourceMigrationPlan
+} from "./services/portable-resource-migration";
 import { relinkCatalogProject } from "./services/project-relink";
 import { createProfileRuntime } from "./services/profile-runtime";
 import { scanLibrary } from "./services/scanner";
@@ -69,6 +77,7 @@ import { SyncTexService } from "./services/synctex";
 import { TemplateService } from "./services/templates";
 import { detectToolchains, resolveToolchain } from "./services/toolchain";
 import { VsCodeService } from "./services/vscode";
+import { applyDesktopCatalogMigration, previewDesktopCatalogMigration } from "./services/desktop-catalog-migration";
 
 let registered = false;
 
@@ -158,6 +167,42 @@ export function registerIpcHandlers(
 
   const userData = app.getPath("userData");
   const catalog = createProjectCatalog(join(userData, "library.sqlite"));
+  const operations = new OperationCenter(catalog);
+  let projectStatus!: ProjectStatusStore;
+  const unsubscribeOperations = operations.subscribe((event) => {
+    const owner = getWindow();
+    if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.operationsEvent, event.snapshot);
+  });
+  const trackSyncEvent = (event: GitHubSyncEvent): void => {
+    try {
+      const terminal = new Set(["succeeded", "completed", "failed", "cancelled", "blocked"]);
+      let active = operations.list(event.projectId).find((item) => item.kind === "sync" && !terminal.has(item.state));
+      if (!active) {
+        active = operations.start({
+          kind: "sync",
+          projectId: event.projectId,
+          title: "GitHub 项目同步",
+          message: event.message,
+          state: event.state === "syncing" ? "running" : "queued",
+          cancellable: false,
+          retryable: true
+        });
+      }
+      operations.registerController(active.id, {
+        retry: async () => {
+          const project = catalog.get(event.projectId);
+          if (!project || project.trashed) throw new Error("The project is no longer available for synchronization.");
+          await github.syncNow(project.id, project.rootPath, false);
+        }
+      });
+      if (event.state === "synced") operations.complete(active.id, event.message);
+      else if (event.state === "blocked") operations.block(active.id, event.message, { failureCode: "SYNC_BLOCKED", recoveryAction: "查看风险文件或同步状态" });
+      else if (event.state === "error" || event.state === "unavailable" || event.state === "needsPull") operations.fail(active.id, event.message, { failureCode: `SYNC_${event.state.toLocaleUpperCase()}`, recoveryAction: "打开项目保护页处理" });
+      else operations.update(active.id, { state: event.state === "syncing" ? "running" : undefined, message: event.message });
+    } catch {
+      // Activity persistence must never interrupt the underlying Git operation.
+    }
+  };
   const initialSettings = catalog.runtimeSettings();
   if (app.getVersion().includes("-beta.") && !initialSettings.onboardingCompleted && !initialSettings.syncPaused) {
     // The parallel-install Beta starts in a safe observation mode. Users can
@@ -208,27 +253,67 @@ export function registerIpcHandlers(
   const files = new ProjectFileService();
   const github = new GitHubSyncService(join(userData, "github-sync"), {
     onEvent: (event) => {
-      catalog.appendSyncEvent(event);
+      try { catalog.appendSyncEvent(event); } catch { /* catalog warning is shown persistently in the renderer */ }
+      try {
+        const project = catalog.get(event.projectId);
+        projectStatus?.applySyncEvent(event, project?.pathAvailable ?? false);
+      } catch {
+        // A catalog write warning is already shown globally; never interrupt Git.
+      }
+      trackSyncEvent(event);
       const owner = getWindow();
       if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.githubEvent, event);
       options.onSyncEvent?.(event);
     }
   });
+  for (const snapshot of operations.list().filter((item) => item.kind === "sync" && item.projectId && item.state !== "succeeded")) {
+    operations.registerController(snapshot.id, {
+      retry: async () => {
+        const project = catalog.get(snapshot.projectId!);
+        if (!project || project.trashed) throw new Error("The project is no longer available for synchronization.");
+        await github.syncNow(project.id, project.rootPath, false);
+      }
+    });
+  }
   const currentVersion = app.getVersion();
   const updates = new AppUpdateService(join(userData, "updates"), {
     currentVersion,
     releaseChannel: currentVersion.includes("-beta.") ? "beta" : "stable",
     onStatus: (status) => {
+      try {
+        const terminal = new Set(["succeeded", "completed", "failed", "cancelled", "blocked"]);
+        let operation = operations.list().find((item) => item.kind === "update" && !terminal.has(item.state));
+        if (status.state === "downloading" && !operation) {
+          operation = operations.start({ kind: "update", title: `下载客户端更新 ${status.latestVersion ?? ""}`.trim(), state: "running", cancellable: true, retryable: true });
+          operations.registerController(operation.id, {
+            cancel: async () => { await updates.cancel(); },
+            retry: async () => { await updates.download(); }
+          });
+        }
+        if (operation) {
+          if (status.state === "downloaded") operations.complete(operation.id, status.message);
+          else if (status.state === "cancelled") operations.cancel(operation.id, status.message);
+          else if (status.state === "error") operations.fail(operation.id, status.message ?? "更新下载失败", { failureCode: "UPDATE_FAILED", recoveryAction: "继续下载" });
+          else operations.update(operation.id, { message: status.message, progress: status.progressPercent === undefined ? undefined : status.progressPercent / 100 });
+        }
+      } catch {
+        // Updating the activity timeline must not affect the verified updater.
+      }
       const owner = getWindow();
       if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.updatesEvent, status);
     }
   });
+  for (const snapshot of operations.list().filter((item) => item.kind === "update" && item.state !== "succeeded")) {
+    operations.registerController(snapshot.id, {
+      retry: async () => { await updates.download(); }
+    });
+  }
   const references = new ReferenceService({
     openPath: (path) => shell.openPath(path),
     trashItem: (path) => shell.trashItem(path)
   });
   const templates = new TemplateService(join(userData, "templates"));
-  const vscode = new VsCodeService();
+  const vscode = new VsCodeService({ configuredExecutable: catalog.runtimeSettings().editorExecutablePath });
   const projectOperations = new ProjectOperationsService();
   const cleanup = new TemporaryCleanupService();
   const storage = new ProjectStorageService();
@@ -258,39 +343,124 @@ export function registerIpcHandlers(
     return researchIndexAllPromise;
   };
   const projectBackups = new ProjectBackupService(join(userData, "project-backups"));
-  if (catalog.runtimeSettings().syncPaused) void github.pauseAll();
-  for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable)) {
-    void github.attachProject(project.id, project.rootPath);
+  for (const snapshot of operations.list().filter((item) => item.kind === "backup" && item.projectId && item.state !== "succeeded")) {
+    operations.registerController(snapshot.id, {
+      retry: async () => {
+        const project = catalog.get(snapshot.projectId!);
+        if (!project || project.trashed) throw new Error("The project is no longer available for backup.");
+        await projectBackups.create(project, catalog.researchItems(project.id));
+      }
+    });
   }
+  projectStatus = new ProjectStatusStore(catalog, {
+    probe: async (project) => {
+      const capturedAt = new Date().toISOString();
+      if (!existsSync(project.rootPath)) {
+        return {
+          pathAvailable: false,
+          researchCount: catalog.researchItems(project.id).length,
+          health: "error",
+          issues: ["项目路径失效"],
+          capturedAt
+        };
+      }
+      const root = await requireProject(project.rootPath);
+      const [storageInfo, manifest, syncStatus] = await Promise.all([
+        storage.measure(root),
+        readProjectManifestIfExists(root),
+        github.status(project.id, root).catch(() => null)
+      ]);
+      const pdf = await projectOperations.lastSuccessfulPdf(root, manifest).catch(() => null);
+      const issues: string[] = [];
+      if (!pdf) issues.push("未设置或未生成主 PDF");
+      if (project.protectionState === "unprotected" || !project.protectionState) issues.push("项目尚未保护");
+      if (syncStatus && ["blocked", "error", "needsPull"].includes(syncStatus.state)) {
+        issues.push(syncStatus.message || "GitHub 同步需要处理");
+      }
+      const health = issues.some((issue) => /失效|失败|阻止|冲突/.test(issue)) ? "error"
+        : issues.length ? "attention" : "healthy";
+      return {
+        pathAvailable: true,
+        storageBytes: storageInfo.totalBytes,
+        fileCount: storageInfo.fileCount,
+        mainPdfPath: pdf?.path,
+        mainPdfSize: pdf?.size,
+        researchCount: catalog.researchItems(project.id).length,
+        syncState: syncStatus?.state,
+        syncMessage: syncStatus?.message,
+        health,
+        issues,
+        capturedAt
+      };
+    }
+  });
+  const unsubscribeProjectStatus = projectStatus.subscribe((event) => {
+    const owner = getWindow();
+    if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.projectStatusEvent, event);
+  });
+  if (catalog.runtimeSettings().syncPaused) void github.pauseAll();
+  let shuttingDown = false;
+  // First paint reads only SQLite. Configured repositories are attached later
+  // and in small batches, so opening a 500-project library never probes all
+  // project roots synchronously.
+  const initialSyncAttachTimer = setTimeout(() => {
+    const configuredProjects = catalog.list().filter((item) => !item.trashed
+      && (item.protectionState === "github" || item.protectionState === "both"));
+    void (async () => {
+      for (const project of configuredProjects) {
+        if (shuttingDown) break;
+        await github.attachProject(project.id, project.rootPath).catch(() => undefined);
+        await new Promise<void>((resolveDelay) => {
+          const timer = setTimeout(resolveDelay, 25);
+          timer.unref();
+        });
+      }
+    })();
+  }, 10_000);
+  initialSyncAttachTimer.unref();
   const updateTimer = setTimeout(() => { void updates.checkAutomatically(); }, 2_500);
   updateTimer.unref();
-  let scheduledBackupRunning = false;
-  const runScheduledBackups = async (): Promise<void> => {
-    if (scheduledBackupRunning) return;
-    scheduledBackupRunning = true;
-    try {
+  const scheduledBackupAbort = new AbortController();
+  let scheduledBackupTask: Promise<void> | null = null;
+  const runScheduledBackups = (): Promise<void> => {
+    if (scheduledBackupTask) return scheduledBackupTask;
+    scheduledBackupTask = (async () => {
       for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable && item.lifecycle !== "archived")) {
-        const snapshot = await projectBackups.runDue(project, catalog.researchItems(project.id)).catch((error: unknown) => {
-          catalog.appendSyncEvent({
+        if (scheduledBackupAbort.signal.aborted) break;
+        const snapshot = await projectBackups.runDue(project, catalog.researchItems(project.id), scheduledBackupAbort.signal).catch((error: unknown) => {
+          if (error instanceof Error && error.name === "AbortError") return null;
+          try {
+            const failed = operations.start({ kind: "backup", projectId: project.id, title: `定期备份 ${project.name}`, state: "running", cancellable: false, retryable: true });
+            operations.registerController(failed.id, {
+              retry: async () => {
+                await projectBackups.create(project, catalog.researchItems(project.id), "scheduled");
+              }
+            });
+            operations.fail(failed.id, error instanceof Error ? error.message : "未知错误", { failureCode: "BACKUP_FAILED", recoveryAction: "重新备份" });
+          } catch { /* database warning remains visible */ }
+          try { catalog.appendSyncEvent({
             id: randomUUID(),
             projectId: project.id,
             occurredAt: new Date().toISOString(),
             state: "error",
             level: "error",
             message: `定期项目快照失败：${error instanceof Error ? error.message : "未知错误"}`
-          });
+          }); } catch { /* catalog warning remains visible */ }
           return null;
         });
         if (snapshot) {
+          try {
+            const completed = operations.start({ kind: "backup", projectId: project.id, title: `定期备份 ${project.name}`, state: "running", cancellable: false, retryable: false });
+            operations.complete(completed.id, "定期备份已完成。");
+          } catch { /* database warning remains visible */ }
           const current = catalog.get(project.id);
           if (current) catalog.update(project.id, {
             protectionState: current.protectionState === "github" || current.protectionState === "both" ? "both" : "localBackup"
           });
         }
       }
-    } finally {
-      scheduledBackupRunning = false;
-    }
+    })().finally(() => { scheduledBackupTask = null; });
+    return scheduledBackupTask;
   };
   const initialBackupTimer = setTimeout(() => { void runScheduledBackups(); }, 20_000);
   initialBackupTimer.unref();
@@ -307,9 +477,127 @@ export function registerIpcHandlers(
     const pdf = await projectOperations.lastSuccessfulPdf(root, manifest);
     return pdf ? { project, pdf } : null;
   };
+  const desktopMigrationSources = () => {
+    const candidates = [
+      { kind: "beta" as const, databasePath: join(app.getPath("appData"), "latex-workbench-beta", "library.sqlite"), label: "1.0 Beta" },
+      { kind: "stable0111" as const, databasePath: join(app.getPath("appData"), "latex-workbench", "library.sqlite"), label: "0.11.1 正式版" }
+    ];
+    const target = resolve(catalog.databasePath).toLocaleLowerCase("en-US");
+    return candidates.filter((source) => existsSync(source.databasePath) && resolve(source.databasePath).toLocaleLowerCase("en-US") !== target);
+  };
+  const migrationPreviews = new Map<string, ReturnType<typeof previewDesktopCatalogMigration>>();
+  const portableMigrationPreviews = new Map<string, PortableResourceMigrationPlan>();
+  const runTrackedOperation = async <T>(input: {
+    kind: Parameters<typeof operations.start>[0]["kind"];
+    title: string;
+    projectId?: string;
+    message?: string;
+    cancellable?: boolean;
+    retryable?: boolean;
+    successMessage?: string | ((result: T) => string);
+    task: (operationId: string, signal: AbortSignal) => Promise<T>;
+  }): Promise<T> => {
+    let controller = new AbortController();
+    const operation = operations.start({
+      kind: input.kind,
+      projectId: input.projectId,
+      title: input.title,
+      message: input.message,
+      state: "running",
+      cancellable: input.cancellable === true,
+      retryable: input.retryable === true
+    });
+    if (input.cancellable || input.retryable) {
+      operations.registerController(operation.id, {
+        cancel: input.cancellable ? () => controller.abort() : undefined,
+        retry: input.retryable ? async () => {
+          controller = new AbortController();
+          await input.task(operation.id, controller.signal);
+        } : undefined
+      });
+    }
+    try {
+      const result = await input.task(operation.id, controller.signal);
+      const message = typeof input.successMessage === "function"
+        ? input.successMessage(result)
+        : input.successMessage;
+      operations.complete(operation.id, message ?? "操作已完成。");
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      const latest = operations.list().find((item) => item.id === operation.id);
+      if (latest && ["queued", "running", "waiting"].includes(latest.state)) {
+        operations.fail(operation.id, message, {
+          failureCode: error instanceof Error && error.name === "AbortError" ? "OPERATION_CANCELLED" : "OPERATION_FAILED",
+          recoveryAction: input.retryable ? "请检查问题后重试" : "请检查问题后重新执行",
+          retryable: input.retryable === true
+        });
+      }
+      throw error;
+    }
+  };
 
   register(IPC.libraryList, () => catalog.list());
   register(IPC.libraryCatalogStatus, () => catalog.status());
+  register(IPC.projectStatusList, () => projectStatus.list());
+  register(IPC.projectStatusGet, (projectId: string) => {
+    requireCatalogProject(projectId, true);
+    return projectStatus.get(projectId) ?? null;
+  });
+  register(IPC.projectStatusRefresh, (projectId: string) => projectStatus.refresh(requireCatalogProject(projectId)));
+  register(IPC.operationsList, (projectId?: string, limit?: number) => {
+    if (projectId) requireCatalogProject(projectId, true);
+    return operations.list(projectId).slice(0, Math.max(1, Math.min(500, Math.trunc(limit ?? 100))));
+  });
+  register(IPC.operationsCancel, (operationId: string) => operations.requestCancel(operationId));
+  register(IPC.operationsRetry, (operationId: string) => operations.requestRetry(operationId));
+  register(IPC.desktopMigrationPreview, async () => {
+    const sources = desktopMigrationSources();
+    if (!sources.length) return null;
+    const preview = previewDesktopCatalogMigration(catalog, sources);
+    const localResources = await previewPortableResourceMigration(
+      sources.map((source) => dirname(source.databasePath)),
+      userData
+    );
+    portableMigrationPreviews.set(preview.id, localResources);
+    if (localResources.conflicts.length > 0) {
+      preview.warnings.push(`${localResources.conflicts.length} 个本机资源与正式版同名，将保留正式版内容且不会覆盖。`);
+    }
+    if (localResources.skipped.length > 0) {
+      preview.warnings.push(`${localResources.skipped.length} 个不安全或不支持的本机资源不会迁移。`);
+    }
+    migrationPreviews.clear();
+    migrationPreviews.set(preview.id, preview);
+    return preview;
+  });
+  register(IPC.desktopMigrationApply, async (previewId: string, applyOptions: DesktopMigrationApplyOptions) => {
+    const preview = migrationPreviews.get(previewId);
+    if (!preview) throw new Error("迁移预览已经过期，请重新检查。");
+    return runTrackedOperation({
+      kind: "migration",
+      title: "合并旧版本项目库",
+      task: async () => {
+        const result = applyDesktopCatalogMigration(catalog, preview, applyOptions);
+        const localPlan = portableMigrationPreviews.get(previewId);
+        const localResources = localPlan
+          ? await applyPortableResourceMigration(localPlan)
+          : { copied: 0, conflicts: [], failures: ["未找到本机 GitHub、备份和模板资源迁移计划；这些资源尚未迁移。"] };
+        migrationPreviews.delete(previewId);
+        portableMigrationPreviews.delete(previewId);
+        for (const project of catalog.list().filter((item) => !item.trashed && item.pathAvailable)) {
+          await access.addProjectRoot(project.rootPath).catch(() => undefined);
+        }
+        return {
+          ...result,
+          localResources,
+          warnings: [
+            ...localResources.conflicts.map((path) => `本机资源冲突，已保留正式版：${path}`),
+            ...localResources.failures.map((failure) => `本机资源未迁移：${failure}`)
+          ]
+        };
+      }
+    });
+  });
   register(IPC.catalogBackupsList, () => catalog.listBackups());
   register(IPC.catalogBackupsCreate, async () => {
     const destination = await showSaveDialog({
@@ -333,10 +621,19 @@ export function registerIpcHandlers(
   });
   register(IPC.projectBackupsCreate, async (projectId: string) => {
     const project = requireCatalogProject(projectId);
-    const snapshot = await projectBackups.create(project, catalog.researchItems(projectId));
-    const protectionState = project.protectionState === "github" || project.protectionState === "both" ? "both" : "localBackup";
-    catalog.update(projectId, { protectionState });
-    return snapshot;
+    return runTrackedOperation({
+      kind: "backup",
+      projectId,
+      title: `创建 ${project.name} 的本地快照`,
+      cancellable: true,
+      retryable: true,
+      task: async (_operationId, signal) => {
+        const snapshot = await projectBackups.create(project, catalog.researchItems(projectId), "manual", signal);
+        const protectionState = project.protectionState === "github" || project.protectionState === "both" ? "both" : "localBackup";
+        catalog.update(projectId, { protectionState });
+        return snapshot;
+      }
+    });
   });
   register(IPC.projectBackupsList, (projectId: string) => {
     requireCatalogProject(projectId, true);
@@ -354,7 +651,14 @@ export function registerIpcHandlers(
       properties: ["createDirectory", "showOverwriteConfirmation"]
     });
     if (!destination) return null;
-    return projectBackups.restore(projectId, snapshotId, destination);
+    return runTrackedOperation({
+      kind: "restore",
+      projectId,
+      title: `恢复 ${project.name} 的本地快照`,
+      cancellable: true,
+      retryable: true,
+      task: (_operationId, signal) => projectBackups.restore(projectId, snapshotId, destination, signal)
+    });
   });
   register(IPC.projectBackupsSettings, (projectId: string) => {
     requireCatalogProject(projectId, true);
@@ -388,28 +692,61 @@ export function registerIpcHandlers(
     const issued = pendingCandidates.get(rootKey(canonicalRoot));
     if (!issued) throw new ProjectAccessError("The scan result is stale; scan again before importing.", "ROOT_NOT_AUTHORIZED");
     pendingCandidates.delete(rootKey(canonicalRoot));
-    const existingManifest = await readProjectManifestIfExists(canonicalRoot);
-    const summary = summaryFromCandidate(
-      { ...issued, rootPath: canonicalRoot },
-      existingManifest?.projectId
-    );
-    const imported = catalog.upsert(summary);
-    await github.attachProject(imported.id, imported.rootPath);
-    return imported;
+    let attachWarning: string | undefined;
+    return runTrackedOperation({
+      kind: "import",
+      title: `导入 ${issued.name}`,
+      successMessage: () => attachWarning ?? "项目已导入。",
+      task: async (operationId) => {
+        const existingManifest = await readProjectManifestIfExists(canonicalRoot);
+        const summary = summaryFromCandidate(
+          { ...issued, rootPath: canonicalRoot },
+          existingManifest?.projectId
+        );
+        const imported = catalog.upsert(summary);
+        try {
+          await github.attachProject(imported.id, imported.rootPath);
+        } catch (error) {
+          attachWarning = `项目已导入，但后台同步连接稍后需要重试：${error instanceof Error ? error.message : "未知错误"}`;
+          operations.update(operationId, { message: attachWarning });
+        }
+        return imported;
+      }
+    });
   });
   register(IPC.libraryImportMany, async (candidates: ScanCandidate[]) => {
     if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > 500) throw new Error("请选择 1 到 500 个扫描结果。");
     const imported: ProjectSummary[] = [];
+    const failures: string[] = [];
     for (const candidate of candidates) {
-      const canonicalRoot = await access.consumePendingCandidate(candidate.rootPath);
-      const issued = pendingCandidates.get(rootKey(canonicalRoot));
-      if (!issued) throw new ProjectAccessError("The scan result is stale; scan again before importing.", "ROOT_NOT_AUTHORIZED");
-      pendingCandidates.delete(rootKey(canonicalRoot));
-      const existingManifest = await readProjectManifestIfExists(canonicalRoot);
-      const summary = catalog.upsert(summaryFromCandidate({ ...issued, rootPath: canonicalRoot }, existingManifest?.projectId));
-      await github.attachProject(summary.id, summary.rootPath);
-      imported.push(summary);
+      try {
+        const canonicalRoot = await access.consumePendingCandidate(candidate.rootPath);
+        const issued = pendingCandidates.get(rootKey(canonicalRoot));
+        if (!issued) throw new ProjectAccessError("The scan result is stale; scan again before importing.", "ROOT_NOT_AUTHORIZED");
+        pendingCandidates.delete(rootKey(canonicalRoot));
+        let attachWarning: string | undefined;
+        const summary = await runTrackedOperation({
+          kind: "import",
+          title: `导入 ${issued.name}`,
+          successMessage: () => attachWarning ?? "项目已导入。",
+          task: async (operationId) => {
+            const existingManifest = await readProjectManifestIfExists(canonicalRoot);
+            const importedSummary = catalog.upsert(summaryFromCandidate({ ...issued, rootPath: canonicalRoot }, existingManifest?.projectId));
+            try {
+              await github.attachProject(importedSummary.id, importedSummary.rootPath);
+            } catch (error) {
+              attachWarning = `项目已导入，但后台同步连接稍后需要重试：${error instanceof Error ? error.message : "未知错误"}`;
+              operations.update(operationId, { message: attachWarning });
+            }
+            return importedSummary;
+          }
+        });
+        imported.push(summary);
+      } catch (error) {
+        failures.push(`${candidate.name}：${error instanceof Error ? error.message : "未知错误"}`);
+      }
     }
+    if (!imported.length && failures.length) throw new Error(`所选项目均未能导入：${failures.slice(0, 3).join("；")}`);
     return imported;
   });
   register(IPC.libraryRelink, async (projectId: string, rootPath: string) => {
@@ -530,8 +867,12 @@ export function registerIpcHandlers(
       properties: ["createDirectory", "showOverwriteConfirmation"]
     });
     if (!destination) return { canceled: true };
-    const output = await projectOperations.exportZip(root, destination);
-    return { canceled: false, path: output };
+    return runTrackedOperation({
+      kind: "export",
+      projectId,
+      title: `导出 ${project.name} ZIP`,
+      task: async () => ({ canceled: false, path: await projectOperations.exportZip(root, destination) })
+    });
   });
   register(IPC.libraryLastSuccessfulPdf, async (projectId: string) => {
     const result = await lastSuccessfulPdf(projectId);
@@ -563,9 +904,16 @@ export function registerIpcHandlers(
   register(IPC.libraryCleanupApply, async (projectId: string, planId: string) => {
     if (typeof planId !== "string" || !planId) throw new Error("A cleanup plan ID is required.");
     const { project, root } = await requireCatalogProjectRoot(projectId);
-    const result = await cleanup.apply(projectId, root, planId);
-    await github.notifyProjectChanged(project.id, root);
-    return result;
+    return runTrackedOperation({
+      kind: "cleanup",
+      projectId,
+      title: `清理 ${project.name} 的临时文件`,
+      task: async () => {
+        const result = await cleanup.apply(projectId, root, planId);
+        await github.notifyProjectChanged(project.id, root);
+        return result;
+      }
+    });
   });
   register(IPC.libraryStorageInfo, async (projectId: string) => {
     const { root } = await requireCatalogProjectRoot(projectId);
@@ -670,6 +1018,9 @@ export function registerIpcHandlers(
       || typeof settings.syncPaused !== "boolean") throw new Error("客户端运行设置无效。");
     const previous = catalog.runtimeSettings();
     const saved = catalog.setRuntimeSettings(settings);
+    if (saved.editorExecutablePath !== previous.editorExecutablePath) {
+      vscode.setPreferredExecutablePath(saved.editorExecutablePath);
+    }
     if (saved.syncPaused !== previous.syncPaused) {
       if (saved.syncPaused) await github.pauseAll();
       else await github.resumeAll();
@@ -688,11 +1039,9 @@ export function registerIpcHandlers(
   register(IPC.updatesDownload, () => updates.download());
   register(IPC.updatesCancel, () => updates.cancel());
   register(IPC.updatesInstall, async () => {
-    const installer = await updates.downloadedInstaller();
-    const error = await shell.openPath(installer);
-    if (error) throw new Error(error);
-    const timer = setTimeout(() => app.quit(), 1_000);
-    timer.unref();
+    const launched = await updates.launchDownloadedInstaller();
+    app.quit();
+    return launched;
   });
   register(IPC.updatesOpenRelease, async () => {
     const url = new URL((await updates.status()).releaseUrl);
@@ -992,6 +1341,56 @@ export function registerIpcHandlers(
     templates.instantiate(templateId, await access.requireSelection(parentRoot), name)
   );
   register(IPC.toolchainsList, () => detectToolchains());
+  const openEditorProjectById = async (projectId: string): Promise<void> => {
+    const { root } = await requireCatalogProjectRoot(projectId);
+    await vscode.openProject(root);
+  };
+  const openEditorFileById = async (
+    projectId: string,
+    relativePath: string,
+    line?: number,
+    column?: number
+  ): Promise<void> => {
+    if (typeof relativePath !== "string") throw new Error("A relative file path is required.");
+    const { root } = await requireCatalogProjectRoot(projectId);
+    const owned = await requireProjectPath(resolve(root, relativePath));
+    if (rootKey(owned.root) !== rootKey(root)) {
+      throw new ProjectAccessError("The editor target must belong to the selected project.", "PATH_NOT_AUTHORIZED");
+    }
+    if (!isSafeExternalEditorPath(owned.path)) throw new Error("Only project text/PDF files can be opened externally.");
+    await vscode.openFile(root, owned.path, line, column);
+  };
+  register(IPC.editorStatus, () => vscode.status());
+  register(IPC.editorSelectExecutable, async () => {
+    const owner = getWindow();
+    const selectOptions: OpenDialogOptions = {
+      title: "选择 VS Code 或 VSCodium",
+      properties: ["openFile"],
+      filters: [{ name: "VS Code compatible editor", extensions: ["exe"] }]
+    };
+    const selected = owner
+      ? await dialog.showOpenDialog(owner, selectOptions)
+      : await dialog.showOpenDialog(selectOptions);
+    if (selected.canceled || selected.filePaths.length !== 1) return null;
+    const nextStatus = vscode.setPreferredExecutablePath(selected.filePaths[0]);
+    if (!nextStatus.available || nextStatus.source !== "configured") {
+      vscode.setPreferredExecutablePath(catalog.runtimeSettings().editorExecutablePath);
+      throw new Error("所选程序不是受支持的 VS Code、VS Code Insiders 或 VSCodium 可执行文件。");
+    }
+    const saved = catalog.setRuntimeSettings({
+      ...catalog.runtimeSettings(),
+      editorExecutablePath: nextStatus.executablePath
+    });
+    options.onRuntimeSettingsChanged?.(saved);
+    return nextStatus;
+  });
+  register(IPC.editorResetExecutable, () => {
+    const saved = catalog.setRuntimeSettings({ ...catalog.runtimeSettings(), editorExecutablePath: undefined });
+    options.onRuntimeSettingsChanged?.(saved);
+    return vscode.setPreferredExecutablePath(undefined);
+  });
+  register(IPC.editorOpenProject, openEditorProjectById);
+  register(IPC.editorOpenFile, openEditorFileById);
   register(IPC.vscodeStatus, () => vscode.status());
   register(IPC.vscodeOpenProject, async (projectRoot: string) => {
     if (typeof projectRoot !== "string") throw new Error("A project root is required.");
@@ -1064,11 +1463,24 @@ export function registerIpcHandlers(
   const shutdown = (): Promise<void> => {
     if (!shutdownPromise) {
       shutdownPromise = (async () => {
+        shuttingDown = true;
+        clearTimeout(updateTimer);
+        clearTimeout(initialSyncAttachTimer);
         clearTimeout(initialBackupTimer);
         clearInterval(scheduledBackupTimer);
+        scheduledBackupAbort.abort();
+        unsubscribeProjectStatus();
+        projectStatus.dispose();
         try {
-          await github.dispose();
+          await Promise.allSettled([
+            scheduledBackupTask ?? Promise.resolve(),
+            updates.dispose(3_000),
+            projectBackups.dispose(5_000),
+            github.dispose()
+          ]);
         } finally {
+          unsubscribeOperations();
+          operations.dispose();
           catalog.close();
         }
       })();

@@ -27,7 +27,7 @@
 1. **项目介绍**：主文件、文档目标、当前方案、最新 PDF、移动端主 PDF 和打开文件夹/VS Code 的入口。
 2. **文件**：浏览、搜索、新建、导入、复制、重命名、移动、回收站、系统打开和定位；不提供源码编辑。
 3. **研究资料**：按文档目标组织论文、书籍、数据与补充材料，管理多个附件版本、关系角色和移动端可用性。
-4. **同步**：连接远端仓库、查看同步状态并控制自动同步。
+4. **保护**：统一管理 GitHub 自动同步、本地快照、定期备份、历史记录与安全阻止。
 
 重命名或移动被 `\input`、`\include`、`\includegraphics`、`\bibliography`、`\addbibresource` 等字面量引用的文件时，客户端先展示完整影响和哈希校验；只有确认后才保留原编码、BOM 与换行并更新可确定引用，同时创建可撤销快照。界面不提供源码编辑器、内嵌 PDF 或 LaTeX 配置面板。
 
@@ -84,7 +84,7 @@
 
 ### 首次使用向导
 
-首次使用会依次检查 Git、Git LFS、GitHub CLI/登录、VS Code、LaTeX Workshop 和 TeX 工具链，再引导导入项目。已有项目升级时只显示可关闭提示，也可以从设置重新打开向导。
+首次使用只说明“本地管理、不接管源码编辑”，随后选择单个项目或资料库目录，完成只读扫描、勾选和批量导入。GitHub、Git LFS、VS Code、TeX 工具链和移动端主 PDF 都不是导入前置条件；产生实际价值后再通过“保护项目”任务卡按需配置。
 
 ### 客户端自动更新
 
@@ -155,18 +155,25 @@ pnpm typecheck
 pnpm test
 pnpm test:e2e
 pnpm build
+pnpm release:validate
 pnpm package:portable
 pnpm package:windows
 ```
 
 Windows 安装版和便携版都包含 Electron 运行时，不捆绑 TeX Live，也不会把项目文件复制到应用目录。带 `Setup` 的文件是支持后续自动更新的推荐安装包。
 
-### 1.0 Beta 并行安装
+### 1.0 RC 与 Beta 通道
 
-`1.0.0-beta.1` 使用独立的 Windows 应用 ID、产品名、安装目录和用户数据目录，可以与当前 `0.11.1` 正式版同时安装。Beta 的安装包和便携版输出到 `dist-beta`，文件名明确包含 `Beta`，不会覆盖 `dist` 中的正式版资产：
+`1.0.0-rc.1` 使用正式应用 ID、产品名和用户数据目录，用来验证 `0.11.1 → RC → 1.0.0` 的真实升级链。RC 只发布 Windows Setup 和便携版，输出到 `dist-rc`：
+
+```powershell
+pnpm package:windows:rc
+```
+
+`1.0.0-beta.5` 使用独立的 Windows 应用 ID、产品名、安装目录和用户数据目录，可以与当前 `0.11.1` 正式版同时安装。Beta 的安装包和便携版输出到 `dist-beta`，文件名明确包含 `Beta`，不会覆盖 `dist` 中的正式版资产：
 
 ```powershell
 pnpm package:windows:beta
 ```
 
-GitHub Actions 的 Windows、Android 和联合发布工作流都要求显式选择 `stable` 或 `beta`。`v1.0.0-beta.5` 标签只会创建 GitHub Pre-release；正式标签仍创建 Latest Release。Beta 与正式版使用不同的工作流产物名和附件名，避免相互覆盖。
+GitHub Actions 的桌面工作流要求显式选择 `stable`、`rc` 或 `beta`。`v1.0.0-rc.1` 只创建桌面 Pre-release；Android 继续留在 Beta 通道；正式标签只发布 Windows 资产并创建 Latest Release。所有第三方 Action 固定到完整提交，签名清单在受保护的 `production-release` Environment 中生成，私钥不会传递给发布任务。
