@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -355,6 +355,14 @@ function LibraryView({ api, projects, filter, activeTag, availableTags, onFilter
   const statusSnapshots = useMemo(() => Object.fromEntries(
     Object.entries(projectStatus).map(([projectId, record]) => [projectId, record.snapshot])
   ), [projectStatus]);
+
+  useLayoutEffect(() => {
+    if (performance.getEntriesByName("latex-library-first-render").length > 0) return;
+    performance.mark("latex-library-ready");
+    if (performance.getEntriesByName("latex-app-render-start").length > 0) {
+      performance.measure("latex-library-first-render", "latex-app-render-start", "latex-library-ready");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

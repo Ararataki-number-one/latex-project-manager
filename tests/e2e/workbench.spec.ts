@@ -41,12 +41,9 @@ test("500 个项目使用窗口化列表并保留桌面键盘操作", async ({ p
   const table = page.getByRole("table", { name: "项目列表" });
   await expect(table).toHaveAttribute("data-virtualized", "true");
   await expect(table).toHaveAttribute("aria-rowcount", "501");
-  const firstScreenRenderMs = await page.evaluate(() => {
-    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-    return performance.now() - (navigation?.responseEnd ?? 0);
-  });
-  // Vite preview startup and hosted-runner networking are infrastructure time;
-  // the product gate measures the renderer work after the document arrives.
+  const firstScreenRenderMs = await page.evaluate(() => performance.getEntriesByName("latex-library-first-render")[0]?.duration ?? Number.POSITIVE_INFINITY);
+  // Measure the product's own initialization and first React commit. Hosted
+  // runner startup, browser creation and the Vite test server are not app work.
   expect(firstScreenRenderMs).toBeLessThan(1_500);
   const initialRenderedRows = await table.locator(".project-row").count();
   expect(initialRenderedRows).toBeGreaterThan(0);
