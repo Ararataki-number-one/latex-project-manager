@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import appIcon from "../../assets/app-icon.png";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -48,14 +47,15 @@ import type { AppRuntimeSettings, AppUpdateStatus, CatalogProjectResearchItem, C
 import { createWorkbench } from "./demo";
 import { AppUpdateProgress } from "./AppUpdateProgress";
 import { useProjectGitHubStatuses } from "./github-status-store";
-import { OnboardingWizard, type OnboardingResult } from "./OnboardingWizard";
-import { NeedsAttentionView } from "./NeedsAttentionView";
-import { ProjectView } from "./ProjectView";
-import { TemplateLibraryView } from "./TemplateLibraryView";
-import { DesktopMigrationWizard } from "./DesktopMigrationWizard";
+import type { OnboardingResult } from "./OnboardingWizard";
 import { calculateVirtualRange, PROJECT_VIRTUALIZATION_THRESHOLD } from "./library-virtualization";
 
 const runtime = createWorkbench();
+const ProjectView = lazy(() => import("./ProjectView").then((module) => ({ default: module.ProjectView })));
+const TemplateLibraryView = lazy(() => import("./TemplateLibraryView").then((module) => ({ default: module.TemplateLibraryView })));
+const NeedsAttentionView = lazy(() => import("./NeedsAttentionView").then((module) => ({ default: module.NeedsAttentionView })));
+const OnboardingWizard = lazy(() => import("./OnboardingWizard").then((module) => ({ default: module.OnboardingWizard })));
+const DesktopMigrationWizard = lazy(() => import("./DesktopMigrationWizard").then((module) => ({ default: module.DesktopMigrationWizard })));
 
 type LibraryFilter = "all" | "favorites" | "recent" | "archived";
 type ExtendedLibraryFilter = LibraryFilter | "trashed";
@@ -160,6 +160,16 @@ interface LibraryViewProps {
   scopeDescription?: string;
   scopedProjectIds?: string[];
   issueFilterOverride?: "all" | "path" | "sync" | "pdf";
+}
+
+function BrandMark({ className = "" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <rect width="32" height="32" rx="8" fill="currentColor" />
+      <path d="M7 10h7l2 3h9v11H7z" fill="none" stroke="white" strokeWidth="2.4" strokeLinejoin="round" />
+      <path d="M11 18h10" stroke="#10a37f" strokeWidth="2.4" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 function ProjectCachedSyncBadge({ record }: { record?: ProjectStatusRecord }) {
@@ -1851,14 +1861,14 @@ export default function App() {
   }
 
   if (loading) {
-    return <div className="app-loading"><img className="brand-icon loading-brand-icon" src={appIcon} alt="" aria-hidden="true" /><p>正在读取本地项目库…</p></div>;
+    return <div className="app-loading"><BrandMark className="brand-icon loading-brand-icon" /><p>正在读取本地项目库…</p></div>;
   }
 
   return (
     <div className={`app-shell ${navOpen ? "nav-open" : "nav-closed"}`}>
       <aside className="app-sidebar" aria-label="应用侧栏">
         <div className="brand-row">
-          <img className="brand-icon" src={appIcon} alt="" aria-hidden="true" />
+          <BrandMark className="brand-icon" />
           <div className="brand-copy"><strong>LaTeX 管理器</strong><span>Project Manager</span></div>
           <IconButton label="收起侧栏" onClick={() => setNavOpen(false)}><PanelLeftClose size={17} /></IconButton>
         </div>
@@ -1902,6 +1912,7 @@ export default function App() {
             </div>
           </aside>
         )}
+        <Suspense fallback={<div className="app-loading" role="status">正在打开…</div>}>
         {selected ? (
           <ProjectView key={selected.id} api={runtime.api} project={selected} isDemo={runtime.isDemo} initialTab={selectedProjectTab} onBack={() => goLibrary()} onNotify={setToast} onProjectChange={(updated) => { setSelected(updated); setProjects((current) => current.map((project) => project.id === updated.id ? updated : project)); }} />
         ) : settingsOpen ? (
@@ -1914,10 +1925,13 @@ export default function App() {
             {libraryScope.kind === "research" ? <GlobalResearchLibrary api={runtime.api} projects={projects} onNotify={setToast} onOpenProject={(project) => { setSelectedProjectTab("references"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : libraryScope.kind === "templates" ? <TemplateLibraryView api={runtime.api} projects={projects} isDemo={runtime.isDemo} onNotify={setToast} onProjectsChange={setProjects} onOpenProject={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : libraryScope.kind === "attention" ? <NeedsAttentionView api={runtime.api} projects={projects} onProjectsChange={setProjects} onNotify={setToast} onOpenSettings={() => { setSelected(null); setSyncCenterOpen(false); setSettingsOpen(true); }} onOpenActivity={() => { setSelected(null); setSettingsOpen(false); setSyncCenterOpen(true); }} onOpenProject={(project, tab) => { setSelectedProjectTab(tab); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} /> : <LibraryView api={runtime.api} projects={projects} filter={filter} activeTag={activeTag} availableTags={tags} onFilterChange={(next) => { setFilter(next); setLibraryScope({ kind: "standard" }); }} onActiveTagChange={(tag) => { setActiveTag(tag); setLibraryScope({ kind: "standard" }); }} scopeTitle={scopeMeta.title} scopeDescription={scopeMeta.description} scopedProjectIds={scopeMeta.ids} issueFilterOverride={scopeMeta.issue} onManage={(project) => { setSelectedProjectTab("overview"); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} onProjectsChange={setProjects} onNotify={setToast} isDemo={runtime.isDemo} openImportNonce={openImportNonce} />}
           </>
         )}
+        </Suspense>
       </main>
       <GlobalSearchPalette api={runtime.api} projects={projects} open={globalSearchOpen} onClose={() => setGlobalSearchOpen(false)} onNotify={setToast} onOpenProject={(project, tab) => { setSelectedProjectTab(tab); setSettingsOpen(false); setSyncCenterOpen(false); setSelected(project); }} />
-      {desktopMigration && <DesktopMigrationWizard preview={desktopMigration} onApply={applyDesktopMigration} onLater={() => setDesktopMigration(null)} />}
-      {onboardingOpen && <OnboardingWizard api={runtime.api} projects={projects} onComplete={(result) => void completeOnboarding(result)} onNotify={setToast} />}
+      <Suspense fallback={null}>
+        {desktopMigration && <DesktopMigrationWizard preview={desktopMigration} onApply={applyDesktopMigration} onLater={() => setDesktopMigration(null)} />}
+        {onboardingOpen && <OnboardingWizard api={runtime.api} projects={projects} onComplete={(result) => void completeOnboarding(result)} onNotify={setToast} />}
+      </Suspense>
       {toast && <div className="toast" role="status">{toast}<IconButton label="关闭通知" onClick={() => setToast(null)}><X size={15} /></IconButton></div>}
     </div>
   );
