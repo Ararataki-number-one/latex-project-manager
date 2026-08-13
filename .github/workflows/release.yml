@@ -89,6 +89,17 @@ jobs:
       - run: pnpm test
       - run: pnpm test:e2e
       - run: pnpm build
+      - name: Ensure Electron runtime for source smoke
+        shell: pwsh
+        run: |
+          $electron = 'node_modules/electron/dist/electron.exe'
+          if (-not (Test-Path -LiteralPath $electron)) {
+            Remove-Item Env:ELECTRON_SKIP_BINARY_DOWNLOAD -ErrorAction SilentlyContinue
+            node node_modules/electron/install.js
+          }
+          if (-not (Test-Path -LiteralPath $electron)) {
+            throw 'Electron runtime was not installed for the source smoke test.'
+          }
       - name: Smoke-test source Electron process
         shell: pwsh
         run: |
