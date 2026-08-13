@@ -23,6 +23,13 @@ $portableUserData = Join-Path $smokeRoot "portable-user-data"
 New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
 $portableProcess = $null
 
+function Stop-ProcessTreeBestEffort([int]$ProcessId) {
+  & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
+  # A child may exit between enumeration and taskkill. That is already the
+  # desired cleanup result and must not turn a successful smoke test red.
+  $global:LASTEXITCODE = 0
+}
+
 function Assert-SmokePath([string]$Path) {
   $absolute = [IO.Path]::GetFullPath($Path)
   $root = [IO.Path]::GetFullPath($smokeRoot) + [IO.Path]::DirectorySeparatorChar
@@ -67,19 +74,22 @@ try {
   if (-not (Test-Path -LiteralPath $portableDatabase)) {
     throw "Portable application did not initialize its SQLite catalog within 30 seconds."
   }
-  & taskkill.exe /PID $portableProcess.Id /T /F | Out-Null
+  Stop-ProcessTreeBestEffort $portableProcess.Id
+  [void]$portableProcess.WaitForExit(5000)
+  $portableProcess.Refresh()
   Write-Host "Windows Setup install/uninstall and portable startup smoke tests passed."
 } finally {
   if ($portableProcess -and -not $portableProcess.HasExited) {
-    & taskkill.exe /PID $portableProcess.Id /T /F | Out-Null
+    Stop-ProcessTreeBestEffort $portableProcess.Id
   }
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains($portableUserData) } |
-    ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F | Out-Null }
+    ForEach-Object { Stop-ProcessTreeBestEffort $_.ProcessId }
   Remove-Item Env:ELECTRON_SMOKE_EXECUTABLE -ErrorAction SilentlyContinue
   Remove-Item Env:ELECTRON_SMOKE_USER_DATA -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $smokeRoot) {
     Assert-SmokePath (Join-Path $smokeRoot "cleanup-sentinel")
     Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
+  $global:LASTEXITCODE = 0
 }
